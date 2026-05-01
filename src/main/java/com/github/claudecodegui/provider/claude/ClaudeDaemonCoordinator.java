@@ -3,7 +3,11 @@ package com.github.claudecodegui.provider.claude;
 import com.github.claudecodegui.bridge.BridgeDirectoryResolver;
 import com.github.claudecodegui.bridge.EnvironmentConfigurator;
 import com.github.claudecodegui.bridge.NodeDetector;
-import com.github.claudecodegui.provider.common.DaemonBridge;
+import com.github.claudecodegui.permission.ControlMessageHandler;
+import com.github.claudecodegui.provider.common.IBridge;
+import com.github.claudecodegui.provider.common.LocalBridge;
+import com.github.claudecodegui.provider.common.RemoteBridge;
+import com.github.claudecodegui.settings.RemoteModeContext;
 import com.google.gson.JsonObject;
 import com.intellij.openapi.diagnostic.Logger;
 
@@ -23,10 +27,11 @@ class ClaudeDaemonCoordinator {
     private final Supplier<BridgeDirectoryResolver> directoryResolverSupplier;
     private final EnvironmentConfigurator envConfigurator;
 
-    private volatile DaemonBridge daemonBridge;
+    private volatile IBridge daemonBridge;
     private final Object daemonLock = new Object();
     private volatile long daemonRetryAfter = 0;
     private volatile CompletableFuture<?> prewarmFuture;
+    private volatile ControlMessageHandler controlMessageHandler;
 
     ClaudeDaemonCoordinator(
             Logger log,
@@ -40,8 +45,8 @@ class ClaudeDaemonCoordinator {
         this.envConfigurator = envConfigurator;
     }
 
-    DaemonBridge getDaemonBridge() {
-        DaemonBridge current = daemonBridge;
+    IBridge getDaemonBridge() {
+        IBridge current = daemonBridge;
         if (current != null && current.isAlive()) {
             return current;
         }
@@ -61,11 +66,23 @@ class ClaudeDaemonCoordinator {
                     current.stop();
                 }
 
-                DaemonBridge newBridge = new DaemonBridge(
-                        nodeDetector,
-                        directoryResolverSupplier.get(),
-                        envConfigurator
-                );
+                IBridge newBridge;
+                RemoteModeContext rmCtx = RemoteModeContext.getInstance();
+                if (rmCtx != null && rmCtx.isRemote()) {
+                    String url = rmCtx.remoteServerUrl();
+                    log.info("[DaemonCoordinator] Remote mode enabled, baseUrl=" + url);
+                    newBridge = new RemoteBridge(url);
+                } else {
+                    newBridge = new LocalBridge(
+                            nodeDetector,
+                            directoryResolverSupplier.get(),
+                            envConfigurator
+                    );
+                }
+                ControlMessageHandler handler = controlMessageHandler;
+                if (handler != null) {
+                    newBridge.setControlMessageHandler(handler);
+                }
                 if (newBridge.start()) {
                     daemonBridge = newBridge;
                     daemonRetryAfter = 0;
@@ -80,8 +97,22 @@ class ClaudeDaemonCoordinator {
         }
     }
 
-    DaemonBridge getCurrentDaemonBridge() {
+    IBridge getCurrentDaemonBridge() {
         return daemonBridge;
+    }
+
+    /**
+     * Inject the control-message handler used by remote-mode bridges. Safe to
+     * call before or after {@link #getDaemonBridge()} — applied to any
+     * existing bridge and remembered for future bridge instances.
+     */
+    void setControlMessageHandler(ControlMessageHandler handler) {
+        this.controlMessageHandler = handler;
+        IBridge current = daemonBridge;
+        if (current != null) {
+            try { current.setControlMessageHandler(handler); }
+            catch (Exception e) { log.debug("setControlMessageHandler failed: " + e.getMessage()); }
+        }
     }
 
     void shutdownDaemon() {
@@ -91,7 +122,7 @@ class ClaudeDaemonCoordinator {
             prewarmFuture = null;
         }
 
-        DaemonBridge current = daemonBridge;
+        IBridge current = daemonBridge;
         if (current != null) {
             current.stop();
             daemonBridge = null;
@@ -107,7 +138,7 @@ class ClaudeDaemonCoordinator {
 
         prewarmFuture = CompletableFuture.runAsync(() -> {
             try {
-                DaemonBridge daemon = getDaemonBridge();
+                IBridge daemon = getDaemonBridge();
                 if (daemon == null) {
                     log.info("[DaemonCoordinator] Daemon prewarm skipped (daemon unavailable)");
                     return;
@@ -125,7 +156,7 @@ class ClaudeDaemonCoordinator {
                 CompletableFuture<Boolean> preconnectFuture = daemon.sendCommand(
                         "claude.preconnect",
                         params,
-                        new DaemonBridge.DaemonOutputCallback() {
+                        new IBridge.DaemonOutputCallback() {
                             @Override
                             public void onLine(String line) {
                                 if (line.startsWith("[SEND_ERROR]")) {
@@ -160,7 +191,7 @@ class ClaudeDaemonCoordinator {
     }
 
     void resetPersistentRuntime(String runtimeSessionEpoch) {
-        DaemonBridge daemon = daemonBridge;
+        IBridge daemon = daemonBridge;
         if (daemon == null || !daemon.isAlive()) {
             log.info("[DaemonCoordinator] Skip runtime reset; daemon unavailable for epoch="
                     + (runtimeSessionEpoch != null ? runtimeSessionEpoch : "(none)"));
@@ -173,7 +204,7 @@ class ClaudeDaemonCoordinator {
             CompletableFuture<Boolean> resetFuture = daemon.sendCommand(
                     "claude.resetRuntime",
                     params,
-                    new DaemonBridge.DaemonOutputCallback() {
+                    new IBridge.DaemonOutputCallback() {
                         @Override
                         public void onLine(String line) {
                             if (line != null && !line.isBlank()) {

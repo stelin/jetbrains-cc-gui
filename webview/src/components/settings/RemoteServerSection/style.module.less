@@ -1,0 +1,134 @@
+.section {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.subtitle {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground, #888);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.label {
+  min-width: 64px;
+  font-size: 12px;
+  color: var(--vscode-foreground, #d4d4d4);
+}
+
+.radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.input {
+  flex: 1;
+  min-width: 220px;
+  padding: 4px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  background: var(--vscode-input-background, #2a2a2a);
+  color: var(--vscode-input-foreground, #d4d4d4);
+  border: 1px solid var(--vscode-input-border, #3c3c3c);
+  border-radius: 3px;
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--vscode-focusBorder, #c084fc);
+}
+
+.btn {
+  padding: 4px 12px;
+  font-size: 12px;
+  background: var(--vscode-button-background, #2a2a2a);
+  color: var(--vscode-button-foreground, #d4d4d4);
+  border: 1px solid var(--vscode-button-border, #3c3c3c);
+  border-radius: 3px;
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--vscode-button-hoverBackground, #3a3a3a);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.testOk {
+  font-size: 11px;
+  color: #4ec9b0;
+  padding: 6px 8px;
+  background: rgba(78, 201, 176, 0.08);
+  border-radius: 3px;
+}
+
+.testFail {
+  font-size: 11px;
+  color: #f48771;
+  padding: 6px 8px;
+  background: rgba(244, 135, 113, 0.08);
+  border-radius: 3px;
+  word-break: break-all;
+}
+
+.testInfo {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground, #888);
+  padding: 6px 8px;
+}
+
+.notice {
+  margin-top: 4px;
+  padding: 10px 12px;
+  background: rgba(220, 220, 170, 0.06);
+  border: 1px solid rgba(220, 220, 170, 0.3);
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.noticeTitle {
+  color: #dcdcaa;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.notice ul {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--vscode-foreground, #d4d4d4);
+}
+
+.notice li {
+  margin: 1px 0;
+}
+
+.noticeFoot {
+  margin-top: 8px;
+  color: var(--vscode-descriptionForeground, #888);
+  font-style: italic;
+}

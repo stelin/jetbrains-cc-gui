@@ -330,6 +330,9 @@
     "agentsDesc": "Manage and configure AI agents",
     "skills": "Skills",
     "skillsDesc": "Manage and configure skill modules",
+    "remote": {
+      "title": "Remote Mode"
+    },
     "other": {
       "title": "Other Settings",
       "description": "Configure miscellaneous settings",

@@ -514,6 +514,114 @@ public class ProjectConfigHandler {
         }
     }
 
+    // ──────────────── Remote Mode (ai-bridge-server) ────────────────
+
+    public void handleGetRemoteMode() {
+        try {
+            String mode = settingsService.getDaemonMode();
+            String url = settingsService.getRemoteServerUrl();
+            ApplicationManager.getApplication().invokeLater(() -> {
+                JsonObject r = new JsonObject();
+                r.addProperty("daemonMode", mode);
+                r.addProperty("remoteServerUrl", url);
+                context.callJavaScript("window.updateRemoteMode", context.escapeJs(gson.toJson(r)));
+            });
+        } catch (Exception e) {
+            LOG.error("[ProjectConfigHandler] handleGetRemoteMode failed: " + e.getMessage(), e);
+        }
+    }
+
+    public void handleSetRemoteMode(String content) {
+        try {
+            JsonObject json = gson.fromJson(content, JsonObject.class);
+            String mode = (json != null && json.has("daemonMode") && !json.get("daemonMode").isJsonNull())
+                    ? json.get("daemonMode").getAsString() : "local";
+            String url = (json != null && json.has("remoteServerUrl") && !json.get("remoteServerUrl").isJsonNull())
+                    ? json.get("remoteServerUrl").getAsString() : settingsService.getRemoteServerUrl();
+
+            String oldMode = settingsService.getDaemonMode();
+            String oldUrl = settingsService.getRemoteServerUrl();
+            boolean changed = !oldMode.equals(mode) || !java.util.Objects.equals(oldUrl, url);
+
+            settingsService.setDaemonMode(mode);
+            settingsService.setRemoteServerUrl(url);
+            LOG.info("[ProjectConfigHandler] Set daemonMode=" + mode + " remoteServerUrl=" + url
+                    + " (changed=" + changed + ")");
+
+            // If mode or URL changed, tear down current Claude daemon so the
+            // next request lazily rebuilds via the new code path. Codex spawns
+            // per-request and doesn't maintain a persistent daemon, so no
+            // shutdown is needed for it.
+            if (changed) {
+                CompletableFuture.runAsync(() -> {
+                    try {
+                        if (context.getClaudeSDKBridge() != null) {
+                            context.getClaudeSDKBridge().shutdownDaemon();
+                            LOG.info("[ProjectConfigHandler] ClaudeSDKBridge daemon shut down for mode switch");
+                        }
+                    } catch (Exception se) {
+                        LOG.warn("[ProjectConfigHandler] ClaudeSDKBridge shutdown failed: " + se.getMessage());
+                    }
+                });
+            }
+
+            ApplicationManager.getApplication().invokeLater(() -> {
+                JsonObject r = new JsonObject();
+                r.addProperty("daemonMode", settingsService.getDaemonMode());
+                r.addProperty("remoteServerUrl", settingsService.getRemoteServerUrl());
+                r.addProperty("rebuilt", changed);
+                context.callJavaScript("window.updateRemoteMode", context.escapeJs(gson.toJson(r)));
+            });
+        } catch (Exception e) {
+            LOG.error("[ProjectConfigHandler] handleSetRemoteMode failed: " + e.getMessage(), e);
+            ApplicationManager.getApplication().invokeLater(() ->
+                context.callJavaScript("window.showError", context.escapeJs("保存远程模式配置失败")));
+        }
+    }
+
+    public void handleTestRemoteConnection(String content) {
+        CompletableFuture.runAsync(() -> {
+            JsonObject r = new JsonObject();
+            String url;
+            try {
+                JsonObject json = gson.fromJson(content, JsonObject.class);
+                url = (json != null && json.has("remoteServerUrl") && !json.get("remoteServerUrl").isJsonNull())
+                        ? json.get("remoteServerUrl").getAsString().trim() : settingsService.getRemoteServerUrl();
+                if (url.endsWith("/")) url = url.substring(0, url.length() - 1);
+                java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
+                        .connectTimeout(java.time.Duration.ofSeconds(5)).build();
+                java.net.http.HttpResponse<String> resp = client.send(
+                        java.net.http.HttpRequest.newBuilder()
+                                .uri(java.net.URI.create(url + "/health"))
+                                .timeout(java.time.Duration.ofSeconds(5))
+                                .GET().build(),
+                        java.net.http.HttpResponse.BodyHandlers.ofString()
+                );
+                boolean ok = resp.statusCode() == 200;
+                r.addProperty("ok", ok);
+                r.addProperty("status", resp.statusCode());
+                r.addProperty("body", resp.body() == null ? "" : resp.body());
+                if (ok) {
+                    try {
+                        java.net.http.HttpResponse<String> v = client.send(
+                                java.net.http.HttpRequest.newBuilder()
+                                        .uri(java.net.URI.create(url + "/version"))
+                                        .timeout(java.time.Duration.ofSeconds(5))
+                                        .GET().build(),
+                                java.net.http.HttpResponse.BodyHandlers.ofString()
+                        );
+                        r.addProperty("version", v.body());
+                    } catch (Exception ignore) {}
+                }
+            } catch (Exception e) {
+                r.addProperty("ok", false);
+                r.addProperty("error", e.getMessage());
+            }
+            ApplicationManager.getApplication().invokeLater(() ->
+                context.callJavaScript("window.updateRemoteConnectionTest", context.escapeJs(gson.toJson(r))));
+        });
+    }
+
     private void dispatchUiFontConfigUpdate() {
         try {
             String uiFontConfigJson = FontConfigService.getResolvedUiFontConfigJson(settingsService);

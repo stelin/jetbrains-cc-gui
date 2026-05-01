@@ -1171,6 +1171,53 @@ public class CodemossSettingsService {
         LOG.info("[CodemossSettings] Set status bar widget enabled: " + enabled);
     }
 
+    // ==================== Remote Mode (ai-bridge-server) ====================
+
+    /** Daemon mode: "local" or "remote" (default). */
+    public String getDaemonMode() {
+        try {
+            JsonObject config = readConfig();
+            if (config.has("daemonMode") && !config.get("daemonMode").isJsonNull()) {
+                String v = config.get("daemonMode").getAsString();
+                if ("local".equalsIgnoreCase(v)) return "local";
+                if ("remote".equalsIgnoreCase(v)) return "remote";
+            }
+        } catch (IOException ignored) {}
+        return "remote";
+    }
+
+    public void setDaemonMode(String mode) throws IOException {
+        String normalized = "remote".equalsIgnoreCase(mode) ? "remote" : "local";
+        JsonObject config = readConfig();
+        config.addProperty("daemonMode", normalized);
+        writeConfig(config);
+        LOG.info("[CodemossSettings] Set daemonMode: " + normalized);
+    }
+
+    public boolean isRemoteMode() {
+        return "remote".equals(getDaemonMode());
+    }
+
+    /** Base URL of the remote ai-bridge-server, e.g. http://localhost:3284 . */
+    public String getRemoteServerUrl() {
+        try {
+            JsonObject config = readConfig();
+            if (config.has("remoteServerUrl") && !config.get("remoteServerUrl").isJsonNull()) {
+                return config.get("remoteServerUrl").getAsString();
+            }
+        } catch (IOException ignored) {}
+        return "http://localhost:3284";
+    }
+
+    public void setRemoteServerUrl(String url) throws IOException {
+        String trimmed = url == null ? "" : url.trim();
+        if (trimmed.endsWith("/")) trimmed = trimmed.substring(0, trimmed.length() - 1);
+        JsonObject config = readConfig();
+        config.addProperty("remoteServerUrl", trimmed);
+        writeConfig(config);
+        LOG.info("[CodemossSettings] Set remoteServerUrl: " + trimmed);
+    }
+
     // ==================== Codex Provider Management ====================
 
     public List<JsonObject> getCodexProviders() throws IOException {

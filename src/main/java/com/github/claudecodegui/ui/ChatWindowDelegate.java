@@ -26,6 +26,8 @@ import com.github.claudecodegui.handler.file.FileExportHandler;
 import com.github.claudecodegui.handler.file.FileHandler;
 import com.github.claudecodegui.handler.file.UndoFileHandler;
 import com.github.claudecodegui.permission.PermissionService;
+import com.github.claudecodegui.permission.RemotePermissionAdapter;
+import com.github.claudecodegui.settings.RemoteModeContext;
 import com.github.claudecodegui.provider.claude.ClaudeSDKBridge;
 import com.github.claudecodegui.provider.codex.CodexSDKBridge;
 import com.github.claudecodegui.provider.common.MessageCallback;
@@ -216,6 +218,20 @@ public class ChatWindowDelegate {
         permissionService.registerPlanApprovalDialogShower(project, (requestId, planData) ->
             host.getPermissionHandler().showPlanApprovalDialog(requestId, planData));
         LOG.info("Started permission service with frontend dialog, AskUserQuestion dialog, and PlanApproval dialog for project: " + project.getName());
+
+        // Remote mode: wire control-message handler so daemon's _ctrl messages
+        // (permission/ask/plan) surface in the same dialog UI as local mode.
+        if (RemoteModeContext.getInstance().isRemote()) {
+            RemotePermissionAdapter adapter = new RemotePermissionAdapter(project, sessionId);
+            claudeSDKBridge.setControlMessageHandler(adapter);
+            if (codexSDKBridge != null) {
+                // CodexSDKBridge would need an analogous setControlMessageHandler;
+                // for now Codex remote mode shares the same coordinator pattern.
+                LOG.info("Remote mode: control handler wired for ClaudeSDKBridge (Codex pending)");
+            } else {
+                LOG.info("Remote mode: control handler wired");
+            }
+        }
         return sessionId;
     }
 

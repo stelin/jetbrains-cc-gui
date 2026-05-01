@@ -17,11 +17,20 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Manages a long-running Node.js daemon process for AI SDK communication.
+ * Local-mode bridge: spawns a long-running Node.js daemon child process and
+ * communicates over stdin/stdout NDJSON.
  *
- * Instead of spawning a new Node.js process per request (which adds ~5-10s of
- * overhead due to SDK loading), this class maintains a single daemon process
- * that pre-loads the SDK once and handles multiple requests via NDJSON over stdin/stdout.
+ * <p>This is the original {@code DaemonBridge} class, renamed and adjusted to
+ * implement {@link IBridge} so it can be transparently swapped with
+ * {@link RemoteBridge} for the remote / docker deployment mode.
+ *
+ * <p>Permission / AskUser / Plan IPC under local mode flows via the existing
+ * file IPC under {@code ~/.claude/permissions/} watched by
+ * {@code PermissionRequestWatcher}; therefore {@link #setControlMessageHandler}
+ * is a no-op for this implementation.
+ *
+ * <p>Behaviour and protocol are otherwise identical to the original
+ * implementation — no business-logic changes.
  *
  * Protocol:
  * - Java writes JSON requests to daemon's stdin (one per line)
@@ -30,9 +39,9 @@ import java.util.concurrent.atomic.AtomicLong;
  * - Command output lines have an "id" field matching the request
  * - Command completion is signaled by {"id":"X","done":true}
  */
-public class DaemonBridge {
+public class LocalBridge implements IBridge {
 
-    private static final Logger LOG = Logger.getInstance(DaemonBridge.class);
+    private static final Logger LOG = Logger.getInstance(LocalBridge.class);
     private static final String DAEMON_SCRIPT = "daemon.js";
     private static final long DAEMON_START_TIMEOUT_MS = 30_000;
     private static final long HEARTBEAT_INTERVAL_MS = 15_000;
@@ -64,9 +73,9 @@ public class DaemonBridge {
     private final ConcurrentHashMap<String, RequestHandler> pendingRequests = new ConcurrentHashMap<>();
 
     // Lifecycle listener
-    private volatile DaemonLifecycleListener lifecycleListener;
+    private volatile IBridge.DaemonLifecycleListener lifecycleListener;
 
-    public DaemonBridge(
+    public LocalBridge(
             NodeDetector nodeDetector,
             BridgeDirectoryResolver directoryResolver,
             EnvironmentConfigurator envConfigurator
@@ -86,33 +95,34 @@ public class DaemonBridge {
      *
      * @return true if daemon started successfully
      */
+    @Override
     public boolean start() {
         synchronized (startLock) {
             if (isRunning.get()) {
-                LOG.info("[DaemonBridge] Daemon already running");
+                LOG.info("[LocalBridge] Daemon already running");
                 return true;
             }
 
-            LOG.info("[DaemonBridge] Starting daemon process...");
+            LOG.info("[LocalBridge] Starting daemon process...");
             CountDownLatch latch = new CountDownLatch(1);
             readyLatch = latch;
 
             try {
                 File bridgeDir = directoryResolver.findSdkDir();
                 if (bridgeDir == null) {
-                    LOG.error("[DaemonBridge] Bridge directory not found");
+                    LOG.error("[LocalBridge] Bridge directory not found");
                     return false;
                 }
 
                 File daemonScript = new File(bridgeDir, DAEMON_SCRIPT);
                 if (!daemonScript.exists()) {
-                    LOG.error("[DaemonBridge] daemon.js not found at: " + daemonScript.getAbsolutePath());
+                    LOG.error("[LocalBridge] daemon.js not found at: " + daemonScript.getAbsolutePath());
                     return false;
                 }
 
                 String nodePath = nodeDetector.findNodeExecutable();
                 if (nodePath == null) {
-                    LOG.error("[DaemonBridge] Node.js not found");
+                    LOG.error("[LocalBridge] Node.js not found");
                     return false;
                 }
 
@@ -131,7 +141,7 @@ public class DaemonBridge {
                 lastSuccessfulStart.set(System.currentTimeMillis());
                 markDaemonActivity();
 
-                LOG.info("[DaemonBridge] Daemon process started, PID: " + daemonProcess.pid());
+                LOG.info("[LocalBridge] Daemon process started, PID: " + daemonProcess.pid());
 
                 // Setup stdin writer
                 daemonStdin = new BufferedWriter(
@@ -152,15 +162,15 @@ public class DaemonBridge {
                         break;
                     }
                     if (daemonProcess == null || !daemonProcess.isAlive() || !isRunning.get()) {
-                        LOG.error("[DaemonBridge] Daemon exited before signaling ready");
+                        LOG.error("[LocalBridge] Daemon exited before signaling ready");
                         isRunning.set(false);
                         return false;
                     }
                 }
                 if (!ready) {
-                    LOG.warn("[DaemonBridge] Daemon did not signal ready within timeout");
+                    LOG.warn("[LocalBridge] Daemon did not signal ready within timeout");
                     if (daemonProcess == null || !daemonProcess.isAlive() || !isRunning.get()) {
-                        LOG.error("[DaemonBridge] Daemon is not alive after ready timeout");
+                        LOG.error("[LocalBridge] Daemon is not alive after ready timeout");
                         isRunning.set(false);
                         return false;
                     }
@@ -169,11 +179,11 @@ public class DaemonBridge {
                 // Start heartbeat thread
                 startHeartbeatThread();
 
-                LOG.info("[DaemonBridge] Daemon is ready. SDK preloaded: " + sdkPreloaded.get());
+                LOG.info("[LocalBridge] Daemon is ready. SDK preloaded: " + sdkPreloaded.get());
                 return true;
 
             } catch (Exception e) {
-                LOG.error("[DaemonBridge] Failed to start daemon", e);
+                LOG.error("[LocalBridge] Failed to start daemon", e);
                 isRunning.set(false);
                 return false;
             }
@@ -183,8 +193,9 @@ public class DaemonBridge {
     /**
      * Stop the daemon process gracefully.
      */
+    @Override
     public void stop() {
-        LOG.info("[DaemonBridge] Stopping daemon...");
+        LOG.info("[LocalBridge] Stopping daemon...");
         isRunning.set(false);
 
         // Cancel all pending requests
@@ -207,7 +218,7 @@ public class DaemonBridge {
                 }
             }
         } catch (IOException e) {
-            LOG.debug("[DaemonBridge] Error sending shutdown command: " + e.getMessage());
+            LOG.debug("[LocalBridge] Error sending shutdown command: " + e.getMessage());
         }
 
         // Close stdin (triggers daemon shutdown if command wasn't received)
@@ -216,7 +227,7 @@ public class DaemonBridge {
                 daemonStdin.close();
             }
         } catch (IOException e) {
-            LOG.debug("[DaemonBridge] Error closing stdin: " + e.getMessage());
+            LOG.debug("[LocalBridge] Error closing stdin: " + e.getMessage());
         }
 
         // Kill process if still alive and wait for termination
@@ -235,7 +246,7 @@ public class DaemonBridge {
             try { heartbeatThread.join(2000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         }
 
-        LOG.info("[DaemonBridge] Daemon stopped");
+        LOG.info("[LocalBridge] Daemon stopped");
     }
 
     /**
@@ -243,6 +254,7 @@ public class DaemonBridge {
      * The abort bypasses the daemon's command queue and is processed immediately.
      * Also completes all pending request futures so Java-side blocking calls unblock.
      */
+    @Override
     public void sendAbort() {
         // Send abort command to daemon so it stops the active SDK query
         try {
@@ -255,10 +267,10 @@ public class DaemonBridge {
                     daemonStdin.newLine();
                     daemonStdin.flush();
                 }
-                LOG.info("[DaemonBridge] Sent abort command");
+                LOG.info("[LocalBridge] Sent abort command");
             }
         } catch (IOException e) {
-            LOG.debug("[DaemonBridge] Error sending abort command: " + e.getMessage());
+            LOG.debug("[LocalBridge] Error sending abort command: " + e.getMessage());
         }
 
         // Complete all pending request futures so Java-side callers unblock
@@ -273,6 +285,7 @@ public class DaemonBridge {
     /**
      * Check if the daemon is running and healthy.
      */
+    @Override
     public boolean isAlive() {
         return isRunning.get() && daemonProcess != null && daemonProcess.isAlive();
     }
@@ -280,6 +293,7 @@ public class DaemonBridge {
     /**
      * Ensure the daemon is running, starting it if necessary.
      */
+    @Override
     public boolean ensureRunning() {
         if (isAlive()) return true;
         return start();
@@ -301,10 +315,11 @@ public class DaemonBridge {
      * @param callback Callback for processing output lines
      * @return CompletableFuture that completes when the command finishes
      */
+    @Override
     public CompletableFuture<Boolean> sendCommand(
             String method,
             JsonObject params,
-            DaemonOutputCallback callback
+            IBridge.DaemonOutputCallback callback
     ) {
         if (!ensureRunning()) {
             CompletableFuture<Boolean> f = new CompletableFuture<>();
@@ -343,11 +358,11 @@ public class DaemonBridge {
                 daemonStdin.newLine();
                 daemonStdin.flush();
             }
-            LOG.info("[DaemonBridge] Sent request " + requestId + ": " + method);
+            LOG.info("[LocalBridge] Sent request " + requestId + ": " + method);
         } catch (IOException e) {
             pendingRequests.remove(requestId);
             future.completeExceptionally(e);
-            LOG.error("[DaemonBridge] Failed to send request: " + e.getMessage());
+            LOG.error("[LocalBridge] Failed to send request: " + e.getMessage());
         }
 
         return future;
@@ -367,12 +382,12 @@ public class DaemonBridge {
                 }
             } catch (IOException e) {
                 if (isRunning.get()) {
-                    LOG.error("[DaemonBridge] Reader thread error: " + e.getMessage());
+                    LOG.error("[LocalBridge] Reader thread error: " + e.getMessage());
                 }
             } finally {
                 handleDaemonDeath();
             }
-        }, "DaemonBridge-Reader");
+        }, "LocalBridge-Reader");
         readerThread.setDaemon(true);
         readerThread.start();
     }
@@ -383,12 +398,12 @@ public class DaemonBridge {
                     new InputStreamReader(daemonProcess.getErrorStream(), StandardCharsets.UTF_8))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
-                    LOG.debug("[DaemonBridge:stderr] " + line);
+                    LOG.debug("[LocalBridge:stderr] " + line);
                 }
             } catch (IOException e) {
                 // Expected on shutdown
             }
-        }, "DaemonBridge-Stderr");
+        }, "LocalBridge-Stderr");
         stderrThread.setDaemon(true);
         stderrThread.start();
     }
@@ -411,7 +426,7 @@ public class DaemonBridge {
                     long activityAgeMs = currentTime - lastDaemonActivity.get();
                     int activeRequests = activeRequestCount.get();
                     if (shouldTreatAsUnresponsive(heartbeatAgeMs, activityAgeMs, activeRequests)) {
-                        LOG.warn("[DaemonBridge] Daemon unresponsive (heartbeatAgeMs=" + heartbeatAgeMs
+                        LOG.warn("[LocalBridge] Daemon unresponsive (heartbeatAgeMs=" + heartbeatAgeMs
                                 + ", activityAgeMs=" + activityAgeMs
                                 + ", activeRequests=" + activeRequests + "), treating as dead");
                         handleDaemonDeath();
@@ -430,12 +445,12 @@ public class DaemonBridge {
                 } catch (InterruptedException e) {
                     break;
                 } catch (IOException e) {
-                    LOG.warn("[DaemonBridge] Heartbeat failed: " + e.getMessage());
+                    LOG.warn("[LocalBridge] Heartbeat failed: " + e.getMessage());
                     handleDaemonDeath();
                     break;
                 }
             }
-        }, "DaemonBridge-Heartbeat");
+        }, "LocalBridge-Heartbeat");
         heartbeatThread.setDaemon(true);
         heartbeatThread.start();
     }
@@ -449,7 +464,7 @@ public class DaemonBridge {
         // Skip non-JSON lines (SDK debug output, permission logs, etc.)
         String trimmed = jsonLine.trim();
         if (trimmed.isEmpty() || trimmed.charAt(0) != '{') {
-            LOG.debug("[DaemonBridge] Non-JSON output: " + trimmed);
+            LOG.debug("[LocalBridge] Non-JSON output: " + trimmed);
             return;
         }
 
@@ -489,7 +504,7 @@ public class DaemonBridge {
 
             RequestHandler handler = pendingRequests.get(id);
             if (handler == null) {
-                LOG.debug("[DaemonBridge] No handler for request " + id);
+                LOG.debug("[LocalBridge] No handler for request " + id);
                 return;
             }
 
@@ -516,13 +531,13 @@ public class DaemonBridge {
             }
 
         } catch (Exception e) {
-            LOG.error("[DaemonBridge] Failed to parse daemon output: " + jsonLine, e);
+            LOG.error("[LocalBridge] Failed to parse daemon output: " + jsonLine, e);
         }
     }
 
     private void handleDaemonEvent(JsonObject obj) {
         String event = obj.has("event") ? obj.get("event").getAsString() : "unknown";
-        LOG.info("[DaemonBridge] Daemon event: " + event);
+        LOG.info("[LocalBridge] Daemon event: " + event);
 
         switch (event) {
             case "ready":
@@ -537,20 +552,20 @@ public class DaemonBridge {
 
             case "sdk_loaded":
                 sdkPreloaded.set(true);
-                LOG.info("[DaemonBridge] SDK pre-loaded successfully");
+                LOG.info("[LocalBridge] SDK pre-loaded successfully");
                 break;
 
             case "sdk_load_error":
                 String error = obj.has("error") ? obj.get("error").getAsString() : "unknown";
-                LOG.warn("[DaemonBridge] SDK pre-load failed: " + error);
+                LOG.warn("[LocalBridge] SDK pre-load failed: " + error);
                 break;
 
             case "shutdown":
-                LOG.info("[DaemonBridge] Daemon shutting down");
+                LOG.info("[LocalBridge] Daemon shutting down");
                 break;
 
             default:
-                LOG.debug("[DaemonBridge] Unhandled daemon event: " + event);
+                LOG.debug("[LocalBridge] Unhandled daemon event: " + event);
         }
     }
 
@@ -561,12 +576,12 @@ public class DaemonBridge {
     private void handleDaemonDeath() {
         if (!isRunning.compareAndSet(true, false)) return;
 
-        LOG.warn("[DaemonBridge] Daemon process died");
+        LOG.warn("[LocalBridge] Daemon process died");
 
         // Forcefully kill the old process if still alive (e.g., heartbeat timeout)
         Process oldProcess = daemonProcess;
         if (oldProcess != null && oldProcess.isAlive()) {
-            LOG.info("[DaemonBridge] Forcefully killing unresponsive daemon process (PID: "
+            LOG.info("[LocalBridge] Forcefully killing unresponsive daemon process (PID: "
                     + oldProcess.pid() + ")");
             oldProcess.destroyForcibly();
             try { oldProcess.waitFor(2, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
@@ -594,11 +609,11 @@ public class DaemonBridge {
 
         int attempts = restartAttempts.incrementAndGet();
         if (attempts <= MAX_RESTART_ATTEMPTS) {
-            LOG.info("[DaemonBridge] Attempting restart (" + attempts + "/" + MAX_RESTART_ATTEMPTS
+            LOG.info("[LocalBridge] Attempting restart (" + attempts + "/" + MAX_RESTART_ATTEMPTS
                     + ", last uptime=" + uptime + "ms)");
             start();
         } else {
-            LOG.error("[DaemonBridge] Max restart attempts reached (" + attempts
+            LOG.error("[LocalBridge] Max restart attempts reached (" + attempts
                     + " within " + RESTART_WINDOW_MS + "ms window). Daemon will not be restarted.");
         }
     }
@@ -607,13 +622,18 @@ public class DaemonBridge {
     // Setters
     // =========================================================================
 
-    public void setLifecycleListener(DaemonLifecycleListener listener) {
+    @Override
+    public void setLifecycleListener(IBridge.DaemonLifecycleListener listener) {
         this.lifecycleListener = listener;
     }
 
+    @Override
     public boolean isSdkPreloaded() {
         return sdkPreloaded.get();
     }
+
+    // setControlMessageHandler — uses default no-op from IBridge interface.
+    // Local mode drives permission/ask/plan via file IPC, not _ctrl messages.
 
     static boolean shouldTreatAsUnresponsive(long heartbeatAgeMs, long activityAgeMs, int activeRequestCount) {
         if (activeRequestCount <= 0) {
@@ -628,35 +648,17 @@ public class DaemonBridge {
     }
 
     // =========================================================================
-    // Inner Types
+    // Inner Types (private — public ones moved to IBridge)
     // =========================================================================
-
-    /**
-     * Callback interface for receiving daemon output.
-     */
-    public interface DaemonOutputCallback {
-        void onLine(String line);
-        void onStderr(String text);
-        void onError(String error);
-        void onComplete(boolean success);
-    }
-
-    /**
-     * Lifecycle listener for daemon events.
-     */
-    public interface DaemonLifecycleListener {
-        void onDaemonReady();
-        void onDaemonDied();
-    }
 
     /**
      * Internal handler that wraps callback + future for a pending request.
      */
     private static class RequestHandler {
-        final DaemonOutputCallback callback;
+        final IBridge.DaemonOutputCallback callback;
         final CompletableFuture<Boolean> future;
 
-        RequestHandler(DaemonOutputCallback callback, CompletableFuture<Boolean> future) {
+        RequestHandler(IBridge.DaemonOutputCallback callback, CompletableFuture<Boolean> future) {
             this.callback = callback;
             this.future = future;
         }

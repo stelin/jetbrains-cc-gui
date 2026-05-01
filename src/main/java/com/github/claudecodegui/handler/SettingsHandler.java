@@ -65,7 +65,11 @@ public class SettingsHandler extends BaseMessageHandler {
         "set_selected_sound",
         "set_custom_sound_path",
         "test_sound",
-        "browse_sound_file"
+        "browse_sound_file",
+        // Remote mode (ai-bridge-server)
+        "get_remote_mode",
+        "set_remote_mode",
+        "test_remote_connection"
     };
 
     public SettingsHandler(HandlerContext context) {
@@ -225,6 +229,16 @@ public class SettingsHandler extends BaseMessageHandler {
                 return true;
             case "browse_sound_file":
                 soundSettingsHandler.handleBrowseSoundFile();
+                return true;
+            // Remote mode
+            case "get_remote_mode":
+                projectConfigHandler.handleGetRemoteMode();
+                return true;
+            case "set_remote_mode":
+                projectConfigHandler.handleSetRemoteMode(content);
+                return true;
+            case "test_remote_connection":
+                projectConfigHandler.handleTestRemoteConnection(content);
                 return true;
             default:
                 return false;

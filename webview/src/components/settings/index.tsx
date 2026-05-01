@@ -17,6 +17,7 @@ import AgentSection from './AgentSection';
 import PromptSection from './PromptSection';
 import CommitSection from './CommitSection';
 import OtherSettingsSection from './OtherSettingsSection';
+import RemoteServerSection from './RemoteServerSection';
 import { SkillsSettingsSection } from '../skills';
 import SettingsDialogs from './SettingsDialogs';
 
@@ -538,6 +539,11 @@ const SettingsView = ({
           {/* Skills */}
           <div style={{ display: currentTab === 'skills' ? 'block' : 'none' }}>
             <SkillsSettingsSection currentProvider={currentProvider} />
+          </div>
+
+          {/* Remote mode (ai-bridge-server) */}
+          <div style={{ display: currentTab === 'remote' ? 'block' : 'none' }}>
+            <RemoteServerSection />
           </div>
 
           {/* Other settings */}

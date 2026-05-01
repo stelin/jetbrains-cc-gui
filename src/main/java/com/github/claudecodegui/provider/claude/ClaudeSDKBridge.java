@@ -6,7 +6,7 @@ import com.github.claudecodegui.session.ClaudeSession;
 import com.github.claudecodegui.model.NodeDetectionResult;
 import com.github.claudecodegui.provider.common.BaseSDKBridge;
 import com.github.claudecodegui.provider.common.MessageCallback;
-import com.github.claudecodegui.provider.common.DaemonBridge;
+import com.github.claudecodegui.provider.common.IBridge;
 import com.github.claudecodegui.provider.common.SDKResult;
 
 import java.io.File;
@@ -92,6 +92,16 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
         daemonCoordinator.resetPersistentRuntime(runtimeSessionEpoch);
     }
 
+    /**
+     * Inject the {@link com.github.claudecodegui.permission.ControlMessageHandler}
+     * used by remote-mode bridges to surface permission/ask/plan dialogs.
+     * Only effective when running with a {@link com.github.claudecodegui.provider.common.RemoteBridge};
+     * local mode silently ignores it.
+     */
+    public void setControlMessageHandler(com.github.claudecodegui.permission.ControlMessageHandler handler) {
+        daemonCoordinator.setControlMessageHandler(handler);
+    }
+
     @Override
     public void cleanupAllProcesses() {
         shutdownDaemon();
@@ -104,7 +114,7 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
      */
     @Override
     public void interruptChannel(String channelId) {
-        DaemonBridge db = daemonCoordinator.getCurrentDaemonBridge();
+        IBridge db = daemonCoordinator.getCurrentDaemonBridge();
         if (db != null && db.isAlive()) {
             LOG.info("[ClaudeSDKBridge] Sending daemon abort for channel: " + channelId);
             try {
@@ -340,14 +350,34 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
             MessageCallback callback
     ) {
         // Try daemon mode first (avoids per-request Node.js process spawning)
-        DaemonBridge db = daemonCoordinator.getDaemonBridge();
+        IBridge db = daemonCoordinator.getDaemonBridge();
         if (db != null) {
             return sendMessageViaDaemon(db, channelId, message, sessionId, runtimeSessionEpoch, cwd,
                     attachments, permissionMode, model, openedFiles, agentPrompt,
                     streaming, disableThinking, callback);
         }
 
-        // Fallback: per-process mode (spawns a new Node.js process per request)
+        // In remote mode the per-process fallback would silently spawn a local
+        // Node.js process and run the SDK on the user's machine — defeating the
+        // purpose of remote mode. Surface a clear error instead.
+        com.github.claudecodegui.settings.RemoteModeContext rmCtx =
+                com.github.claudecodegui.settings.RemoteModeContext.getInstance();
+        if (rmCtx != null && rmCtx.isRemote()) {
+            String url = rmCtx.remoteServerUrl();
+            String err = "Remote ai-bridge-server not available at " + url
+                    + " (session not started or daemon failed to become ready). "
+                    + "Per-process fallback is disabled in remote mode.";
+            LOG.warn("[ClaudeSDKBridge] " + err);
+            CompletableFuture<SDKResult> failed = new CompletableFuture<>();
+            SDKResult result = new SDKResult();
+            result.success = false;
+            result.error = err;
+            try { callback.onError(err); } catch (Exception ignore) {}
+            failed.complete(result);
+            return failed;
+        }
+
+        // Local-mode fallback: per-process mode (spawns a new Node.js process per request)
         LOG.info("[ClaudeSDKBridge] Using per-process mode (daemon not available)");
         return processInvoker.sendMessage(
                 channelId,
@@ -421,7 +451,7 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
      * This avoids the ~5-10s overhead of spawning a new Node.js process per request.
      */
     private CompletableFuture<SDKResult> sendMessageViaDaemon(
-            DaemonBridge daemon,
+            IBridge daemon,
             String channelId,
             String message,
             String sessionId,

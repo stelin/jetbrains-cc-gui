@@ -5,7 +5,7 @@ import org.junit.Test;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
-public class DaemonBridgeTest {
+public class LocalBridgeTest {
 
     // HEARTBEAT_TIMEOUT_MS = 45_000; just over threshold triggers unresponsive
     private static final long JUST_OVER_HEARTBEAT_THRESHOLD = 46_000;
@@ -16,16 +16,16 @@ public class DaemonBridgeTest {
 
     @Test
     public void staleHeartbeatWithoutActiveRequestsIsUnresponsive() {
-        assertTrue(DaemonBridge.shouldTreatAsUnresponsive(JUST_OVER_HEARTBEAT_THRESHOLD, JUST_OVER_HEARTBEAT_THRESHOLD, 0));
+        assertTrue(LocalBridge.shouldTreatAsUnresponsive(JUST_OVER_HEARTBEAT_THRESHOLD, JUST_OVER_HEARTBEAT_THRESHOLD, 0));
     }
 
     @Test
     public void activeRequestWithRecentOutputGetsGraceWindow() {
-        assertFalse(DaemonBridge.shouldTreatAsUnresponsive(JUST_OVER_HEARTBEAT_THRESHOLD, RECENT_ACTIVITY, 1));
+        assertFalse(LocalBridge.shouldTreatAsUnresponsive(JUST_OVER_HEARTBEAT_THRESHOLD, RECENT_ACTIVITY, 1));
     }
 
     @Test
     public void activeRequestWithNoRecentOutputEventuallyTimesOut() {
-        assertTrue(DaemonBridge.shouldTreatAsUnresponsive(OVER_ACTIVE_REQUEST_THRESHOLD, OVER_ACTIVE_REQUEST_THRESHOLD, 1));
+        assertTrue(LocalBridge.shouldTreatAsUnresponsive(OVER_ACTIVE_REQUEST_THRESHOLD, OVER_ACTIVE_REQUEST_THRESHOLD, 1));
     }
 }

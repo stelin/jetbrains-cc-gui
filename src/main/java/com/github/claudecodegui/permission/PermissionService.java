@@ -192,6 +192,87 @@ public class PermissionService {
         dialogRouter.setLastActiveProject(project);
     }
 
+    // ── Remote-mode direct dialog API (no file IPC) ────────────────────
+    //
+    // Used by RemotePermissionAdapter to drive the same UI dialogs as local
+    // mode without going through ~/.claude/permissions/ file IPC. The remote
+    // bridge POSTs the corresponding `_ctrl/*_response` envelope back to the
+    // daemon directly.
+
+    /**
+     * Show a permission dialog driven by an inbound remote {@code _ctrl}
+     * message. Returns a future that resolves with {@code true} for allow,
+     * {@code false} for deny.
+     */
+    public CompletableFuture<Boolean> showRemotePermissionDialog(
+            String toolName, JsonObject inputs, String cwd
+    ) {
+        JsonObject lookup = new JsonObject();
+        if (cwd != null) lookup.addProperty("cwd", cwd);
+        PermissionDialogShower shower = dialogRouter.findPermissionDialogShower(lookup, "REMOTE_PERM");
+        if (shower == null) {
+            debugLog("REMOTE_PERM", "No permission dialog shower available; auto-deny");
+            return CompletableFuture.completedFuture(false);
+        }
+        CompletableFuture<Boolean> result = new CompletableFuture<>();
+        shower.showPermissionDialog(toolName, inputs).thenAccept(response -> {
+            try {
+                PermissionResponse decision = resolveDecision(response);
+                if (decision == PermissionResponse.ALLOW_ALWAYS) {
+                    decisionStore.rememberToolDecision(toolName, PermissionResponse.ALLOW_ALWAYS);
+                }
+                notifyDecision(toolName, inputs, decision);
+                result.complete(decision.isAllow());
+            } catch (Exception e) {
+                debugLog("REMOTE_PERM_ERR", e.getMessage());
+                result.complete(false);
+            }
+        }).exceptionally(ex -> {
+            debugLog("REMOTE_PERM_FAIL", ex.getMessage());
+            result.complete(false);
+            return null;
+        });
+        return result;
+    }
+
+    /**
+     * Show an AskUserQuestion dialog driven by a remote {@code _ctrl} message.
+     * Returns a future that resolves with the raw answers JSON returned by
+     * the dialog (matching the existing local-mode shape).
+     */
+    public CompletableFuture<JsonObject> showRemoteAskUserQuestionDialog(
+            String requestId, JsonObject questionsData, String cwd
+    ) {
+        JsonObject lookup = new JsonObject();
+        if (cwd != null) lookup.addProperty("cwd", cwd);
+        AskUserQuestionDialogShower shower = dialogRouter.findAskUserQuestionDialogShower(lookup);
+        if (shower == null) {
+            debugLog("REMOTE_ASK", "No AskUserQuestion shower; returning null answers");
+            return CompletableFuture.completedFuture(new JsonObject());
+        }
+        return shower.showAskUserQuestionDialog(requestId, questionsData);
+    }
+
+    /**
+     * Show a PlanApproval dialog driven by a remote {@code _ctrl} message.
+     * Returns a future that resolves with the raw approval JSON returned by
+     * the dialog (matching the existing local-mode shape).
+     */
+    public CompletableFuture<JsonObject> showRemotePlanApprovalDialog(
+            String requestId, JsonObject planData, String cwd
+    ) {
+        JsonObject lookup = new JsonObject();
+        if (cwd != null) lookup.addProperty("cwd", cwd);
+        PlanApprovalDialogShower shower = dialogRouter.findPlanApprovalDialogShower(lookup);
+        if (shower == null) {
+            debugLog("REMOTE_PLAN", "No PlanApproval shower; auto-reject");
+            JsonObject reject = new JsonObject();
+            reject.addProperty("approved", false);
+            return CompletableFuture.completedFuture(reject);
+        }
+        return shower.showPlanApprovalDialog(requestId, planData);
+    }
+
     @Deprecated
     public void setDialogShower(PermissionDialogShower shower) {
         if (shower != null && this.project != null) {

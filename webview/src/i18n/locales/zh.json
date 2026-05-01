@@ -330,6 +330,9 @@
     "agentsDesc": "管理和配置AI代理",
     "skills": "Skills",
     "skillsDesc": "管理和配置技能模块",
+    "remote": {
+      "title": "远程模式"
+    },
     "other": {
       "title": "其他设置",
       "description": "配置其他杂项设置",

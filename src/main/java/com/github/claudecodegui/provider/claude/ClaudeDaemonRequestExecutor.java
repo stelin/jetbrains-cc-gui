@@ -1,7 +1,7 @@
 package com.github.claudecodegui.provider.claude;
 
 import com.github.claudecodegui.session.ClaudeSession;
-import com.github.claudecodegui.provider.common.DaemonBridge;
+import com.github.claudecodegui.provider.common.IBridge;
 import com.github.claudecodegui.provider.common.MessageCallback;
 import com.github.claudecodegui.provider.common.SDKResult;
 import com.google.gson.JsonObject;
@@ -35,7 +35,7 @@ class ClaudeDaemonRequestExecutor {
     }
 
     CompletableFuture<SDKResult> sendMessageViaDaemon(
-            DaemonBridge daemon,
+            IBridge daemon,
             String channelId,
             String message,
             String sessionId,
@@ -80,7 +80,7 @@ class ClaudeDaemonRequestExecutor {
                 CompletableFuture<Boolean> cmdFuture = daemon.sendCommand(
                         method,
                         params,
-                        new DaemonBridge.DaemonOutputCallback() {
+                        new IBridge.DaemonOutputCallback() {
                             @Override
                             public void onLine(String line) {
                                 if (line.startsWith("[UNCAUGHT_ERROR]")

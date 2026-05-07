@@ -7,13 +7,20 @@ import com.github.claudecodegui.cache.SessionIndexCache;
 import com.github.claudecodegui.cache.SessionIndexManager;
 import com.github.claudecodegui.provider.claude.ClaudeHistoryReader;
 import com.github.claudecodegui.provider.codex.CodexHistoryReader;
+import com.github.claudecodegui.settings.RemoteModeContext;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.diagnostic.Logger;
 
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Base64;
 import java.util.concurrent.CompletableFuture;
 
@@ -62,9 +69,16 @@ class HistoryLoadService {
                     LOG.info("[HistoryHandler] CodexHistoryReader 返回的 JSON 长度: " + historyJson.length());
                 } else {
                     // Default: use ClaudeHistoryReader to read Claude sessions
-                    LOG.info("[HistoryHandler] 使用 ClaudeHistoryReader 读取 Claude 会话");
-                    ClaudeHistoryReader historyReader = new ClaudeHistoryReader();
-                    historyJson = historyReader.getProjectDataAsJson(projectPath);
+                    RemoteModeContext remoteCtx = RemoteModeContext.getInstance();
+                    if (remoteCtx.isRemote()) {
+                        String remoteUrl = remoteCtx.remoteServerUrl();
+                        LOG.info("[HistoryHandler] 远程模式：从 ai-bridge-server 获取会话列表 (项目: " + projectPath + ", url: " + remoteUrl + ")");
+                        historyJson = fetchRemoteProjectData(remoteUrl, projectPath);
+                    } else {
+                        LOG.info("[HistoryHandler] 使用 ClaudeHistoryReader 读取 Claude 会话");
+                        ClaudeHistoryReader historyReader = new ClaudeHistoryReader();
+                        historyJson = historyReader.getProjectDataAsJson(projectPath);
+                    }
                 }
 
                 // Load favorite data and merge into history data
@@ -230,5 +244,35 @@ class HistoryLoadService {
             LOG.warn("[HistoryHandler] 增强标题数据失败，返回原始数据: " + e.getMessage());
             return historyJson;
         }
+    }
+
+    /**
+     * Fetch project history data from a remote ai-bridge-server.
+     * Returns JSON in the same shape as {@code ClaudeHistoryReader.getProjectDataAsJson()}.
+     */
+    private String fetchRemoteProjectData(String remoteUrl, String projectPath) throws Exception {
+        if (remoteUrl == null || remoteUrl.isBlank()) {
+            throw new IllegalStateException("Remote mode enabled but remoteServerUrl is empty");
+        }
+        String base = remoteUrl.trim();
+        if (base.endsWith("/")) base = base.substring(0, base.length() - 1);
+
+        String url = base + "/history/project-data?projectPath="
+                + URLEncoder.encode(projectPath, StandardCharsets.UTF_8);
+
+        HttpClient client = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(5))
+                .version(HttpClient.Version.HTTP_1_1)
+                .build();
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .timeout(Duration.ofSeconds(60))
+                .GET()
+                .build();
+        HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
+        if (resp.statusCode() != 200) {
+            throw new RuntimeException("HTTP " + resp.statusCode() + ": " + resp.body());
+        }
+        return resp.body();
     }
 }

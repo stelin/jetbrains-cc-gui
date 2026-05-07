@@ -80,14 +80,26 @@ public class HtmlLoader {
             );
 
             // 3. Inject a theme variable script after the <head> tag
-            String scriptInjection = "\n    <script>window.__INITIAL_IDE_THEME__ = '" + theme + "';</script>";
+            //    Also expose the remote-mode flag so the webview can adapt UI hints
+            //    (e.g. ProviderNotConfiguredCard) — provider settings are disabled
+            //    in remote mode, so the default "go to settings" CTA must be hidden.
+            boolean isRemote = false;
+            try {
+                isRemote = com.github.claudecodegui.settings.RemoteModeContext.getInstance().isRemote();
+            } catch (Exception ignore) {
+                // RemoteModeContext unavailable (e.g. during early init) — treat as local
+            }
+            String scriptInjection = "\n    <script>"
+                    + "window.__INITIAL_IDE_THEME__ = '" + theme + "';"
+                    + "window.__INITIAL_REMOTE_MODE__ = " + (isRemote ? "true" : "false") + ";"
+                    + "</script>";
             int headIndex = html.indexOf("<head>");
             if (headIndex != -1) {
                 int insertPos = headIndex + "<head>".length();
                 html = html.substring(0, insertPos) + scriptInjection + html.substring(insertPos);
             }
 
-            LOG.info("Successfully injected IDE theme (inline styles): " + theme + ", background: " + bgColor);
+            LOG.info("Successfully injected IDE theme (inline styles): " + theme + ", background: " + bgColor + ", remoteMode: " + isRemote);
         } catch (Exception e) {
             LOG.error("Failed to inject IDE theme: " + e.getMessage(), e);
         }

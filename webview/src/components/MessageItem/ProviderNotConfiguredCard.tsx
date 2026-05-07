@@ -6,6 +6,12 @@ interface ProviderNotConfiguredCardProps {
   onNavigateToSettings?: () => void;
 }
 
+declare global {
+  interface Window {
+    __INITIAL_REMOTE_MODE__?: boolean;
+  }
+}
+
 const SettingsIcon = () => (
   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
     <path
@@ -40,6 +46,14 @@ export const ProviderNotConfiguredCard = memo(function ProviderNotConfiguredCard
   t,
   onNavigateToSettings,
 }: ProviderNotConfiguredCardProps) {
+  // In remote mode the provider management UI is disabled (the daemon runs on
+  // a remote ai-bridge-server inside a container). The default "go to settings"
+  // CTA cannot resolve the issue — swap copy and hide the button.
+  const isRemote = typeof window !== 'undefined' && window.__INITIAL_REMOTE_MODE__ === true;
+  const titleKey = isRemote ? 'error.providerNotConfiguredRemote' : 'error.providerNotConfigured';
+  const descKey = isRemote ? 'error.providerNotConfiguredRemoteDesc' : 'error.providerNotConfiguredDesc';
+  const showCta = !isRemote && Boolean(onNavigateToSettings);
+
   return (
     <div className="provider-not-configured-card">
       <div className="provider-card-header">
@@ -47,13 +61,13 @@ export const ProviderNotConfiguredCard = memo(function ProviderNotConfiguredCard
           <SettingsIcon />
         </span>
         <span className="provider-card-title">
-          {t('error.providerNotConfigured')}
+          {t(titleKey)}
         </span>
       </div>
       <p className="provider-card-description">
-        {t('error.providerNotConfiguredDesc')}
+        {t(descKey)}
       </p>
-      {onNavigateToSettings && (
+      {showCta && (
         <button
           type="button"
           className="provider-card-action"

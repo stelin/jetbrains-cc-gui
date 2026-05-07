@@ -131,6 +131,12 @@ class ClaudeDaemonCoordinator {
     }
 
     void prewarmDaemonAsync(String cwd, String runtimeSessionEpoch) {
+        RemoteModeContext rmCtx = RemoteModeContext.getInstance();
+        if (rmCtx != null && rmCtx.isRemote()) {
+            log.info("[DaemonCoordinator] Skip prewarm in remote mode (credentials live on the server)");
+            return;
+        }
+
         CompletableFuture<?> previous = prewarmFuture;
         if (previous != null && !previous.isDone()) {
             previous.cancel(true);

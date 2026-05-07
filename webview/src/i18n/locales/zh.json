@@ -1562,6 +1562,8 @@
   "error": {
     "providerNotConfigured": "供应商未配置",
     "providerNotConfiguredDesc": "尚未配置 AI 供应商或未授权使用本地配置，请先在供应商管理设置中完成配置后再开始对话。",
+    "providerNotConfiguredRemote": "远程供应商未配置",
+    "providerNotConfiguredRemoteDesc": "远程 ai-bridge-server 未配置 AI 供应商。远程模式下不支持在插件内配置供应商，请联系管理员在容器内完成预配置后再开始对话。",
     "goToProviderSettings": "前往设置"
   }
 }

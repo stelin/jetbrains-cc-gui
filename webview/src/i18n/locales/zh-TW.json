@@ -1377,6 +1377,8 @@
   "error": {
     "providerNotConfigured": "供應商未設定",
     "providerNotConfiguredDesc": "尚未設定 AI 供應商或未授權使用本機設定，請先在供應商管理設定中完成設定後再開始對話。",
+    "providerNotConfiguredRemote": "遠端供應商未設定",
+    "providerNotConfiguredRemoteDesc": "遠端 ai-bridge-server 未設定 AI 供應商。遠端模式下不支援在外掛內設定供應商，請聯繫管理員在容器內完成預先設定後再開始對話。",
     "goToProviderSettings": "前往設定"
   }
 }

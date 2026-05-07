@@ -358,7 +358,10 @@ export const MessageItem = memo(function MessageItem({
     }
   }, [message.type, messageKey, onNodeRef]);
 
-  const isProviderNotConfigured = message.type === 'error' && isProviderNotConfiguredError(getMessageText(message));
+  const isRemoteMode = typeof window !== 'undefined' && window.__INITIAL_REMOTE_MODE__ === true;
+  const isProviderNotConfigured = !isRemoteMode
+    && message.type === 'error'
+    && isProviderNotConfiguredError(getMessageText(message));
 
   const renderGroupedBlocks = () => {
     if (message.type === 'error') {

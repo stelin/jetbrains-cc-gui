@@ -1557,6 +1557,8 @@
   "error": {
     "providerNotConfigured": "Provider Not Configured",
     "providerNotConfiguredDesc": "No AI provider is configured yet, or access to the local configuration has not been authorized. Please complete setup in Provider Management settings before starting a conversation.",
+    "providerNotConfiguredRemote": "Remote Provider Not Configured",
+    "providerNotConfiguredRemoteDesc": "The remote ai-bridge-server has no AI provider configured. Provider management is not available from the plugin in remote mode — please ask your administrator to pre-configure a provider inside the container before starting a conversation.",
     "goToProviderSettings": "Go to Settings"
   }
 }

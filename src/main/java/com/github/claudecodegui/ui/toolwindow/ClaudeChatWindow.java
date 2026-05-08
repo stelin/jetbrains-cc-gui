@@ -84,7 +84,7 @@ public class ClaudeChatWindow {
 
     public ClaudeChatWindow(Project project, boolean skipRegister) {
         this.project = project;
-        this.claudeSDKBridge = new ClaudeSDKBridge();
+        this.claudeSDKBridge = new ClaudeSDKBridge(project);
         this.codexSDKBridge = new CodexSDKBridge();
         this.settingsService = new CodemossSettingsService();
         this.htmlLoader = new HtmlLoader(getClass());

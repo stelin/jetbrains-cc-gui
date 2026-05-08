@@ -283,12 +283,33 @@ public class ClaudeMessageHandler implements MessageCallback {
             if (mergedRaw.has("message") && mergedRaw.getAsJsonObject("message").has("content")) {
                 var contentArray = mergedRaw.getAsJsonObject("message").get("content");
                 if (contentArray.isJsonArray()) {
+                    // Inbound path translation for tool_use input fields. The path
+                    // mapper is project-scoped; in local mode (or unmapped remote
+                    // mode) it is the identity mapper and short-circuits.
+                    com.github.claudecodegui.path.PathMapper pathMapper =
+                            (project != null
+                                    ? com.github.claudecodegui.path.PathMapperHolder.getInstance(project).get()
+                                    : com.github.claudecodegui.path.IdentityPathMapper.INSTANCE);
+
                     for (var element : contentArray.getAsJsonArray()) {
                         if (element.isJsonObject() && element.getAsJsonObject().has("type")) {
-                            String type = element.getAsJsonObject().get("type").getAsString();
+                            var blockObj = element.getAsJsonObject();
+                            String type = blockObj.get("type").getAsString();
                             if ("tool_use".equals(type)) {
                                 hasToolUse = true;
-                                break;
+                                if (pathMapper.isActive() && blockObj.has("input")
+                                        && blockObj.get("input").isJsonObject()) {
+                                    try {
+                                        com.github.claudecodegui.path.PathFieldVisitor.applyInbound(
+                                                "__tool_use_input__",
+                                                blockObj.getAsJsonObject("input"),
+                                                pathMapper::toLocal
+                                        );
+                                    } catch (Exception ex) {
+                                        LOG.debug("tool_use input translation failed: " + ex.getMessage());
+                                    }
+                                }
+                                // Don't break — translate every tool_use block in this message.
                             }
                         }
                     }

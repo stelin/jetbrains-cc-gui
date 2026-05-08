@@ -1,10 +1,16 @@
 package com.github.claudecodegui.provider.common;
 
+import com.github.claudecodegui.path.IdentityPathMapper;
+import com.github.claudecodegui.path.PathFieldVisitor;
+import com.github.claudecodegui.path.PathMapper;
+import com.github.claudecodegui.path.PathMapperHolder;
 import com.github.claudecodegui.permission.ControlMessageHandler;
+import com.google.gson.Gson;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.intellij.openapi.diagnostic.Logger;
+import com.intellij.openapi.project.Project;
 
 import java.io.IOException;
 import java.net.URI;
@@ -62,7 +68,20 @@ public class RemoteBridge implements IBridge {
     private volatile DaemonLifecycleListener lifecycleListener;
     private volatile ControlMessageHandler controlHandler;
 
+    private final Project project;             // may be null only for legacy callers
+    private final String localProjectPath;     // captured at construction; null when no project open
+    private volatile String lastStartFailureCode;
+    private volatile String lastStartFailureMessage;
+
+    /**
+     * Legacy constructor. Prefer {@link #RemoteBridge(String, Project)} so the
+     * bridge can carry projectPath and use the project-scoped path mapper.
+     */
     public RemoteBridge(String baseUrl) {
+        this(baseUrl, null);
+    }
+
+    public RemoteBridge(String baseUrl, Project project) {
         if (baseUrl == null || baseUrl.isBlank()) {
             throw new IllegalArgumentException("baseUrl required");
         }
@@ -73,10 +92,23 @@ public class RemoteBridge implements IBridge {
                 .connectTimeout(Duration.ofSeconds(10))
                 .version(HttpClient.Version.HTTP_1_1)
                 .build();
+        this.project = project;
+        this.localProjectPath = project != null ? project.getBasePath() : null;
     }
 
     public String getBaseUrl() { return baseUrl; }
     public String getSessionId() { return sessionId; }
+
+    /** Last-start failure tag, or null when start has not failed since last reset. */
+    public String getLastStartFailureCode() { return lastStartFailureCode; }
+    public String getLastStartFailureMessage() { return lastStartFailureMessage; }
+
+    /** Resolve the active path mapper just-in-time so config changes take effect. */
+    private PathMapper currentMapper() {
+        return project != null
+                ? PathMapperHolder.getInstance(project).get()
+                : IdentityPathMapper.INSTANCE;
+    }
 
     // =========================================================================
     // Lifecycle
@@ -88,24 +120,51 @@ public class RemoteBridge implements IBridge {
             LOG.info("[RemoteBridge] Already running");
             return true;
         }
+
+        // Reset structured failure state for this attempt.
+        lastStartFailureCode = null;
+        lastStartFailureMessage = null;
+
+        // Mandatory project guard (design §1 rules 9 + 10).
+        if (localProjectPath == null || localProjectPath.isEmpty()) {
+            LOG.warn("[RemoteBridge] cannot start: no project open");
+            notifyStartFailed("PROJECT_NOT_OPEN", "请先打开一个项目");
+            return false;
+        }
+
         readyLatch = new CountDownLatch(1);
         try {
-            // 1. POST /session
+            // 1. POST /session with mandatory projectPath (translated to remote form).
+            JsonObject createBody = new JsonObject();
+            String wirePath = currentMapper().toRemote(localProjectPath);
+            createBody.addProperty("projectPath", wirePath);
+
             HttpResponse<String> resp = http.send(
                     HttpRequest.newBuilder()
                             .uri(URI.create(baseUrl + "/session"))
                             .timeout(HTTP_TIMEOUT)
-                            .POST(HttpRequest.BodyPublishers.noBody())
+                            .header("Content-Type", "application/json")
+                            .POST(HttpRequest.BodyPublishers.ofString(new Gson().toJson(createBody)))
                             .build(),
                     HttpResponse.BodyHandlers.ofString()
             );
+            if (resp.statusCode() == 400) {
+                JsonObject err = safeParse(resp.body());
+                String code = optString(err, "code");
+                String msg  = optString(err, "error");
+                LOG.warn("[RemoteBridge] POST /session 400 code=" + code + " msg=" + msg);
+                notifyStartFailed(code != null && !code.isEmpty() ? code : "BAD_REQUEST",
+                        msg != null && !msg.isEmpty() ? msg : "Bad request");
+                return false;
+            }
             if (resp.statusCode() != 200) {
                 LOG.warn("[RemoteBridge] POST /session failed: " + resp.statusCode() + " " + resp.body());
+                notifyStartFailed("SESSION_CREATE_FAILED", "HTTP " + resp.statusCode());
                 return false;
             }
             JsonObject body = JsonParser.parseString(resp.body()).getAsJsonObject();
             sessionId = body.get("sessionId").getAsString();
-            LOG.info("[RemoteBridge] Session created: " + sessionId);
+            LOG.info("[RemoteBridge] Session created: " + sessionId + " projectPath=" + wirePath);
 
             // 2. Subscribe SSE
             startSseSubscriber();
@@ -121,6 +180,7 @@ public class RemoteBridge implements IBridge {
             return true;
         } catch (Exception e) {
             LOG.warn("[RemoteBridge] start() failed: " + e.getMessage(), e);
+            notifyStartFailed("SESSION_CREATE_FAILED", e.getMessage() != null ? e.getMessage() : "transport error");
             return false;
         }
     }
@@ -214,6 +274,18 @@ public class RemoteBridge implements IBridge {
         req.addProperty("method", method);
         if (params != null) req.add("params", params);
 
+        // Outbound path translation — translate every path-bearing field
+        // declared in PathFields.OUTBOUND for this method, in place. The
+        // wrapper object is only used to resolve $.params.* expressions.
+        PathMapper mapper = currentMapper();
+        if (mapper.isActive()) {
+            try {
+                PathFieldVisitor.applyOutbound(method, req, mapper::toRemote);
+            } catch (Exception e) {
+                LOG.warn("[RemoteBridge] outbound translation failed: " + e.getMessage());
+            }
+        }
+
         if (!postIn(req)) {
             active.remove(id);
             future.completeExceptionally(new IOException("Failed to POST /in"));
@@ -261,6 +333,22 @@ public class RemoteBridge implements IBridge {
         } catch (Exception e) {
             LOG.debug("[RemoteBridge] Invalid SSE data: " + data);
             return;
+        }
+
+        // Inbound path translation — translate path-bearing fields declared in
+        // PathFields.INBOUND for the matched event tag, in place. Tool-use
+        // input fields are translated downstream in ClaudeMessageHandler since
+        // they live nested inside `line` payloads.
+        PathMapper mapper = currentMapper();
+        if (mapper.isActive()) {
+            String tag = inboundTag(msg);
+            if (tag != null) {
+                try {
+                    PathFieldVisitor.applyInbound(tag, msg, mapper::toLocal);
+                } catch (Exception e) {
+                    LOG.warn("[RemoteBridge] inbound translation failed: " + e.getMessage());
+                }
+            }
         }
 
         String type = optString(msg, "type");
@@ -409,7 +497,61 @@ public class RemoteBridge implements IBridge {
     }
 
     private static String optString(JsonObject o, String k) {
+        if (o == null) return null;
         return (o.has(k) && !o.get(k).isJsonNull()) ? o.get(k).getAsString() : null;
+    }
+
+    /**
+     * Compute the manifest key for an inbound SSE event. Returns null for
+     * events that have no path-bearing fields registered (request-output
+     * lines, heartbeats, etc.).
+     */
+    private static String inboundTag(JsonObject msg) {
+        String type = optString(msg, "type");
+        if ("daemon".equals(type)) {
+            String event = optString(msg, "event");
+            return event != null && !event.isEmpty() ? "daemon." + event : null;
+        }
+        if ("_ctrl".equals(type)) {
+            String action = optString(msg, "action");
+            return action != null && !action.isEmpty() ? "_ctrl." + action : null;
+        }
+        return null;
+    }
+
+    /** Best-effort JSON parse — returns null on any failure. */
+    private static JsonObject safeParse(String s) {
+        if (s == null || s.isEmpty()) return null;
+        try {
+            JsonElement e = JsonParser.parseString(s);
+            return e != null && e.isJsonObject() ? e.getAsJsonObject() : null;
+        } catch (Exception ignore) {
+            return null;
+        }
+    }
+
+    /**
+     * Notify the lifecycle listener of a structured start failure. If the
+     * listener implements {@link DaemonLifecycleListenerWithError}, it gets
+     * the {@code code}/{@code message} pair; otherwise the legacy
+     * {@link DaemonLifecycleListener#onDaemonDied()} fallback fires.
+     */
+    private void notifyStartFailed(String code, String message) {
+        // Persist for getLastStartFailure*() so callers (e.g. ClaudeSDKBridge)
+        // that don't register a lifecycle listener can still surface the
+        // structured reason.
+        this.lastStartFailureCode = code;
+        this.lastStartFailureMessage = message;
+
+        DaemonLifecycleListener l = lifecycleListener;
+        if (l == null) return;
+        try {
+            if (l instanceof DaemonLifecycleListenerWithError) {
+                ((DaemonLifecycleListenerWithError) l).onDaemonStartFailed(code, message);
+            } else {
+                l.onDaemonDied();
+            }
+        } catch (Exception ignore) {}
     }
 
     private static class RequestState {

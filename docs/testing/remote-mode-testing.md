@@ -6,14 +6,14 @@
 
 不需要把插件装进你日常用的 IDEA。三层测试覆盖足够：
 
-| 层级 | 命令 | 验证什么 | 何时跑 |
-|---|---|---|---|
-| 1. 单元测试 | `./gradlew test` | 纯 Java 逻辑（SSE 解析、HTTP 客户端、JSON 路由） | 每次改完代码立刻跑 |
-| 2. 沙箱 IDE | `./gradlew runIde` | 端到端交互（UI 灰态、权限弹窗、对话流） | 每个 P 阶段完成后跑 |
-| 3. 真实 IDE 冒烟 | `./gradlew buildPlugin` + Install from Disk | 仅最终发布前确认 | 可选 |
+| 层级 | 命令                                           | 验证什么 | 何时跑 |
+|---|----------------------------------------------|---|---|
+| 1. 单元测试 | `./gradlew test`                             | 纯 Java 逻辑（SSE 解析、HTTP 客户端、JSON 路由） | 每次改完代码立刻跑 |
+| 2. 沙箱 IDE | `./gradlew runIde`                           | 端到端交互（UI 灰态、权限弹窗、对话流） | 每个 P 阶段完成后跑 |
+| 3. 真实 IDE 冒烟 | `./gradlew buildPlugin` + Install from Disk+ | 仅最终发布前确认 | 可选 |
 
 `./gradlew runIde` 会下载独立的 IntelliJ Community 2024.3.1 到 `build/idea-sandbox/`，配置目录隔离，**不会影响你日常的 IDEA 配置和插件**。
-
+' ./gradlew buildPlugin -x checkstyleMain -x checkstyleTest'
 ---
 
 ## 1. 单元测试层

@@ -1,6 +1,7 @@
 package com.github.claudecodegui.provider.claude;
 
 import com.github.claudecodegui.provider.common.HistoryDataSource;
+import com.github.claudecodegui.util.PlatformUtils;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -33,7 +34,7 @@ public class LocalHistoryDataSource implements HistoryDataSource {
     private final Path root;
 
     public LocalHistoryDataSource() {
-        this(Paths.get(System.getProperty("user.home"), ".claude", "projects"));
+        this(Paths.get(PlatformUtils.getHomeDirectory(), ".claude", "projects"));
     }
 
     public LocalHistoryDataSource(Path root) {

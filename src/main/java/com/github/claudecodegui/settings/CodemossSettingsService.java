@@ -1218,6 +1218,58 @@ public class CodemossSettingsService {
         LOG.info("[CodemossSettings] Set remoteServerUrl: " + trimmed);
     }
 
+    // ==================== Path Mapping (per-project) ====================
+
+    /**
+     * Read the path mapping configuration for the given local project path.
+     * Returns a disabled config when the entry is absent or malformed.
+     */
+    public PathMappingConfig getPathMappingConfig(String localProjectPath) {
+        if (localProjectPath == null || localProjectPath.isEmpty()) {
+            return PathMappingConfig.disabled();
+        }
+        try {
+            JsonObject root = readConfig();
+            if (!root.has("projectConfigs") || !root.get("projectConfigs").isJsonObject()) {
+                return PathMappingConfig.disabled();
+            }
+            JsonObject all = root.getAsJsonObject("projectConfigs");
+            if (!all.has(localProjectPath) || !all.get(localProjectPath).isJsonObject()) {
+                return PathMappingConfig.disabled();
+            }
+            JsonObject proj = all.getAsJsonObject(localProjectPath);
+            if (!proj.has("pathMapping") || proj.get("pathMapping").isJsonNull()) {
+                return PathMappingConfig.disabled();
+            }
+            PathMappingConfig cfg = gson.fromJson(proj.get("pathMapping"), PathMappingConfig.class);
+            return cfg != null ? cfg : PathMappingConfig.disabled();
+        } catch (Exception e) {
+            LOG.warn("[CodemossSettings] getPathMappingConfig failed: " + e.getMessage());
+            return PathMappingConfig.disabled();
+        }
+    }
+
+    /** Persist the path mapping configuration for the given local project path. */
+    public void setPathMappingConfig(String localProjectPath, PathMappingConfig cfg) throws IOException {
+        if (localProjectPath == null || localProjectPath.isEmpty()) {
+            throw new IllegalArgumentException("localProjectPath required");
+        }
+        if (cfg == null) cfg = PathMappingConfig.disabled();
+        JsonObject root = readConfig();
+        JsonObject all = root.has("projectConfigs") && root.get("projectConfigs").isJsonObject()
+                ? root.getAsJsonObject("projectConfigs")
+                : new JsonObject();
+        JsonObject proj = all.has(localProjectPath) && all.get(localProjectPath).isJsonObject()
+                ? all.getAsJsonObject(localProjectPath)
+                : new JsonObject();
+        proj.add("pathMapping", gson.toJsonTree(cfg));
+        all.add(localProjectPath, proj);
+        root.add("projectConfigs", all);
+        writeConfig(root);
+        LOG.info("[CodemossSettings] Set pathMapping for project=" + localProjectPath
+                + " enabled=" + cfg.enabled);
+    }
+
     // ==================== Codex Provider Management ====================
 
     public List<JsonObject> getCodexProviders() throws IOException {

@@ -249,6 +249,11 @@ class HistoryLoadService {
     /**
      * Fetch project history data from a remote ai-bridge-server.
      * Returns JSON in the same shape as {@code ClaudeHistoryReader.getProjectDataAsJson()}.
+     *
+     * <p>Path mapping: the local project path is translated to its remote-side
+     * form before being sent (so the server looks up history under the right
+     * directory), and any path-bearing fields in the response are translated
+     * back to local form before the JSON is rendered by the UI.
      */
     private String fetchRemoteProjectData(String remoteUrl, String projectPath) throws Exception {
         if (remoteUrl == null || remoteUrl.isBlank()) {
@@ -257,8 +262,13 @@ class HistoryLoadService {
         String base = remoteUrl.trim();
         if (base.endsWith("/")) base = base.substring(0, base.length() - 1);
 
+        com.github.claudecodegui.path.PathMapper mapper = context.getProject() != null
+                ? com.github.claudecodegui.path.PathMapperHolder.getInstance(context.getProject()).get()
+                : com.github.claudecodegui.path.IdentityPathMapper.INSTANCE;
+        String wireProjectPath = mapper.toRemote(projectPath);
+
         String url = base + "/history/project-data?projectPath="
-                + URLEncoder.encode(projectPath, StandardCharsets.UTF_8);
+                + URLEncoder.encode(wireProjectPath, StandardCharsets.UTF_8);
 
         HttpClient client = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(5))
@@ -273,6 +283,51 @@ class HistoryLoadService {
         if (resp.statusCode() != 200) {
             throw new RuntimeException("HTTP " + resp.statusCode() + ": " + resp.body());
         }
-        return resp.body();
+        String body = resp.body();
+        return mapper.isActive() ? translateHistoryPaths(body, mapper) : body;
+    }
+
+    /**
+     * Walk the JSON returned by /history/project-data and rewrite any path
+     * fields that look like they came from a JSONL message line — see the
+     * {@code __history_line__} entry in {@link com.github.claudecodegui.path.PathFields}.
+     */
+    private static String translateHistoryPaths(String json,
+                                                com.github.claudecodegui.path.PathMapper mapper) {
+        if (json == null || json.isEmpty()) return json;
+        try {
+            com.google.gson.JsonElement el = com.google.gson.JsonParser.parseString(json);
+            if (!el.isJsonObject() && !el.isJsonArray()) return json;
+            // The response wraps message lines under various keys depending on the
+            // server implementation. Rather than guess the wrapper, recursively
+            // walk every nested object and apply the line-level manifest.
+            walkAndTranslate(el, mapper);
+            return new com.google.gson.Gson().toJson(el);
+        } catch (Exception e) {
+            LOG.warn("[HistoryHandler] history path translation failed: " + e.getMessage());
+            return json;
+        }
+    }
+
+    private static void walkAndTranslate(com.google.gson.JsonElement el,
+                                         com.github.claudecodegui.path.PathMapper mapper) {
+        if (el == null || el.isJsonNull()) return;
+        if (el.isJsonArray()) {
+            for (com.google.gson.JsonElement child : el.getAsJsonArray()) {
+                walkAndTranslate(child, mapper);
+            }
+            return;
+        }
+        if (el.isJsonObject()) {
+            com.google.gson.JsonObject obj = el.getAsJsonObject();
+            // Apply manifest to this object — fail-soft.
+            try {
+                com.github.claudecodegui.path.PathFieldVisitor.applyInbound(
+                        "__history_line__", obj, mapper::toLocal);
+            } catch (Exception ignore) {}
+            for (java.util.Map.Entry<String, com.google.gson.JsonElement> e : obj.entrySet()) {
+                walkAndTranslate(e.getValue(), mapper);
+            }
+        }
     }
 }

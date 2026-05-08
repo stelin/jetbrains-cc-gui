@@ -69,7 +69,12 @@ public class SettingsHandler extends BaseMessageHandler {
         // Remote mode (ai-bridge-server)
         "get_remote_mode",
         "set_remote_mode",
-        "test_remote_connection"
+        "test_remote_connection",
+        // Path mapping (per-project, remote mode only)
+        "get_path_mapping",
+        "set_path_mapping",
+        "get_path_misses",
+        "clear_path_misses"
     };
 
     public SettingsHandler(HandlerContext context) {
@@ -239,6 +244,19 @@ public class SettingsHandler extends BaseMessageHandler {
                 return true;
             case "test_remote_connection":
                 projectConfigHandler.handleTestRemoteConnection(content);
+                return true;
+            // Path mapping
+            case "get_path_mapping":
+                projectConfigHandler.handleGetPathMapping();
+                return true;
+            case "set_path_mapping":
+                projectConfigHandler.handleSetPathMapping(content);
+                return true;
+            case "get_path_misses":
+                projectConfigHandler.handleGetPathMisses();
+                return true;
+            case "clear_path_misses":
+                projectConfigHandler.handleClearPathMisses();
                 return true;
             default:
                 return false;

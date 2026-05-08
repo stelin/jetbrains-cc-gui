@@ -10,6 +10,7 @@ import com.github.claudecodegui.provider.common.RemoteBridge;
 import com.github.claudecodegui.settings.RemoteModeContext;
 import com.google.gson.JsonObject;
 import com.intellij.openapi.diagnostic.Logger;
+import com.intellij.openapi.project.Project;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -26,12 +27,19 @@ class ClaudeDaemonCoordinator {
     private final NodeDetector nodeDetector;
     private final Supplier<BridgeDirectoryResolver> directoryResolverSupplier;
     private final EnvironmentConfigurator envConfigurator;
+    private final Project project;        // null when caller has no project context
 
     private volatile IBridge daemonBridge;
     private final Object daemonLock = new Object();
     private volatile long daemonRetryAfter = 0;
     private volatile CompletableFuture<?> prewarmFuture;
     private volatile ControlMessageHandler controlMessageHandler;
+    private volatile String lastStartFailureCode;
+    private volatile String lastStartFailureMessage;
+
+    /** Last RemoteBridge start failure, for callers that surface UI errors. */
+    public String getLastStartFailureCode()    { return lastStartFailureCode; }
+    public String getLastStartFailureMessage() { return lastStartFailureMessage; }
 
     ClaudeDaemonCoordinator(
             Logger log,
@@ -39,10 +47,21 @@ class ClaudeDaemonCoordinator {
             Supplier<BridgeDirectoryResolver> directoryResolverSupplier,
             EnvironmentConfigurator envConfigurator
     ) {
+        this(log, nodeDetector, directoryResolverSupplier, envConfigurator, null);
+    }
+
+    ClaudeDaemonCoordinator(
+            Logger log,
+            NodeDetector nodeDetector,
+            Supplier<BridgeDirectoryResolver> directoryResolverSupplier,
+            EnvironmentConfigurator envConfigurator,
+            Project project
+    ) {
         this.log = log;
         this.nodeDetector = nodeDetector;
         this.directoryResolverSupplier = directoryResolverSupplier;
         this.envConfigurator = envConfigurator;
+        this.project = project;
     }
 
     IBridge getDaemonBridge() {
@@ -70,8 +89,9 @@ class ClaudeDaemonCoordinator {
                 RemoteModeContext rmCtx = RemoteModeContext.getInstance();
                 if (rmCtx != null && rmCtx.isRemote()) {
                     String url = rmCtx.remoteServerUrl();
-                    log.info("[DaemonCoordinator] Remote mode enabled, baseUrl=" + url);
-                    newBridge = new RemoteBridge(url);
+                    log.info("[DaemonCoordinator] Remote mode enabled, baseUrl=" + url
+                            + " project=" + (project != null ? project.getBasePath() : "<none>"));
+                    newBridge = new RemoteBridge(url, project);
                 } else {
                     newBridge = new LocalBridge(
                             nodeDetector,
@@ -86,10 +106,22 @@ class ClaudeDaemonCoordinator {
                 if (newBridge.start()) {
                     daemonBridge = newBridge;
                     daemonRetryAfter = 0;
+                    lastStartFailureCode = null;
+                    lastStartFailureMessage = null;
                     log.info("[DaemonCoordinator] Daemon bridge started successfully");
                     return newBridge;
                 }
-                log.warn("[DaemonCoordinator] Failed to start daemon, using per-process mode");
+                // Capture the structured failure from RemoteBridge so callers
+                // can show the actual reason instead of a generic fallback msg.
+                if (newBridge instanceof RemoteBridge) {
+                    RemoteBridge rb = (RemoteBridge) newBridge;
+                    lastStartFailureCode = rb.getLastStartFailureCode();
+                    lastStartFailureMessage = rb.getLastStartFailureMessage();
+                }
+                log.warn("[DaemonCoordinator] Failed to start daemon"
+                        + (lastStartFailureCode != null ? " code=" + lastStartFailureCode : "")
+                        + (lastStartFailureMessage != null ? " msg=" + lastStartFailureMessage : "")
+                        + ", using per-process mode");
             } catch (Exception e) {
                 log.debug("[DaemonCoordinator] Daemon init failed: " + e.getMessage());
             }
@@ -126,8 +158,13 @@ class ClaudeDaemonCoordinator {
         if (current != null) {
             current.stop();
             daemonBridge = null;
-            daemonRetryAfter = 0;
         }
+        // Always clear the retry cooldown — a config change (path mapping,
+        // remote URL, etc.) should let the very next request retry, even when
+        // the previous start() left daemonBridge null due to failure.
+        daemonRetryAfter = 0;
+        lastStartFailureCode = null;
+        lastStartFailureMessage = null;
     }
 
     void prewarmDaemonAsync(String cwd, String runtimeSessionEpoch) {

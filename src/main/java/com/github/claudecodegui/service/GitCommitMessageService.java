@@ -358,7 +358,7 @@ Footer 包含：
      * Call the Claude API.
      */
     private void callClaudeAPI(String prompt, CommitMessageCallback callback) {
-        ClaudeSDKBridge bridge = new ClaudeSDKBridge();
+        ClaudeSDKBridge bridge = new ClaudeSDKBridge(project);
         try {
             // Simple callback handler
             StringBuilder result = new StringBuilder();

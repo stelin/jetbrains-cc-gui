@@ -5,13 +5,18 @@ import styles from './style.module.less';
  * RemoteServerSection
  *
  * Switches the daemon between local-spawn mode and a remote
- * ai-bridge-server (HTTP + SSE). Shows connection-test feedback and
- * a notice listing features that are downgraded in remote mode.
+ * ai-bridge-server (HTTP + SSE). Shows connection-test feedback,
+ * the per-project path-mapping panel, and a notice listing features
+ * that are downgraded in remote mode.
  *
  * Wires to Java handlers:
  *   - get_remote_mode             → window.updateRemoteMode
  *   - set_remote_mode             → window.updateRemoteMode
  *   - test_remote_connection      → window.updateRemoteConnectionTest
+ *   - get_path_mapping            → window.updatePathMapping
+ *   - set_path_mapping            → window.updatePathMapping
+ *   - get_path_misses             → window.updatePathMisses
+ *   - clear_path_misses           → window.updatePathMisses
  * ──────────────────────────────────────────────────────────────── */
 
 const sendToJava = (msg: string) => {
@@ -32,13 +37,38 @@ interface ConnTestResult {
   version?: string;
 }
 
+type OsType = '' | 'WIN' | 'LINUX' | 'MAC';
+
+interface PathMappingState {
+  enabled: boolean;
+  localOs: OsType;
+  localRoot: string;
+  remoteOs: OsType;
+  remoteRoot: string;
+}
+
+interface PathMissesState {
+  outboundCount: number;
+  inboundCount: number;
+  outboundSamples: string[];
+}
+
 declare global {
   interface Window {
     updateRemoteMode?: (json: string) => void;
     updateRemoteConnectionTest?: (json: string) => void;
+    updatePathMapping?: (json: string) => void;
+    updatePathMisses?: (json: string) => void;
     sendToJava?: (msg: string) => void;
   }
 }
+
+const OS_OPTIONS: { value: OsType; label: string }[] = [
+  { value: '',      label: '请选择…' },
+  { value: 'WIN',   label: 'Windows' },
+  { value: 'LINUX', label: 'Linux' },
+  { value: 'MAC',   label: 'macOS' },
+];
 
 export function RemoteServerSection() {
   const [state, setState] = useState<RemoteModeState>({
@@ -48,6 +78,23 @@ export function RemoteServerSection() {
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'ok' | 'fail'>('idle');
   const [testMsg, setTestMsg] = useState<string>('');
   const [rebuildHint, setRebuildHint] = useState<string>('');
+
+  // Path mapping (per-project) — only meaningful in remote mode.
+  const [mapping, setMapping] = useState<PathMappingState>({
+    enabled: false,
+    localOs: '',
+    localRoot: '',
+    remoteOs: '',
+    remoteRoot: '',
+  });
+  const [mappingExpanded, setMappingExpanded] = useState<boolean>(false);
+  const [mappingSaveHint, setMappingSaveHint] = useState<string>('');
+  const [misses, setMisses] = useState<PathMissesState>({
+    outboundCount: 0,
+    inboundCount: 0,
+    outboundSamples: [],
+  });
+  const [missesPanelOpen, setMissesPanelOpen] = useState<boolean>(false);
 
   // Initial load + register window callback
   useEffect(() => {
@@ -81,10 +128,40 @@ export function RemoteServerSection() {
         setTestMsg('响应解析失败');
       }
     };
+    window.updatePathMapping = (json: string) => {
+      try {
+        const next = JSON.parse(json) as PathMappingState;
+        setMapping({
+          enabled:    !!next.enabled,
+          localOs:   (next.localOs   as OsType) || '',
+          localRoot:  next.localRoot  || '',
+          remoteOs:  (next.remoteOs  as OsType) || '',
+          remoteRoot: next.remoteRoot || '',
+        });
+      } catch (e) {
+        console.error('[RemoteServerSection] updatePathMapping parse failed', e);
+      }
+    };
+    window.updatePathMisses = (json: string) => {
+      try {
+        const next = JSON.parse(json) as PathMissesState;
+        setMisses({
+          outboundCount:    next.outboundCount    || 0,
+          inboundCount:     next.inboundCount     || 0,
+          outboundSamples:  next.outboundSamples  || [],
+        });
+      } catch (e) {
+        console.error('[RemoteServerSection] updatePathMisses parse failed', e);
+      }
+    };
     sendToJava('get_remote_mode:');
+    sendToJava('get_path_mapping:');
+    sendToJava('get_path_misses:');
     return () => {
       delete window.updateRemoteMode;
       delete window.updateRemoteConnectionTest;
+      delete window.updatePathMapping;
+      delete window.updatePathMisses;
     };
   }, []);
 
@@ -115,6 +192,25 @@ export function RemoteServerSection() {
     setTestMsg('测试中…');
     sendToJava(`test_remote_connection:${JSON.stringify({ remoteServerUrl: state.remoteServerUrl })}`);
   };
+
+  const onMappingSave = () => {
+    sendToJava(`set_path_mapping:${JSON.stringify(mapping)}`);
+    setMappingSaveHint('✓ 已保存，下次发送消息时使用新映射');
+    setTimeout(() => setMappingSaveHint(''), 5000);
+  };
+
+  const onMappingFieldChange = <K extends keyof PathMappingState>(key: K, value: PathMappingState[K]) => {
+    setMapping((m) => ({ ...m, [key]: value }));
+  };
+
+  const onClearMisses = () => {
+    sendToJava('clear_path_misses:');
+  };
+
+  const mappingValid =
+    mapping.enabled
+      ? !!mapping.localOs && !!mapping.localRoot && !!mapping.remoteOs && !!mapping.remoteRoot
+      : true;
 
   return (
     <div className={styles.section}>
@@ -186,6 +282,132 @@ export function RemoteServerSection() {
             </div>
           )}
           {rebuildHint && <div className={styles.testOk}>{rebuildHint}</div>}
+
+          {/* Path mapping panel */}
+          <div className={styles.subsection}>
+            <div
+              className={styles.subsectionHeader}
+              onClick={() => setMappingExpanded((v) => !v)}
+            >
+              <span className={styles.subsectionTitle}>
+                {mappingExpanded ? '▾' : '▸'} 路径映射（本项目）
+              </span>
+              {misses.outboundCount > 0 && (
+                <span
+                  className={styles.badge}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setMissesPanelOpen((v) => !v);
+                    sendToJava('get_path_misses:');
+                  }}
+                  title="点击查看未命中映射的路径列表"
+                >
+                  ⚠ {misses.outboundCount} 条未命中
+                </span>
+              )}
+            </div>
+
+            {mappingExpanded && (
+              <div className={styles.subsectionBody}>
+                <div className={styles.row}>
+                  <label className={styles.checkbox}>
+                    <input
+                      type="checkbox"
+                      checked={mapping.enabled}
+                      onChange={(e) => onMappingFieldChange('enabled', e.target.checked)}
+                    />
+                    <span>启用映射</span>
+                  </label>
+                </div>
+
+                <div className={styles.row}>
+                  <label className={styles.label}>本地系统</label>
+                  <select
+                    className={styles.input}
+                    value={mapping.localOs}
+                    onChange={(e) => onMappingFieldChange('localOs', e.target.value as OsType)}
+                    disabled={!mapping.enabled}
+                  >
+                    {OS_OPTIONS.map((o) => (
+                      <option key={o.value || 'none'} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className={styles.row}>
+                  <label className={styles.label}>本地根目录</label>
+                  <input
+                    type="text"
+                    className={styles.input}
+                    placeholder="例如 D:\\www\\ai\\proj-x"
+                    value={mapping.localRoot}
+                    onChange={(e) => onMappingFieldChange('localRoot', e.target.value)}
+                    disabled={!mapping.enabled}
+                  />
+                </div>
+
+                <div className={styles.row}>
+                  <label className={styles.label}>远端系统</label>
+                  <select
+                    className={styles.input}
+                    value={mapping.remoteOs}
+                    onChange={(e) => onMappingFieldChange('remoteOs', e.target.value as OsType)}
+                    disabled={!mapping.enabled}
+                  >
+                    {OS_OPTIONS.map((o) => (
+                      <option key={o.value || 'none'} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className={styles.row}>
+                  <label className={styles.label}>远端根目录</label>
+                  <input
+                    type="text"
+                    className={styles.input}
+                    placeholder="例如 /home/devuser/projects/proj-x"
+                    value={mapping.remoteRoot}
+                    onChange={(e) => onMappingFieldChange('remoteRoot', e.target.value)}
+                    disabled={!mapping.enabled}
+                  />
+                </div>
+
+                <div className={styles.row}>
+                  <button
+                    type="button"
+                    className={styles.btn}
+                    disabled={!mappingValid}
+                    onClick={onMappingSave}
+                  >
+                    保存映射
+                  </button>
+                  {!mappingValid && (
+                    <span className={styles.testFail}>请填完所有字段后再保存</span>
+                  )}
+                </div>
+
+                {mappingSaveHint && <div className={styles.testOk}>{mappingSaveHint}</div>}
+
+                {missesPanelOpen && (
+                  <div className={styles.missesPanel}>
+                    <div className={styles.missesHeader}>
+                      <span>未命中映射的路径（最多展示 50 条）</span>
+                      <button type="button" className={styles.btnSmall} onClick={onClearMisses}>清空</button>
+                    </div>
+                    {misses.outboundSamples.length === 0 ? (
+                      <div className={styles.missesEmpty}>暂无</div>
+                    ) : (
+                      <ul className={styles.missesList}>
+                        {misses.outboundSamples.map((s, i) => (
+                          <li key={i}>{s}</li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
 
           <div className={styles.notice}>
             <div className={styles.noticeTitle}>⚠ 远程模式下以下功能不可在 IDE 内编辑：</div>

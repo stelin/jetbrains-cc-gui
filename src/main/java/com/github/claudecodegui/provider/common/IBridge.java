@@ -103,4 +103,24 @@ public interface IBridge {
         void onDaemonReady();
         void onDaemonDied();
     }
+
+    /**
+     * Optional extension of {@link DaemonLifecycleListener} that receives a
+     * structured error code when the bridge fails to start. RemoteBridge uses
+     * this to surface project-related errors (no project open, project path
+     * not accessible on server, etc.) directly to the UI.
+     *
+     * <p>Listeners that don't implement this interface still receive a generic
+     * {@link #onDaemonDied()} for backwards compatibility.
+     */
+    interface DaemonLifecycleListenerWithError extends DaemonLifecycleListener {
+        /**
+         * @param code machine-readable error tag (e.g. {@code PROJECT_NOT_OPEN},
+         *             {@code PROJECT_PATH_NOT_ACCESSIBLE},
+         *             {@code PROJECT_PATH_REQUIRED},
+         *             {@code SESSION_CREATE_FAILED})
+         * @param message human-readable message
+         */
+        void onDaemonStartFailed(String code, String message);
+    }
 }

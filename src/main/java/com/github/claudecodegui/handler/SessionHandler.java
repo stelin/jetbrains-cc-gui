@@ -170,6 +170,12 @@ public class SessionHandler extends BaseMessageHandler {
             prompt = content;
         }
 
+        // Path mapping (remote mode only): translate @-token paths in the prompt
+        // text and any structured fileTag paths to their remote-side form before
+        // the message is sent. Agent prompt itself is left as-is — agent prompts
+        // are user-authored instructions, not file references.
+        prompt = translateAtMentionsAndFileTags(prompt, fileTagPaths);
+
         final String finalPrompt = prompt;
         final String finalAgentPrompt = agentPrompt;
         final java.util.List<String> finalFileTagPaths = fileTagPaths;
@@ -314,6 +320,9 @@ public class SessionHandler extends BaseMessageHandler {
             return;
         }
 
+        // Path mapping: translate @ tokens + fileTag paths.
+        final String translatedPrompt = translateAtMentionsAndFileTags(prompt, fileTagPaths);
+
         final String finalAgentPrompt = agentPrompt;
         final java.util.List<String> finalFileTagPaths = fileTagPaths;
         final String finalRequestedPermissionMode = requestedPermissionMode;
@@ -333,7 +342,7 @@ public class SessionHandler extends BaseMessageHandler {
             }
 
             // [FIX] Pass agent prompt and file tags directly to session
-            context.getSession().send(prompt, attachments, finalAgentPrompt, finalFileTagPaths, finalRequestedPermissionMode)
+            context.getSession().send(translatedPrompt, attachments, finalAgentPrompt, finalFileTagPaths, finalRequestedPermissionMode)
                 .thenRun(() -> {
                     // Claude now triggers success on actual stream_end callback.
                     // Codex has no stream_end event, keep success trigger at completion.
@@ -375,6 +384,44 @@ public class SessionHandler extends BaseMessageHandler {
         context.getSession().restart().thenRun(() -> {
             ApplicationManager.getApplication().invokeLater(() -> {});
         });
+    }
+
+    /**
+     * Translate {@code @<localPath>} tokens in the prompt text and any
+     * structured file-tag paths to their remote-side form when a path mapping
+     * is active. No-op in local mode and in unmapped remote mode.
+     *
+     * <p>Per design constraint §1.1, the {@code @} token greedily consumes
+     * non-whitespace characters until the next whitespace; per §1.2 paths
+     * not preceded by {@code @} are <strong>not</strong> translated.
+     */
+    private String translateAtMentionsAndFileTags(String prompt, java.util.List<String> fileTagPaths) {
+        com.github.claudecodegui.path.PathMapper m = context.getProject() != null
+                ? com.github.claudecodegui.path.PathMapperHolder.getInstance(context.getProject()).get()
+                : com.github.claudecodegui.path.IdentityPathMapper.INSTANCE;
+        if (!m.isActive()) return prompt;
+
+        String translated = prompt;
+        if (translated != null && !translated.isEmpty()) {
+            java.util.regex.Pattern p = java.util.regex.Pattern.compile("(?<=^|\\s)@(\\S+)");
+            java.util.regex.Matcher matcher = p.matcher(translated);
+            StringBuilder sb = new StringBuilder();
+            while (matcher.find()) {
+                String local = matcher.group(1);
+                String remote = m.toRemote(local);
+                matcher.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement("@" + remote));
+            }
+            matcher.appendTail(sb);
+            translated = sb.toString();
+        }
+
+        if (fileTagPaths != null) {
+            for (int i = 0; i < fileTagPaths.size(); i++) {
+                String s = fileTagPaths.get(i);
+                if (s != null && !s.isEmpty()) fileTagPaths.set(i, m.toRemote(s));
+            }
+        }
+        return translated;
     }
 
     /**

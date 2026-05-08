@@ -8,6 +8,7 @@ import com.github.claudecodegui.provider.common.BaseSDKBridge;
 import com.github.claudecodegui.provider.common.MessageCallback;
 import com.github.claudecodegui.provider.common.IBridge;
 import com.github.claudecodegui.provider.common.SDKResult;
+import com.intellij.openapi.project.Project;
 
 import java.io.File;
 import java.util.List;
@@ -31,7 +32,16 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
     private final ClaudeRewindService rewindService;
     private final ClaudeDaemonRequestExecutor daemonRequestExecutor;
 
+    /**
+     * Legacy constructor — keep for callers that have no Project on hand. In
+     * remote mode the resulting bridge will fail with PROJECT_NOT_OPEN, since
+     * projectPath is mandatory at session creation time.
+     */
     public ClaudeSDKBridge() {
+        this(null);
+    }
+
+    public ClaudeSDKBridge(Project project) {
         super(ClaudeSDKBridge.class);
 
         // Shared dependencies extracted once to avoid repeated lambda allocation
@@ -43,7 +53,7 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
         ClaudeLogSanitizer logSanitizer = new ClaudeLogSanitizer();
 
         this.daemonCoordinator = new ClaudeDaemonCoordinator(
-                LOG, nodeDetector, this::getDirectoryResolver, envConfigurator
+                LOG, nodeDetector, this::getDirectoryResolver, envConfigurator, project
         );
         this.processInvoker = new ClaudeProcessInvoker(
                 LOG, gson, nodeDetector, sdkDirSupplier, processManager,
@@ -75,6 +85,33 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
      */
     public void shutdownDaemon() {
         daemonCoordinator.shutdownDaemon();
+    }
+
+    /**
+     * Format the most recent RemoteBridge start failure (if any) for inclusion
+     * in user-facing error messages. Returns null when no structured failure
+     * was recorded.
+     */
+    private String formatStartFailure() {
+        String code = daemonCoordinator.getLastStartFailureCode();
+        String msg  = daemonCoordinator.getLastStartFailureMessage();
+        if (code == null && msg == null) return null;
+        StringBuilder sb = new StringBuilder();
+        if (code != null) sb.append(code);
+        if (msg != null) {
+            if (sb.length() > 0) sb.append(": ");
+            sb.append(msg);
+        }
+        // Append actionable hints for the most common error codes.
+        if ("PROJECT_PATH_NOT_ACCESSIBLE".equals(code)) {
+            sb.append("。请在「设置 → 远程模式 → 路径映射」配置本地→远端的根目录映射，"
+                    + "或确认 server 端确实存在该项目目录。");
+        } else if ("PROJECT_PATH_REQUIRED".equals(code)) {
+            sb.append("。Server 要求 projectPath，请检查插件版本与 server 是否匹配。");
+        } else if ("PROJECT_NOT_OPEN".equals(code)) {
+            sb.append("。请先在 IDE 中打开一个项目。");
+        }
+        return sb.toString();
     }
 
     public void prewarmDaemonAsync(String cwd) {
@@ -364,9 +401,10 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
                 com.github.claudecodegui.settings.RemoteModeContext.getInstance();
         if (rmCtx != null && rmCtx.isRemote()) {
             String url = rmCtx.remoteServerUrl();
+            String reason = formatStartFailure();
             String err = "Remote ai-bridge-server not available at " + url
-                    + " (session not started or daemon failed to become ready). "
-                    + "Per-process fallback is disabled in remote mode.";
+                    + (reason != null ? " — " + reason : " (session not started or daemon failed to become ready)")
+                    + ". Per-process fallback is disabled in remote mode.";
             LOG.warn("[ClaudeSDKBridge] " + err);
             CompletableFuture<SDKResult> failed = new CompletableFuture<>();
             SDKResult result = new SDKResult();

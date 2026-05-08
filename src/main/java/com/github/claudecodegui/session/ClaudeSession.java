@@ -154,6 +154,13 @@ public class ClaudeSession {
                 new SessionMessageOrchestrator.SessionHistoryAccess() {
                     @Override
                     public List<JsonObject> getProviderSessionMessages(String provider, String sessionId, String cwd) {
+                        if (!"codex".equals(provider)
+                                && com.github.claudecodegui.settings.RemoteModeContext.getInstance().isRemote()) {
+                            List<JsonObject> remote = fetchRemoteClaudeSessionMessages(sessionId, cwd);
+                            if (remote != null) {
+                                return remote;
+                            }
+                        }
                         return providerRouter.getSessionMessages(provider, sessionId, cwd);
                     }
 
@@ -168,6 +175,76 @@ public class ClaudeSession {
         permissionManager.setOnPermissionRequestedCallback(request -> {
             callbackFacade.notifyPermissionRequested(request);
         });
+    }
+
+    /**
+     * Fetch a Claude session's JSONL messages from the configured ai-bridge-server.
+     *
+     * <p>The local cwd is translated to its remote-side form (and base64-encoded) via
+     * {@link com.github.claudecodegui.path.HistoryProjectPathEncoder}, mirroring what
+     * {@code HistoryLoadService} does for the listing path. Path-bearing fields in
+     * each message line are translated back to local form via
+     * {@link com.github.claudecodegui.path.PathFieldVisitor#applyInbound}.
+     *
+     * @return parsed messages, or {@code null} if remote mode is not usable so the
+     *         caller can fall through to the local Node bridge.
+     */
+    private List<JsonObject> fetchRemoteClaudeSessionMessages(String sessionId, String cwd) {
+        com.github.claudecodegui.settings.RemoteModeContext rmCtx =
+                com.github.claudecodegui.settings.RemoteModeContext.getInstance();
+        String remoteUrl = rmCtx.remoteServerUrl();
+        if (remoteUrl == null || remoteUrl.isBlank()) {
+            LOG.warn("[ClaudeSession] Remote mode but remoteServerUrl is empty; falling through to local bridge");
+            return null;
+        }
+
+        String encodedProject = com.github.claudecodegui.path.HistoryProjectPathEncoder.encode(project, cwd);
+        if (encodedProject == null || encodedProject.isEmpty()) {
+            LOG.warn("[ClaudeSession] Cannot encode project path for remote session fetch: cwd=" + cwd);
+            return java.util.Collections.emptyList();
+        }
+
+        java.util.Optional<byte[]> raw;
+        try {
+            com.github.claudecodegui.provider.claude.RemoteHistoryDataSource ds =
+                    new com.github.claudecodegui.provider.claude.RemoteHistoryDataSource(remoteUrl);
+            raw = ds.readSessionRaw(encodedProject, sessionId);
+        } catch (Exception e) {
+            LOG.warn("[ClaudeSession] Remote /history/session call failed: " + e.getMessage());
+            return java.util.Collections.emptyList();
+        }
+
+        if (raw.isEmpty()) {
+            LOG.warn("[ClaudeSession] Remote /history/session returned no data for sessionId=" + sessionId);
+            return java.util.Collections.emptyList();
+        }
+
+        com.github.claudecodegui.path.PathMapper mapper = project != null
+                ? com.github.claudecodegui.path.PathMapperHolder.getInstance(project).get()
+                : com.github.claudecodegui.path.IdentityPathMapper.INSTANCE;
+
+        String body = new String(raw.get(), java.nio.charset.StandardCharsets.UTF_8);
+        List<JsonObject> messages = new java.util.ArrayList<>();
+        for (String line : body.split("\\r?\\n")) {
+            if (line.isEmpty()) continue;
+            try {
+                com.google.gson.JsonElement el = com.google.gson.JsonParser.parseString(line);
+                if (!el.isJsonObject()) continue;
+                JsonObject obj = el.getAsJsonObject();
+                if (mapper.isActive()) {
+                    try {
+                        com.github.claudecodegui.path.PathFieldVisitor.applyInbound(
+                                "__history_line__", obj, mapper::toLocal);
+                    } catch (Exception ignore) {
+                        // fail-soft: a bad path translation must not block the line
+                    }
+                }
+                messages.add(obj);
+            } catch (Exception ex) {
+                LOG.debug("[ClaudeSession] Skipping malformed JSONL line: " + ex.getMessage());
+            }
+        }
+        return messages;
     }
 
     public void setCallback(SessionCallback callback) {

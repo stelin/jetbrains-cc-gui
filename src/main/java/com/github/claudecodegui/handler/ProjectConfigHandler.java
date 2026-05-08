@@ -548,6 +548,11 @@ public class ProjectConfigHandler {
             LOG.info("[ProjectConfigHandler] Set daemonMode=" + mode + " remoteServerUrl=" + url
                     + " (changed=" + changed + ")");
 
+            // Rebuild path mapper since remote-mode toggle affects which mapper is active.
+            try {
+                com.github.claudecodegui.path.PathMapperHolder.getInstance(context.getProject()).rebuild();
+            } catch (Exception ignore) {}
+
             // If mode or URL changed, tear down current Claude daemon so the
             // next request lazily rebuilds via the new code path. Codex spawns
             // per-request and doesn't maintain a persistent daemon, so no
@@ -620,6 +625,110 @@ public class ProjectConfigHandler {
             ApplicationManager.getApplication().invokeLater(() ->
                 context.callJavaScript("window.updateRemoteConnectionTest", context.escapeJs(gson.toJson(r))));
         });
+    }
+
+    // ==================== Path Mapping ====================
+
+    public void handleGetPathMapping() {
+        try {
+            String base = context.getProject().getBasePath();
+            com.github.claudecodegui.settings.PathMappingConfig cfg = base != null
+                    ? settingsService.getPathMappingConfig(base)
+                    : com.github.claudecodegui.settings.PathMappingConfig.disabled();
+            JsonObject r = new JsonObject();
+            r.addProperty("enabled", cfg.enabled);
+            r.addProperty("localOs",  cfg.localOs  != null ? cfg.localOs.name()  : "");
+            r.addProperty("localRoot",  cfg.localRoot  != null ? cfg.localRoot  : "");
+            r.addProperty("remoteOs", cfg.remoteOs != null ? cfg.remoteOs.name() : "");
+            r.addProperty("remoteRoot", cfg.remoteRoot != null ? cfg.remoteRoot : "");
+            String json = gson.toJson(r);
+            ApplicationManager.getApplication().invokeLater(() ->
+                context.callJavaScript("window.updatePathMapping", context.escapeJs(json)));
+        } catch (Exception e) {
+            LOG.error("[ProjectConfigHandler] handleGetPathMapping failed: " + e.getMessage(), e);
+        }
+    }
+
+    public void handleSetPathMapping(String content) {
+        try {
+            String base = context.getProject().getBasePath();
+            if (base == null) {
+                ApplicationManager.getApplication().invokeLater(() ->
+                    context.callJavaScript("window.showError", context.escapeJs("请先打开一个项目再配置路径映射")));
+                return;
+            }
+            JsonObject json = gson.fromJson(content, JsonObject.class);
+            com.github.claudecodegui.settings.PathMappingConfig cfg =
+                    new com.github.claudecodegui.settings.PathMappingConfig();
+            cfg.enabled = json != null && json.has("enabled") && json.get("enabled").getAsBoolean();
+            cfg.localOs  = parseOs(optStr(json, "localOs"));
+            cfg.localRoot  = optStr(json, "localRoot");
+            cfg.remoteOs = parseOs(optStr(json, "remoteOs"));
+            cfg.remoteRoot = optStr(json, "remoteRoot");
+            settingsService.setPathMappingConfig(base, cfg);
+            LOG.info("[ProjectConfigHandler] Saved path mapping for project=" + base
+                    + " enabled=" + cfg.enabled);
+
+            // Rebuild mapper + force daemon restart so the next message uses the new mapping.
+            com.github.claudecodegui.path.PathMapperHolder.getInstance(context.getProject()).rebuild();
+            CompletableFuture.runAsync(() -> {
+                try {
+                    if (context.getClaudeSDKBridge() != null) {
+                        context.getClaudeSDKBridge().shutdownDaemon();
+                        LOG.info("[ProjectConfigHandler] Daemon restarted for path-mapping change");
+                    }
+                } catch (Exception se) {
+                    LOG.warn("[ProjectConfigHandler] Daemon shutdown failed: " + se.getMessage());
+                }
+            });
+
+            // Echo back the saved state so the UI re-syncs.
+            handleGetPathMapping();
+        } catch (Exception e) {
+            LOG.error("[ProjectConfigHandler] handleSetPathMapping failed: " + e.getMessage(), e);
+            ApplicationManager.getApplication().invokeLater(() ->
+                context.callJavaScript("window.showError", context.escapeJs("保存路径映射失败")));
+        }
+    }
+
+    public void handleGetPathMisses() {
+        try {
+            com.github.claudecodegui.path.PathMissTracker tracker =
+                    com.github.claudecodegui.path.PathMissTracker.getInstance(context.getProject());
+            JsonObject r = new JsonObject();
+            r.addProperty("outboundCount", tracker.outboundCount());
+            r.addProperty("inboundCount",  tracker.inboundCount());
+            com.google.gson.JsonArray samples = new com.google.gson.JsonArray();
+            for (String s : tracker.outboundSamples(50)) samples.add(s);
+            r.add("outboundSamples", samples);
+            String json = gson.toJson(r);
+            ApplicationManager.getApplication().invokeLater(() ->
+                context.callJavaScript("window.updatePathMisses", context.escapeJs(json)));
+        } catch (Exception e) {
+            LOG.error("[ProjectConfigHandler] handleGetPathMisses failed: " + e.getMessage(), e);
+        }
+    }
+
+    public void handleClearPathMisses() {
+        try {
+            com.github.claudecodegui.path.PathMissTracker.getInstance(context.getProject()).clear();
+            handleGetPathMisses();
+        } catch (Exception e) {
+            LOG.error("[ProjectConfigHandler] handleClearPathMisses failed: " + e.getMessage(), e);
+        }
+    }
+
+    private static String optStr(JsonObject o, String k) {
+        return o != null && o.has(k) && !o.get(k).isJsonNull() ? o.get(k).getAsString() : null;
+    }
+
+    private static com.github.claudecodegui.path.OsType parseOs(String name) {
+        if (name == null || name.isEmpty()) return null;
+        try {
+            return com.github.claudecodegui.path.OsType.valueOf(name.trim().toUpperCase(java.util.Locale.ROOT));
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     private void dispatchUiFontConfigUpdate() {

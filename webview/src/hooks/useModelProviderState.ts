@@ -109,6 +109,7 @@ export function useModelProviderState({ addToast, t }: UseModelProviderStateOpti
       let restoredCodexPermissionMode: PermissionMode = 'default';
       let initialPermissionMode: PermissionMode = 'bypassPermissions';
       let restoredLongContextEnabled = true;  // Default enabled
+      let restoredReasoningEffort: ReasoningEffort = 'max';
 
       if (saved) {
         const state = JSON.parse(saved);
@@ -131,6 +132,13 @@ export function useModelProviderState({ addToast, t }: UseModelProviderStateOpti
         if (typeof state.longContextEnabled === 'boolean') {
           restoredLongContextEnabled = state.longContextEnabled;
           setLongContextEnabled(state.longContextEnabled);
+        }
+
+        // Load reasoning effort (default 'max' if not present or invalid)
+        const validEfforts: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+        if (validEfforts.includes(state.reasoningEffort)) {
+          restoredReasoningEffort = state.reasoningEffort;
+          setReasoningEffort(state.reasoningEffort);
         }
 
         const savedClaudeCustomModels = getCustomModels('claude-custom-models');
@@ -174,6 +182,8 @@ export function useModelProviderState({ addToast, t }: UseModelProviderStateOpti
             : apply1MContextSuffix(restoredClaudeModel, restoredLongContextEnabled);
           sendBridgeEvent('set_model', modelToSync);
           sendBridgeEvent('set_mode', initialPermissionMode);
+          // 同步默认/恢复的 reasoning effort 给 Java,避免 Java SessionState 默认值与 webview 不一致
+          sendBridgeEvent('set_reasoning_effort', restoredReasoningEffort);
         } else {
           syncRetryCount++;
           if (syncRetryCount < MAX_SYNC_RETRIES) {
@@ -197,11 +207,12 @@ export function useModelProviderState({ addToast, t }: UseModelProviderStateOpti
         claudePermissionMode,
         codexPermissionMode,
         longContextEnabled,
+        reasoningEffort,
       }));
     } catch {
       // Failed to save model selection state
     }
-  }, [currentProvider, selectedClaudeModel, selectedCodexModel, claudePermissionMode, codexPermissionMode, longContextEnabled]);
+  }, [currentProvider, selectedClaudeModel, selectedCodexModel, claudePermissionMode, codexPermissionMode, longContextEnabled, reasoningEffort]);
 
   // Load selected agent
   useEffect(() => {

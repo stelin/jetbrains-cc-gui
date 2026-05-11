@@ -50,6 +50,8 @@
     "generatingResponse": "Генерирую ответ",
     "elapsedTime": "Прошло {{time}}",
     "minutesAndSeconds": "{{minutes}}м {{seconds}}с",
+    "thinkingWithEffort": "размышляю с усилием {{effort}}",
+    "almostDoneThinkingWithEffort": "почти завершил размышления с усилием {{effort}}",
     "imagePreview": "Предпросмотр",
     "context": "Контекст",
     "usage": "Использование",

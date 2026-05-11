@@ -141,6 +141,16 @@ public class CallbackHandler {
     }
 
     /**
+     * Notify that the daemon confirmed an effort tier was applied to the SDK call
+     * (echoed from "[REASONING_EFFORT] ✓ ... applied options.effort=xxx" log line).
+     */
+    public void notifyReasoningEffortApplied(String effort) {
+        if (callback != null) {
+            callback.onReasoningEffortApplied(effort);
+        }
+    }
+
+    /**
      * Notify that a specific message received its provider UUID.
      */
     public void notifyUserMessageUuidPatched(String content, String uuid) {

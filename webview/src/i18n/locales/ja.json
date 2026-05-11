@@ -50,6 +50,8 @@
     "generatingResponse": "応答を生成中",
     "elapsedTime": "経過時間 {{time}}",
     "minutesAndSeconds": "{{minutes}}分 {{seconds}}秒",
+    "thinkingWithEffort": "{{effort}} で思考中",
+    "almostDoneThinkingWithEffort": "{{effort}} の思考をまもなく完了",
     "imagePreview": "プレビュー",
     "context": "コンテキスト",
     "usage": "使用状況",

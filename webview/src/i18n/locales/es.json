@@ -50,6 +50,8 @@
     "generatingResponse": "Generando respuesta",
     "elapsedTime": "Transcurrido {{time}}",
     "minutesAndSeconds": "{{minutes}}m {{seconds}}s",
+    "thinkingWithEffort": "pensando con esfuerzo {{effort}}",
+    "almostDoneThinkingWithEffort": "casi terminando de pensar con esfuerzo {{effort}}",
     "imagePreview": "Vista previa",
     "context": "Contexto",
     "usage": "Uso",

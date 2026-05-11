@@ -5,10 +5,17 @@ import com.github.claudecodegui.provider.common.SDKResult;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 /**
  * Adapts tagged Node.js output lines into bridge callbacks and SDKResult updates.
  */
 class ClaudeStreamAdapter {
+
+    /** Extracts the effort tier from the daemon's "[REASONING_EFFORT] ✓ ... applied options.effort=xxx" log line. */
+    private static final Pattern REASONING_EFFORT_APPLIED_PATTERN =
+            Pattern.compile("applied\\s+options\\.effort=([a-zA-Z]+)");
 
     private final Gson gson;
 
@@ -118,6 +125,14 @@ class ClaudeStreamAdapter {
 
         if (line.startsWith("[MESSAGE_END]")) {
             callback.onMessage("message_end", "");
+            return;
+        }
+
+        if (line.startsWith("[REASONING_EFFORT]")) {
+            Matcher m = REASONING_EFFORT_APPLIED_PATTERN.matcher(line);
+            if (m.find()) {
+                callback.onMessage("reasoning_effort_applied", m.group(1));
+            }
         }
     }
 

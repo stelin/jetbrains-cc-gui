@@ -50,6 +50,8 @@
     "generatingResponse": "응답 생성 중",
     "elapsedTime": "경과 시간 {{time}}",
     "minutesAndSeconds": "{{minutes}}분 {{seconds}}초",
+    "thinkingWithEffort": "{{effort}} 강도로 사고 중",
+    "almostDoneThinkingWithEffort": "{{effort}} 강도 사고가 거의 완료됨",
     "imagePreview": "미리보기",
     "context": "컨텍스트",
     "usage": "사용량",

@@ -50,6 +50,8 @@
     "generatingResponse": "प्रतिक्रिया उत्पन्न हो रही है",
     "elapsedTime": "बीता {{time}}",
     "minutesAndSeconds": "{{minutes}} मि {{seconds}} से",
+    "thinkingWithEffort": "{{effort}} प्रयास के साथ विचार कर रहा है",
+    "almostDoneThinkingWithEffort": "{{effort}} प्रयास के साथ विचार लगभग पूरा",
     "imagePreview": "पूर्वावलोकन",
     "context": "संदर्भ",
     "usage": "उपयोग",

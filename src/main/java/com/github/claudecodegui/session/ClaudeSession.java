@@ -120,6 +120,13 @@ public class ClaudeSession {
 
         default void onUserMessageUuidPatched(String content, String uuid) {
         }
+
+        /**
+         * Called when the daemon echoes back the effort tier it actually applied to the SDK
+         * (parsed from "[REASONING_EFFORT] ✓ ... applied options.effort=xxx" stream lines).
+         */
+        default void onReasoningEffortApplied(String effort) {
+        }
     }
 
     public ClaudeSession(Project project, ClaudeSDKBridge claudeSDKBridge, CodexSDKBridge codexSDKBridge) {

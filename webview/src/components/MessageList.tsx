@@ -1,6 +1,7 @@
 import { memo, useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import type { TFunction } from 'i18next';
 import type { ClaudeMessage, ClaudeContentBlock, ToolResultBlock } from '../types';
+import type { ReasoningEffort } from './ChatInputBox/types';
 import { getMessageKey } from '../utils/messageUtils';
 import { MessageItem } from './MessageItem';
 import WaitingIndicator from './WaitingIndicator';
@@ -59,6 +60,10 @@ interface MessageListProps {
   /** Notify parent when the number of collapsed (hidden) messages changes. */
   onCollapsedCountChange?: (count: number) => void;
   onNavigateToProviderSettings?: () => void;
+  /** Effort tier snapshot for the in-flight turn (null when none). */
+  turnEffort?: ReasoningEffort | null;
+  /** Accumulated output tokens for the in-flight turn. */
+  turnOutputTokens?: number;
 }
 
 export const MessageList = memo(function MessageList({
@@ -76,6 +81,8 @@ export const MessageList = memo(function MessageList({
   onMessageNodeRef,
   onCollapsedCountChange,
   onNavigateToProviderSettings,
+  turnEffort,
+  turnOutputTokens,
 }: MessageListProps) {
   const [showAll, setShowAll] = useState(false);
 
@@ -158,7 +165,14 @@ export const MessageList = memo(function MessageList({
       })}
 
       {/* Loading indicator */}
-      {loading && <WaitingIndicator startTime={loadingStartTime ?? undefined} />}
+      {loading && (
+        <WaitingIndicator
+          startTime={loadingStartTime ?? undefined}
+          effort={turnEffort ?? undefined}
+          outputTokens={turnOutputTokens}
+          phase={streamingActive ? 'responding' : 'thinking'}
+        />
+      )}
       <div ref={messagesEndRef} />
     </div>
   );

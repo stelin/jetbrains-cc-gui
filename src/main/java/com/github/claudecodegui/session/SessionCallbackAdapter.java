@@ -355,6 +355,20 @@ public class SessionCallbackAdapter implements ClaudeSession.SessionCallback {
         jsTarget.callJavaScript("patchMessageUuid", JsUtils.escapeJs(content), JsUtils.escapeJs(uuid));
     }
 
+    @Override
+    public void onReasoningEffortApplied(String effort) {
+        if (isInactive() || effort == null || effort.isEmpty()) {
+            return;
+        }
+        ApplicationManager.getApplication().invokeLater(() -> {
+            if (isInactive()) {
+                return;
+            }
+            jsTarget.callJavaScript("onReasoningEffortApplied", JsUtils.escapeJs(effort));
+            LOG.debug("Reasoning effort applied (echo to webview): " + effort);
+        });
+    }
+
     /**
      * Dispose internal resources. Call when the parent window is disposed.
      */

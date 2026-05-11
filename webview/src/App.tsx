@@ -39,7 +39,7 @@ import {
   finalizeTodosForSettledTurn,
   sliceLatestConversationTurn,
 } from './utils/turnScope';
-import type { Attachment, ChatInputBoxHandle } from './components/ChatInputBox/types';
+import type { Attachment, ChatInputBoxHandle, ReasoningEffort } from './components/ChatInputBox/types';
 import { StatusPanel, StatusPanelErrorBoundary } from './components/StatusPanel';
 import { ToastContainer, type ToastMessage } from './components/Toast';
 import { ScrollControl } from './components/ScrollControl';
@@ -81,6 +81,8 @@ const App = () => {
   const [loadingStartTime, setLoadingStartTime] = useState<number | null>(null);
   const [isThinking, setIsThinking] = useState(false);
   const [streamingActive, setStreamingActive] = useState(false);
+  // Effort tier snapshot for the in-flight turn (held until loading ends).
+  const [turnEffort, setTurnEffort] = useState<ReasoningEffort | null>(null);
   const [currentView, setCurrentView] = useState<ViewMode>('chat');
   const [settingsInitialTab, setSettingsInitialTab] = useState<SettingsTab | undefined>(undefined);
   const [historyData, setHistoryData] = useState<HistoryData | null>(null);
@@ -355,8 +357,49 @@ const App = () => {
       enqueueMessage(content, attachments);
       return;
     }
+    // Snapshot the current reasoning effort so the WaitingIndicator reflects the
+    // effort actually in use for this turn (won't drift if user changes selector mid-turn).
+    setTurnEffort(reasoningEffort);
     hookHandleSubmit(content, attachments);
-  }, [loading, enqueueMessage, hookHandleSubmit, forceCreateNewSession, currentProvider, handleModeSelect, setCurrentView, addToast, t]);
+  }, [loading, enqueueMessage, hookHandleSubmit, forceCreateNewSession, currentProvider, handleModeSelect, setCurrentView, addToast, t, reasoningEffort]);
+
+  // Clear effort snapshot when the turn ends (loading goes false).
+  useEffect(() => {
+    if (!loading && turnEffort !== null) {
+      setTurnEffort(null);
+    }
+  }, [loading, turnEffort]);
+
+  // Bridge callback: server echoes the effort tier it actually applied to the SDK
+  // (parsed from the daemon's "[REASONING_EFFORT] ✓ ... applied options.effort=xxx" log).
+  // This overrides our UI-snapshot so the WaitingIndicator shows the authoritative value.
+  useEffect(() => {
+    const VALID: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+    window.onReasoningEffortApplied = (effort: string) => {
+      const normalized = (typeof effort === 'string' ? effort.trim() : '') as ReasoningEffort;
+      if (VALID.includes(normalized)) {
+        setTurnEffort(normalized);
+      }
+    };
+    return () => {
+      delete window.onReasoningEffortApplied;
+    };
+  }, []);
+
+  // Live output-token count for the in-flight turn: read usage.output_tokens from
+  // the latest assistant message that has it. Returns undefined when no usage yet.
+  const turnOutputTokens = useMemo<number | undefined>(() => {
+    if (!loading) return undefined;
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const m = messages[i];
+      if (!m || m.type !== 'assistant') continue;
+      const raw = m.raw;
+      if (!raw || typeof raw === 'string') continue;
+      const usage = (raw as { message?: { usage?: { output_tokens?: number } } }).message?.usage;
+      if (typeof usage?.output_tokens === 'number') return usage.output_tokens;
+    }
+    return undefined;
+  }, [loading, messages]);
 
   // ── File changes management ──
   const {
@@ -536,6 +579,8 @@ const App = () => {
                 isThinking={isThinking}
                 loading={loading}
                 loadingStartTime={loadingStartTime}
+                turnEffort={turnEffort}
+                turnOutputTokens={turnOutputTokens}
                 t={t}
                 getMessageText={getMessageText}
                 getContentBlocks={getContentBlocks}

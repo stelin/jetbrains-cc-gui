@@ -50,6 +50,8 @@
     "generatingResponse": "正在生成響應",
     "elapsedTime": "已用 {{time}}",
     "minutesAndSeconds": "{{minutes}} 分 {{seconds}} 秒",
+    "thinkingWithEffort": "正在以 {{effort}} 強度思考",
+    "almostDoneThinkingWithEffort": "即將完成 {{effort}} 強度思考",
     "imagePreview": "預覽",
     "context": "上下文",
     "usage": "上下文",

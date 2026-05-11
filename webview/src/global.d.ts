@@ -100,6 +100,12 @@ interface Window {
   onUsageUpdate?: (json: string) => void;
 
   /**
+   * Reasoning effort echo from server — the daemon confirms which effort tier
+   * it actually applied to the Claude SDK options.effort field.
+   */
+  onReasoningEffortApplied?: (effort: string) => void;
+
+  /**
    * Mode changed callback
    */
   onModeChanged?: (mode: string) => void;

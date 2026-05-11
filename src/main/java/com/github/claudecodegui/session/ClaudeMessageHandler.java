@@ -126,6 +126,9 @@ public class ClaudeMessageHandler implements MessageCallback {
             case "usage":
                 handleUsage(content);
                 break;
+            case "reasoning_effort_applied":
+                handleReasoningEffortApplied(content);
+                break;
             case "slash_commands":
                 handleSlashCommands(content);
                 break;
@@ -916,6 +919,18 @@ public class ClaudeMessageHandler implements MessageCallback {
         } catch (Exception e) {
             LOG.warn("Failed to parse usage data: " + e.getMessage());
         }
+    }
+
+    /**
+     * Handle the daemon's confirmation that an effort tier was applied to the SDK
+     * (parsed from "[REASONING_EFFORT] ✓ ... applied options.effort=xxx" lines).
+     * This is the authoritative value — the WaitingIndicator displays it in place of
+     * whatever the user-facing selector currently shows.
+     */
+    private void handleReasoningEffortApplied(String effort) {
+        if (effort == null || effort.isEmpty()) return;
+        callbackHandler.notifyReasoningEffortApplied(effort);
+        LOG.debug("Applied reasoning effort: " + effort);
     }
 
     /**

@@ -1311,6 +1311,10 @@
       "description": "Razonamiento profundo para tareas complejas"
     },
     "xhigh": {
+      "label": "Muy alto",
+      "description": "Razonamiento extra profundo para tareas exigentes"
+    },
+    "max": {
       "label": "Máximo",
       "description": "Profundidad máxima de razonamiento"
     }

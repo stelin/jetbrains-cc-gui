@@ -1316,8 +1316,12 @@
       "description": "深度推理，適合複雜任務"
     },
     "xhigh": {
-      "label": "最多",
-      "description": "最深推理，最高精度"
+      "label": "超高",
+      "description": "額外深度推理，適合高難度任務"
+    },
+    "max": {
+      "label": "最高",
+      "description": "最大推理深度"
     }
   },
   "errorBoundary": {

@@ -34,7 +34,7 @@ export function useModelProviderState({ addToast, t }: UseModelProviderStateOpti
   const [codexPermissionMode, setCodexPermissionMode] = useState<PermissionMode>('default');
   const [permissionMode, setPermissionMode] = useState<PermissionMode>('bypassPermissions');
   // Codex reasoning effort (thinking depth)
-  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>('medium');
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>('max');
   const [usagePercentage, setUsagePercentage] = useState(0);
   const [usageUsedTokens, setUsageUsedTokens] = useState<number | undefined>(undefined);
   const [usageMaxTokens, setUsageMaxTokens] = useState<number | undefined>(undefined);

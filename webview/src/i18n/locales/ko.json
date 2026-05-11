@@ -1433,6 +1433,10 @@
       "description": "복잡한 작업을 위한 심층 추론"
     },
     "xhigh": {
+      "label": "초고",
+      "description": "고난도 작업을 위한 추가 심층 추론"
+    },
+    "max": {
       "label": "최대",
       "description": "최대 추론 깊이"
     }

@@ -1488,6 +1488,10 @@
       "description": "Raciocínio profundo para tarefas complexas"
     },
     "xhigh": {
+      "label": "Muito alto",
+      "description": "Raciocínio extra profundo para tarefas exigentes"
+    },
+    "max": {
       "label": "Máximo",
       "description": "Profundidade máxima de raciocínio"
     }

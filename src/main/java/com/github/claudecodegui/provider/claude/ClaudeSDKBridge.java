@@ -307,7 +307,7 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
             List<ClaudeSession.Attachment> attachments,
             MessageCallback callback
     ) {
-        return sendMessage(channelId, message, sessionId, null, cwd, attachments, null, null, null, null, null, false, callback);
+        return sendMessage(channelId, message, sessionId, null, cwd, attachments, null, null, null, null, null, false, null, callback);
     }
 
     /**
@@ -325,7 +325,7 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
             String agentPrompt,
             MessageCallback callback
     ) {
-        return sendMessage(channelId, message, sessionId, null, cwd, attachments, permissionMode, model, openedFiles, agentPrompt, null, false, callback);
+        return sendMessage(channelId, message, sessionId, null, cwd, attachments, permissionMode, model, openedFiles, agentPrompt, null, false, null, callback);
     }
 
     /**
@@ -344,7 +344,7 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
             Boolean streaming,
             MessageCallback callback
     ) {
-        return sendMessage(channelId, message, sessionId, null, cwd, attachments, permissionMode, model, openedFiles, agentPrompt, streaming, false, callback);
+        return sendMessage(channelId, message, sessionId, null, cwd, attachments, permissionMode, model, openedFiles, agentPrompt, streaming, false, null, callback);
     }
 
     /**
@@ -365,11 +365,11 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
             MessageCallback callback
     ) {
         return sendMessage(channelId, message, sessionId, null, cwd, attachments, permissionMode,
-                model, openedFiles, agentPrompt, streaming, disableThinking, callback);
+                model, openedFiles, agentPrompt, streaming, disableThinking, null, callback);
     }
 
     /**
-     * Send message in existing channel (streaming response, with all options including streaming flag and disableThinking).
+     * Send message in existing channel (streaming response, with all options including streaming flag, disableThinking and reasoningEffort).
      */
     public CompletableFuture<SDKResult> sendMessage(
             String channelId,
@@ -384,6 +384,7 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
             String agentPrompt,
             Boolean streaming,
             Boolean disableThinking,
+            String reasoningEffort,
             MessageCallback callback
     ) {
         // Try daemon mode first (avoids per-request Node.js process spawning)
@@ -391,7 +392,7 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
         if (db != null) {
             return sendMessageViaDaemon(db, channelId, message, sessionId, runtimeSessionEpoch, cwd,
                     attachments, permissionMode, model, openedFiles, agentPrompt,
-                    streaming, disableThinking, callback);
+                    streaming, disableThinking, reasoningEffort, callback);
         }
 
         // In remote mode the per-process fallback would silently spawn a local
@@ -430,6 +431,7 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
                 agentPrompt,
                 streaming,
                 disableThinking,
+                reasoningEffort,
                 callback
         );
     }
@@ -502,6 +504,7 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
             String agentPrompt,
             Boolean streaming,
             Boolean disableThinking,
+            String reasoningEffort,
             MessageCallback callback
     ) {
         return daemonRequestExecutor.sendMessageViaDaemon(
@@ -518,6 +521,7 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
                 agentPrompt,
                 streaming,
                 disableThinking,
+                reasoningEffort,
                 callback
         );
     }

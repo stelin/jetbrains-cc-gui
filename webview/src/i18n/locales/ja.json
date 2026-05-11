@@ -1316,6 +1316,10 @@
       "description": "複雑なタスク向けの深い推論"
     },
     "xhigh": {
+      "label": "超高",
+      "description": "高難度タスク向けの追加の深層推論"
+    },
+    "max": {
       "label": "最大",
       "description": "最大の推論深度"
     }

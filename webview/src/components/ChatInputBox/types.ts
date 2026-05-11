@@ -412,11 +412,39 @@ export const AVAILABLE_PROVIDERS: ProviderInfo[] = [
 ];
 
 /**
- * Codex Reasoning Effort (thinking depth)
- * Controls the depth of reasoning for Codex models
- * Valid values: low, medium, high, xhigh
+ * Claude 模型 → 支持自适应思考(effort 参数)的模型集合
+ * 参考: https://code.claude.com/docs/en/model-config#adjust-effort-level
  */
-export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
+export const EFFORT_SUPPORTED_CLAUDE_MODELS = new Set([
+  'claude-opus-4-7',
+  'claude-opus-4-6',
+  'claude-opus-4-6[1m]',
+  'claude-sonnet-4-6',
+]);
+
+/**
+ * Claude 模型 → 额外支持 'xhigh' 档位的模型(目前仅 Opus 4.7)
+ */
+export const XHIGH_EFFORT_CLAUDE_MODELS = new Set([
+  'claude-opus-4-7',
+]);
+
+/**
+ * Claude 模型 → 支持 'max' 档位的模型
+ */
+export const MAX_EFFORT_CLAUDE_MODELS = new Set([
+  'claude-opus-4-7',
+  'claude-opus-4-6',
+  'claude-opus-4-6[1m]',
+  'claude-sonnet-4-6',
+]);
+
+/**
+ * Reasoning Effort (thinking depth)
+ * Claude: low/medium/high/xhigh/max
+ * Codex: low/medium/high/xhigh
+ */
+export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
 /**
  * Reasoning level information
@@ -452,6 +480,12 @@ export const REASONING_LEVELS: ReasoningInfo[] = [
   },
   {
     id: 'xhigh',
+    label: 'XHigh',
+    icon: 'codicon-rocket',
+    description: 'Extra deep reasoning for demanding tasks',
+  },
+  {
+    id: 'max',
     label: 'Max',
     icon: 'codicon-flame',
     description: 'Maximum reasoning depth',

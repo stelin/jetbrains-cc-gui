@@ -1,7 +1,5 @@
 package com.github.claudecodegui.permission;
 
-import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.project.Project;
@@ -100,10 +98,18 @@ public class RemotePermissionAdapter implements ControlMessageHandler {
 
     private void handleAskUserQuestion(JsonObject req, Consumer<JsonObject> replySender) {
         String requestId = optString(req, "requestId");
-        if (requestId == null) return;
-        // The remote envelope carries `questions: [...]`; the local-mode dialog
-        // contract takes the same structure wrapped in a JsonObject.
+        if (requestId == null) {
+            LOG.warn("[RemotePermissionAdapter] ask_user_question_request missing requestId");
+            return;
+        }
+        // Build the JSON passed to the React AskUserQuestionDialog. Must mirror
+        // the local-mode request-file shape so the webview can read
+        // request.requestId (it echoes that back on submit; without it the
+        // bridge response loses requestId and the daemon's promise never
+        // resolves).
         JsonObject questionsData = new JsonObject();
+        questionsData.addProperty("requestId", requestId);
+        questionsData.addProperty("toolName", "AskUserQuestion");
         if (req.has("questions")) {
             questionsData.add("questions", req.get("questions"));
         }
@@ -111,29 +117,23 @@ public class RemotePermissionAdapter implements ControlMessageHandler {
 
         PermissionService svc = PermissionService.getInstance(project, sessionId);
         if (svc == null) {
-            replySender.accept(buildAskResponse(requestId, new JsonArray()));
+            replySender.accept(buildAskResponse(requestId, new JsonObject()));
             return;
         }
         svc.showRemoteAskUserQuestionDialog(requestId, questionsData, cwd).whenComplete((answers, ex) -> {
             if (ex != null) {
                 LOG.warn("[RemotePermissionAdapter] ask dialog failed: " + ex.getMessage());
-                replySender.accept(buildAskResponse(requestId, new JsonArray()));
+                replySender.accept(buildAskResponse(requestId, new JsonObject()));
                 return;
             }
-            // The dialog may return either { answers: [...] } or just an array;
-            // normalize.
-            JsonArray normalized = new JsonArray();
-            if (answers != null) {
-                JsonElement a = answers.has("answers") ? answers.get("answers") : answers;
-                if (a != null && a.isJsonArray()) {
-                    normalized = a.getAsJsonArray();
-                }
-            }
-            replySender.accept(buildAskResponse(requestId, normalized));
+            // PermissionHandler completes the future with the answers map directly
+            // ({questionKey: answer}); pass it through unchanged. Matches the
+            // local-mode file IPC payload, which writes `answers` as an object.
+            replySender.accept(buildAskResponse(requestId, answers != null ? answers : new JsonObject()));
         });
     }
 
-    private JsonObject buildAskResponse(String requestId, JsonArray answers) {
+    private JsonObject buildAskResponse(String requestId, JsonObject answers) {
         JsonObject resp = new JsonObject();
         resp.addProperty("type", "_ctrl");
         resp.addProperty("action", "ask_user_question_response");
@@ -148,8 +148,15 @@ public class RemotePermissionAdapter implements ControlMessageHandler {
 
     private void handlePlanApproval(JsonObject req, Consumer<JsonObject> replySender) {
         String requestId = optString(req, "requestId");
-        if (requestId == null) return;
+        if (requestId == null) {
+            LOG.warn("[RemotePermissionAdapter] plan_approval_request missing requestId");
+            return;
+        }
+        // Mirror local-mode request-file shape — the React PlanApprovalDialog
+        // reads request.requestId to echo back on approve/reject.
         JsonObject planData = new JsonObject();
+        planData.addProperty("requestId", requestId);
+        planData.addProperty("toolName", "ExitPlanMode");
         if (req.has("plan")) planData.add("plan", req.get("plan"));
         String cwd = optString(req, "cwd");
 

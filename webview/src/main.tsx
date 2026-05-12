@@ -86,14 +86,17 @@ const enableVConsole =
 if (enableVConsole) {
   void import('vconsole').then(({ default: VConsole }) => {
     new VConsole();
-    // Move vConsole button to top-left corner to avoid blocking the send button in the bottom-right
+    // Park the vConsole switch at the top-center blank area so it doesn't
+    // overlap action buttons in the corners (send button bottom-right,
+    // toolbar buttons top-left).
     setTimeout(() => {
       const vcSwitch = document.getElementById('__vconsole') as HTMLElement;
       if (vcSwitch) {
-        vcSwitch.style.left = '10px';
+        vcSwitch.style.left = '50%';
         vcSwitch.style.right = 'auto';
         vcSwitch.style.top = '10px';
         vcSwitch.style.bottom = 'auto';
+        vcSwitch.style.transform = 'translateX(-50%)';
       }
     }, 100);
   });

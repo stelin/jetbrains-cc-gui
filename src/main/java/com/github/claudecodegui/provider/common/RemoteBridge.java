@@ -475,10 +475,15 @@ public class RemoteBridge implements IBridge {
                             .header("Content-Type", "application/json")
                             .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
                             .build(),
-                    HttpResponse.BodyHandlers.discarding()
-            ).exceptionally(e -> {
-                LOG.warn("[RemoteBridge] POST /in failed: " + e.getMessage());
-                return null;
+                    HttpResponse.BodyHandlers.ofString()
+            ).whenComplete((resp, e) -> {
+                if (e != null) {
+                    LOG.warn("[RemoteBridge] POST /in failed: " + e.getMessage());
+                } else if (resp.statusCode() / 100 != 2) {
+                    // _ctrl responses are not retried; surface non-2xx so an
+                    // operator can correlate with the daemon's 5-min timeout.
+                    LOG.warn("[RemoteBridge] POST /in non-2xx: " + resp.statusCode() + " body=" + resp.body());
+                }
             });
             return true;
         } catch (Exception e) {

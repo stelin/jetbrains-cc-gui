@@ -2,7 +2,12 @@ import { useCallback, useEffect } from 'react';
 import type { Attachment } from '../types.js';
 import { generateId } from '../utils/generateId.js';
 import { insertTextAtCursor } from '../utils/selectionUtils.js';
-import { perfTimer } from '../../../utils/debug.js';
+import { perfTimer, debugError } from '../../../utils/debug.js';
+import {
+  compressImage,
+  base64ToBlob,
+  inferExtensionFromMediaType,
+} from '../../../utils/imageCompressor.js';
 
 declare global {
   interface Window {
@@ -80,29 +85,22 @@ export function usePasteAndDrop({
           const blob = item.getAsFile();
 
           if (blob) {
-            // Read image as Base64
-            const reader = new FileReader();
-            reader.onload = () => {
-              const base64 = (reader.result as string).split(',')[1];
-              const mediaType = blob.type || item.type || 'image/png';
-              const ext = (() => {
-                if (mediaType && mediaType.includes('/')) {
-                  return mediaType.split('/')[1];
-                }
-                const name = blob.name || '';
-                const m = name.match(/\.([a-zA-Z0-9]+)$/);
-                return m ? m[1] : 'png';
-              })();
-              const attachment: Attachment = {
-                id: generateId(),
-                fileName: `pasted-image-${Date.now()}.${ext}`,
-                mediaType,
-                data: base64,
-              };
-
-              setInternalAttachments((prev) => [...prev, attachment]);
-            };
-            reader.readAsDataURL(blob);
+            const fallbackType = blob.type || item.type || 'image/png';
+            compressImage(blob)
+              .then((result) => {
+                const mediaType = result.mediaType || fallbackType;
+                const ext = inferExtensionFromMediaType(mediaType);
+                const attachment: Attachment = {
+                  id: generateId(),
+                  fileName: `pasted-image-${Date.now()}.${ext}`,
+                  mediaType,
+                  data: result.base64,
+                };
+                setInternalAttachments((prev) => [...prev, attachment]);
+              })
+              .catch((err) => {
+                debugError('[handlePaste] compressImage failed:', err);
+              });
           }
 
           return;
@@ -219,26 +217,25 @@ export function usePasteAndDrop({
           // Only process image files
           if (file.type.startsWith('image/')) {
             hasImageFile = true;
-            const reader = new FileReader();
-            reader.onload = () => {
-              const base64 = (reader.result as string).split(',')[1];
-              const ext = (() => {
-                if (file.type && file.type.includes('/')) {
-                  return file.type.split('/')[1];
-                }
-                const m = file.name.match(/\.([a-zA-Z0-9]+)$/);
-                return m ? m[1] : 'png';
-              })();
-              const attachment: Attachment = {
-                id: generateId(),
-                fileName: file.name || `dropped-image-${Date.now()}.${ext}`,
-                mediaType: file.type || 'image/png',
-                data: base64,
-              };
-
-              setInternalAttachments((prev) => [...prev, attachment]);
-            };
-            reader.readAsDataURL(file);
+            const originalName = file.name;
+            const fallbackType = file.type || 'image/png';
+            compressImage(file)
+              .then((result) => {
+                const mediaType = result.mediaType || fallbackType;
+                const fileName =
+                  originalName ||
+                  `dropped-image-${Date.now()}.${inferExtensionFromMediaType(mediaType)}`;
+                const attachment: Attachment = {
+                  id: generateId(),
+                  fileName,
+                  mediaType,
+                  data: result.base64,
+                };
+                setInternalAttachments((prev) => [...prev, attachment]);
+              })
+              .catch((err) => {
+                debugError('[handleDrop] compressImage failed:', err);
+              });
           }
         }
       }
@@ -331,14 +328,23 @@ export function usePasteAndDrop({
     const onJavaPasteImage = (e: Event) => {
       const { base64, mediaType } = (e as CustomEvent).detail;
       if (!base64) return;
-      const ext = mediaType?.split('/')[1] || 'png';
-      const attachment: Attachment = {
-        id: generateId(),
-        fileName: `pasted-image-${Date.now()}.${ext}`,
-        mediaType: mediaType || 'image/png',
-        data: base64,
-      };
-      setInternalAttachments((prev) => [...prev, attachment]);
+      const originalType = mediaType || 'image/png';
+      const blob = base64ToBlob(base64, originalType);
+      compressImage(blob)
+        .then((result) => {
+          const finalMediaType = result.mediaType || originalType;
+          const ext = inferExtensionFromMediaType(finalMediaType);
+          const attachment: Attachment = {
+            id: generateId(),
+            fileName: `pasted-image-${Date.now()}.${ext}`,
+            mediaType: finalMediaType,
+            data: result.base64,
+          };
+          setInternalAttachments((prev) => [...prev, attachment]);
+        })
+        .catch((err) => {
+          debugError('[java-paste-image] compressImage failed:', err);
+        });
     };
     window.addEventListener('java-paste-image', onJavaPasteImage);
     return () => window.removeEventListener('java-paste-image', onJavaPasteImage);

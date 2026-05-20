@@ -1,3 +1,25 @@
+##### **2026年5月11日（v0.4.2）**
+
+English:
+
+✨ Features
+- Support image attachments in remote mode: paste, drag-drop, and file-picker attachments are now forwarded to the remote ai-bridge-server and consumed by Claude as multimodal content blocks
+
+⚡ Performance
+- Auto-compress image attachments before upload: resize to max 2048px on the long edge and re-encode JPEG at quality 0.8 (transparent PNGs keep alpha), typically shrinking screenshots from several MB to a few hundred KB while preserving OCR-grade readability
+- Fall back to the original image when compression cannot improve size or when the source format (e.g. HEIC) is undecodable, so the send flow never blocks
+
+中文：
+
+✨ Features
+- 远端模式支持图片附件：粘贴、拖拽和文件选择的图片现在都会转发到远端 ai-bridge-server，并以多模态 content block 形式交给 Claude 识别
+
+⚡ Performance
+- 上传前自动压缩图片附件：长边超过 2048px 自动缩放，JPEG 重编码质量 0.8（透明 PNG 保留 alpha 通道），通常可将几 MB 的截图压到几百 KB，且不影响文字识别精度
+- 压缩反而变大或源格式无法解码（如 HEIC）时自动回退原图，发送链路不会因为压缩失败而中断
+
+---
+
 ##### **2026年4月24日（v0.4）**
 
 English:

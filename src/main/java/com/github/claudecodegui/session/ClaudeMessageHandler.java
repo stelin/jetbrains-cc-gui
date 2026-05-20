@@ -312,6 +312,15 @@ public class ClaudeMessageHandler implements MessageCallback {
                                         LOG.debug("tool_use input translation failed: " + ex.getMessage());
                                     }
                                 }
+                                // A-phase: collect paths and schedule a project VFS reload.
+                                // Bash falls back to project base path (its cwd isn't in input).
+                                if (project != null) {
+                                    try {
+                                        scheduleProjectReloadFromToolUse(blockObj);
+                                    } catch (Exception ex) {
+                                        LOG.debug("schedule project reload failed: " + ex.getMessage());
+                                    }
+                                }
                                 // Don't break — translate every tool_use block in this message.
                             }
                         }
@@ -485,6 +494,15 @@ public class ClaudeMessageHandler implements MessageCallback {
                 state.addMessage(toolResultMessage);
                 LOG.debug("Added tool_result user message to state");
                 callbackHandler.notifyMessageUpdate(state.getMessages());
+
+                // B-phase: walk tool_result blocks and replay refresh per tool_use_id.
+                if (project != null) {
+                    try {
+                        replayReloadForToolResults(userMsg);
+                    } catch (Exception ex) {
+                        LOG.debug("replay reload from user-message tool_result failed: " + ex.getMessage());
+                    }
+                }
                 return;
             }
 
@@ -559,10 +577,86 @@ public class ClaudeMessageHandler implements MessageCallback {
 
                 LOG.debug("Tool result received for tool_use_id: " + toolUseId);
                 callbackHandler.notifyMessageUpdate(state.getMessages());
+
+                // B-phase: replay refresh for paths captured in A-phase.
+                if (project != null) {
+                    try {
+                        com.github.claudecodegui.service.ProjectReloadService
+                                .getInstance(project)
+                                .schedulePathsForToolUseId(toolUseId);
+                    } catch (Exception ex) {
+                        LOG.debug("schedule project reload (B) failed: " + ex.getMessage());
+                    }
+                }
             }
         } catch (Exception e) {
             LOG.warn("Failed to parse tool_result JSON: " + e.getMessage());
         }
+    }
+
+    /**
+     * Walk a SDK user message and replay reload for every contained
+     * tool_result's {@code tool_use_id}. Used when tool results arrive
+     * embedded in a user message rather than as standalone events.
+     */
+    private void replayReloadForToolResults(JsonObject userMsg) {
+        if (userMsg == null || !userMsg.has("message")) return;
+        var msg = userMsg.get("message");
+        if (!msg.isJsonObject()) return;
+        var messageObj = msg.getAsJsonObject();
+        if (!messageObj.has("content")) return;
+        var contentEl = messageObj.get("content");
+        if (!contentEl.isJsonArray()) return;
+
+        var reloadService = com.github.claudecodegui.service.ProjectReloadService.getInstance(project);
+        for (var el : contentEl.getAsJsonArray()) {
+            if (!el.isJsonObject()) continue;
+            JsonObject block = el.getAsJsonObject();
+            if (!block.has("type")) continue;
+            if (!"tool_result".equals(block.get("type").getAsString())) continue;
+            if (!block.has("tool_use_id") || block.get("tool_use_id").isJsonNull()) continue;
+            String id = block.get("tool_use_id").getAsString();
+            if (!id.isEmpty()) reloadService.schedulePathsForToolUseId(id);
+        }
+    }
+
+    /**
+     * A-phase: extract paths from a single tool_use block and schedule a
+     * project VFS reload. The tool_use_id → paths mapping is also recorded so
+     * the B-phase (tool_result) can re-fire a refresh once the write actually
+     * lands.
+     *
+     * <p>Bash is treated specially because its {@code input.command} is
+     * intentionally not parsed for paths — we schedule the project base path
+     * (effectively "refresh whatever Bash touched in cwd") instead.
+     */
+    private void scheduleProjectReloadFromToolUse(JsonObject blockObj) {
+        String toolName = blockObj.has("name") && !blockObj.get("name").isJsonNull()
+                ? blockObj.get("name").getAsString()
+                : "";
+        String toolUseId = blockObj.has("id") && !blockObj.get("id").isJsonNull()
+                ? blockObj.get("id").getAsString()
+                : null;
+
+        java.util.Set<String> paths = new java.util.HashSet<>();
+        if ("Bash".equals(toolName)) {
+            String base = project.getBasePath();
+            if (base != null && !base.isEmpty()) paths.add(base);
+        } else if (blockObj.has("input") && blockObj.get("input").isJsonObject()) {
+            com.github.claudecodegui.path.PathFieldVisitor.collectInbound(
+                    "__tool_use_input__",
+                    blockObj.getAsJsonObject("input"),
+                    p -> { if (p != null && !p.isEmpty()) paths.add(p); }
+            );
+        }
+
+        if (paths.isEmpty()) return;
+
+        var reloadService = com.github.claudecodegui.service.ProjectReloadService.getInstance(project);
+        if (toolUseId != null && !toolUseId.isEmpty()) {
+            reloadService.recordToolUse(toolUseId, paths);
+        }
+        reloadService.schedulePaths(paths);
     }
 
     /**

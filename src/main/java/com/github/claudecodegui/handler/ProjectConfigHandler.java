@@ -514,6 +514,53 @@ public class ProjectConfigHandler {
         }
     }
 
+    // ──────────────── Auto Reload from Disk (remote mode only) ────────────────
+
+    public void handleGetAutoReload() {
+        try {
+            com.github.claudecodegui.settings.AutoReloadSettings s =
+                    com.github.claudecodegui.settings.AutoReloadSettings.getInstance();
+            boolean enabled = s.isEnabled();
+            long debounceMs = s.getDebounceMs();
+            ApplicationManager.getApplication().invokeLater(() -> {
+                JsonObject r = new JsonObject();
+                r.addProperty("enabled", enabled);
+                r.addProperty("debounceMs", debounceMs);
+                context.callJavaScript("window.updateAutoReload", context.escapeJs(gson.toJson(r)));
+            });
+        } catch (Exception e) {
+            LOG.error("[ProjectConfigHandler] handleGetAutoReload failed: " + e.getMessage(), e);
+        }
+    }
+
+    public void handleSetAutoReload(String content) {
+        try {
+            JsonObject json = gson.fromJson(content, JsonObject.class);
+            com.github.claudecodegui.settings.AutoReloadSettings s =
+                    com.github.claudecodegui.settings.AutoReloadSettings.getInstance();
+
+            if (json != null && json.has("enabled") && !json.get("enabled").isJsonNull()) {
+                s.setEnabled(json.get("enabled").getAsBoolean());
+            }
+            if (json != null && json.has("debounceMs") && !json.get("debounceMs").isJsonNull()) {
+                s.setDebounceMs(json.get("debounceMs").getAsLong());
+            }
+            LOG.info("[ProjectConfigHandler] Set autoReload enabled=" + s.isEnabled()
+                    + " debounceMs=" + s.getDebounceMs());
+
+            final boolean enabled = s.isEnabled();
+            final long debounceMs = s.getDebounceMs();
+            ApplicationManager.getApplication().invokeLater(() -> {
+                JsonObject r = new JsonObject();
+                r.addProperty("enabled", enabled);
+                r.addProperty("debounceMs", debounceMs);
+                context.callJavaScript("window.updateAutoReload", context.escapeJs(gson.toJson(r)));
+            });
+        } catch (Exception e) {
+            LOG.error("[ProjectConfigHandler] handleSetAutoReload failed: " + e.getMessage(), e);
+        }
+    }
+
     // ──────────────── Remote Mode (ai-bridge-server) ────────────────
 
     public void handleGetRemoteMode() {

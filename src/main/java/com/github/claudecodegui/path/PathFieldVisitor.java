@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
 
 /**
@@ -39,6 +40,23 @@ public final class PathFieldVisitor {
 
     public static void applyInbound(String eventKey, JsonObject root, UnaryOperator<String> toLocal) {
         apply(eventKey, root, toLocal, PathFields.INBOUND);
+    }
+
+    /**
+     * Read-only walk: invoke {@code visitor} for each path-string leaf found
+     * at the expressions registered under {@code eventKey} in
+     * {@link PathFields#INBOUND}. The JSON tree is not mutated.
+     */
+    public static void collectInbound(String eventKey, JsonObject root, Consumer<String> visitor) {
+        if (eventKey == null || root == null || visitor == null) return;
+        List<String> exprs = PathFields.INBOUND.get(eventKey);
+        if (exprs == null || exprs.isEmpty()) return;
+        for (String expr : exprs) {
+            List<String> tokens = splitTokens(expr);
+            if (!tokens.isEmpty()) {
+                walkCollect(root, tokens, 0, visitor);
+            }
+        }
     }
 
     private static void apply(String key, JsonObject root, UnaryOperator<String> fn,
@@ -152,6 +170,56 @@ public final class PathFieldVisitor {
             }
         } else {
             walk(child, tokens, idx + 1, fn);
+        }
+    }
+
+    /** Read-only twin of {@link #walk}: feeds matched leaves to {@code visitor}. */
+    private static void walkCollect(JsonElement node, List<String> tokens, int idx, Consumer<String> visitor) {
+        if (node == null || node.isJsonNull()) return;
+        if (idx >= tokens.size()) return;
+
+        String token = tokens.get(idx);
+        boolean isLast = (idx == tokens.size() - 1);
+
+        if (STAR_INDEX.equals(token)) {
+            if (!node.isJsonArray()) return;
+            JsonArray arr = node.getAsJsonArray();
+            for (int i = 0; i < arr.size(); i++) {
+                JsonElement elem = arr.get(i);
+                if (isLast) {
+                    if (elem.isJsonPrimitive() && elem.getAsJsonPrimitive().isString()) {
+                        visitor.accept(elem.getAsString());
+                    }
+                } else {
+                    walkCollect(elem, tokens, idx + 1, visitor);
+                }
+            }
+            return;
+        }
+
+        if (STAR_KEY.equals(token)) {
+            if (!node.isJsonObject()) return;
+            JsonObject obj = node.getAsJsonObject();
+            if (isLast) {
+                for (String k : obj.keySet()) visitor.accept(k);
+            } else {
+                for (Map.Entry<String, JsonElement> e : obj.entrySet()) {
+                    walkCollect(e.getValue(), tokens, idx + 1, visitor);
+                }
+            }
+            return;
+        }
+
+        if (!node.isJsonObject()) return;
+        JsonObject obj = node.getAsJsonObject();
+        if (!obj.has(token)) return;
+        JsonElement child = obj.get(token);
+        if (isLast) {
+            if (child.isJsonPrimitive() && child.getAsJsonPrimitive().isString()) {
+                visitor.accept(child.getAsString());
+            }
+        } else {
+            walkCollect(child, tokens, idx + 1, visitor);
         }
     }
 

@@ -173,6 +173,42 @@
   font-size: 12px;
 }
 
+.hint {
+  margin-top: -6px;
+  margin-left: 22px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground, #888);
+  line-height: 1.5;
+}
+
+.inputNarrow {
+  width: 80px;
+  min-width: 80px;
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  background: var(--vscode-input-background, #2a2a2a);
+  color: var(--vscode-input-foreground, #d4d4d4);
+  border: 1px solid var(--vscode-input-border, #3c3c3c);
+  border-radius: 3px;
+}
+
+.inputNarrow:focus {
+  outline: none;
+  border-color: var(--vscode-focusBorder, #c084fc);
+}
+
+.inputNarrow:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.unit {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground, #888);
+}
+
 .badge {
   font-size: 11px;
   padding: 2px 8px;

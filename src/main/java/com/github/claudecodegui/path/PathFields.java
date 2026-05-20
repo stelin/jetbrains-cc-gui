@@ -78,6 +78,7 @@ public final class PathFields {
             "$.file_path",
             "$.path",
             "$.filePath",
+            "$.notebook_path",
             "$.dir",
             "$.paths[*]",
             "$.files[*]",
@@ -90,6 +91,7 @@ public final class PathFields {
             "$.message.content[*].input.file_path",
             "$.message.content[*].input.path",
             "$.message.content[*].input.filePath",
+            "$.message.content[*].input.notebook_path",
             "$.message.content[*].input.paths[*]",
             "$.message.content[*].input.files[*]",
             "$.message.content[*].input.cwd"

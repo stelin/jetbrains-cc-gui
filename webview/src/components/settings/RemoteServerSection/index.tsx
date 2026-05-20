@@ -53,12 +53,20 @@ interface PathMissesState {
   outboundSamples: string[];
 }
 
+interface AutoReloadState {
+  enabled: boolean;
+  /** Debounce window in milliseconds (default 200). Currently no UI input;
+   *  tune via XML or future settings panel. */
+  debounceMs?: number;
+}
+
 declare global {
   interface Window {
     updateRemoteMode?: (json: string) => void;
     updateRemoteConnectionTest?: (json: string) => void;
     updatePathMapping?: (json: string) => void;
     updatePathMisses?: (json: string) => void;
+    updateAutoReload?: (json: string) => void;
     sendToJava?: (msg: string) => void;
   }
 }
@@ -95,6 +103,10 @@ export function RemoteServerSection() {
     outboundSamples: [],
   });
   const [missesPanelOpen, setMissesPanelOpen] = useState<boolean>(false);
+
+  // Auto-reload-on-change toggle (remote mode only)
+  const [autoReload, setAutoReload] = useState<boolean>(false);
+  const [autoReloadDebounceMs, setAutoReloadDebounceMs] = useState<number>(200);
 
   // Initial load + register window callback
   useEffect(() => {
@@ -154,14 +166,27 @@ export function RemoteServerSection() {
         console.error('[RemoteServerSection] updatePathMisses parse failed', e);
       }
     };
+    window.updateAutoReload = (json: string) => {
+      try {
+        const next = JSON.parse(json) as AutoReloadState;
+        setAutoReload(!!next.enabled);
+        if (typeof next.debounceMs === 'number' && next.debounceMs > 0) {
+          setAutoReloadDebounceMs(next.debounceMs);
+        }
+      } catch (e) {
+        console.error('[RemoteServerSection] updateAutoReload parse failed', e);
+      }
+    };
     sendToJava('get_remote_mode:');
     sendToJava('get_path_mapping:');
     sendToJava('get_path_misses:');
+    sendToJava('get_auto_reload:');
     return () => {
       delete window.updateRemoteMode;
       delete window.updateRemoteConnectionTest;
       delete window.updatePathMapping;
       delete window.updatePathMisses;
+      delete window.updateAutoReload;
     };
   }, []);
 
@@ -207,6 +232,23 @@ export function RemoteServerSection() {
     sendToJava('clear_path_misses:');
   };
 
+  const onAutoReloadChange = (enabled: boolean) => {
+    setAutoReload(enabled);
+    sendToJava(`set_auto_reload:${JSON.stringify({ enabled, debounceMs: autoReloadDebounceMs })}`);
+  };
+
+  const onDebounceChange = (raw: string) => {
+    const n = parseInt(raw, 10);
+    setAutoReloadDebounceMs(Number.isFinite(n) ? n : 0);
+  };
+
+  const onDebounceBlur = () => {
+    // Clamp to a sane range; the Java side also enforces > 0.
+    const clamped = Math.min(5000, Math.max(50, autoReloadDebounceMs || 200));
+    if (clamped !== autoReloadDebounceMs) setAutoReloadDebounceMs(clamped);
+    sendToJava(`set_auto_reload:${JSON.stringify({ enabled: autoReload, debounceMs: clamped })}`);
+  };
+
   const mappingValid =
     mapping.enabled
       ? !!mapping.localOs && !!mapping.localRoot && !!mapping.remoteOs && !!mapping.remoteRoot
@@ -217,6 +259,38 @@ export function RemoteServerSection() {
       <div className={styles.header}>
         <span className={styles.title}>远程模式</span>
         <span className={styles.subtitle}>将 daemon 部署到远程 ai-bridge-server</span>
+      </div>
+
+      {/* Auto-reload-on-change toggle. Only takes effect in remote mode; the
+          gate lives in the Java service so we keep this visible always for
+          discoverability. */}
+      <div className={styles.row}>
+        <label className={styles.checkbox}>
+          <input
+            type="checkbox"
+            checked={autoReload}
+            onChange={(e) => onAutoReloadChange(e.target.checked)}
+          />
+          <span>AI 写入文件后自动刷新 IDE</span>
+        </label>
+      </div>
+      <div className={styles.hint}>
+        远程模式下 IDE 通常无法自动感知文件变化；开启后会自动 reload from disk。
+      </div>
+      <div className={styles.row}>
+        <label className={styles.label}>防抖窗口</label>
+        <input
+          type="number"
+          className={styles.inputNarrow}
+          min={50}
+          max={5000}
+          step={50}
+          value={autoReloadDebounceMs}
+          onChange={(e) => onDebounceChange(e.target.value)}
+          onBlur={onDebounceBlur}
+          disabled={!autoReload}
+        />
+        <span className={styles.unit}>ms（默认 200；多次写入合并为一次刷新）</span>
       </div>
 
       <div className={styles.row}>

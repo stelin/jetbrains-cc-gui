@@ -74,7 +74,10 @@ public class SettingsHandler extends BaseMessageHandler {
         "get_path_mapping",
         "set_path_mapping",
         "get_path_misses",
-        "clear_path_misses"
+        "clear_path_misses",
+        // Auto reload from disk on AI file changes (remote mode only)
+        "get_auto_reload",
+        "set_auto_reload"
     };
 
     public SettingsHandler(HandlerContext context) {
@@ -257,6 +260,13 @@ public class SettingsHandler extends BaseMessageHandler {
                 return true;
             case "clear_path_misses":
                 projectConfigHandler.handleClearPathMisses();
+                return true;
+            // Auto reload from disk
+            case "get_auto_reload":
+                projectConfigHandler.handleGetAutoReload();
+                return true;
+            case "set_auto_reload":
+                projectConfigHandler.handleSetAutoReload(content);
                 return true;
             default:
                 return false;

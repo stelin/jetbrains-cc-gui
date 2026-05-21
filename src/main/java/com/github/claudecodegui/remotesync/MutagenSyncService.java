@@ -172,23 +172,54 @@ public final class MutagenSyncService {
     }
 
     /**
-     * Make sure an SSH ControlMaster is open to the remote — that's what lets
-     * mutagen's spawned SSH multiplex an already-authenticated connection
-     * instead of being prompted by the (background-disabled) mutagen prompter.
+     * Make sure mutagen can authenticate to the remote without ever being
+     * prompted (the background daemon has no prompter registered). Two paths:
+     * <ul>
+     *   <li><b>macOS / Linux client</b>: open a long-lived SSH ControlMaster
+     *       once using the password, and write a Host block telling mutagen's
+     *       SSH to multiplex it. Zero remote modification.</li>
+     *   <li><b>Windows client</b>: ControlMaster isn't supported by Win
+     *       OpenSSH (returns {@code getsockname failed: Not a socket}). Fall
+     *       back to deploying a managed SSH key — the password is used once
+     *       to push the key to the remote, then never again.</li>
+     * </ul>
      */
     private TestResult ensureControlMaster(FormData form, String password) {
         try {
+            if (PlatformUtils.isWindows()) {
+                return ensureSshKey(form, password);
+            }
             SshControlMaster cm = SshControlMaster.getInstance();
             SshControlMaster.Result r = cm.ensure(form.remoteUser, form.remoteHost,
                     form.remotePort, password);
             if (!r.ok) {
-                return TestResult.fail("ssh connect: " + r.message);
+                // Surface a hint that the user can fall back to keys if ControlMaster
+                // fails on a platform we expected to support it.
+                return TestResult.fail("ssh connect (ControlMaster): " + r.message);
             }
             cm.writeSshConfigEntry(form.remoteHost, form.remoteUser, form.remotePort);
-            return TestResult.ok("connection ready");
+            return TestResult.ok("connection ready (ControlMaster)");
         } catch (Exception e) {
             LOG.warn("[MutagenSyncService] ensureControlMaster failed", e);
             return TestResult.fail("ssh connect: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
+        }
+    }
+
+    private TestResult ensureSshKey(FormData form, String password) {
+        try {
+            SshKeyManager mgr = SshKeyManager.getInstance();
+            if (!mgr.probeKeyAuth(form.remoteUser, form.remoteHost, form.remotePort)) {
+                SshKeyManager.Result r = mgr.deployToRemote(form.remoteUser, form.remoteHost,
+                        form.remotePort, password, form.remoteOs, form.remotePath);
+                if (!r.ok) {
+                    return TestResult.fail("ssh key setup: " + r.message);
+                }
+            }
+            mgr.writeSshConfigEntry(form.remoteHost, form.remoteUser, form.remotePort);
+            return TestResult.ok("connection ready (SSH key)");
+        } catch (Exception e) {
+            LOG.warn("[MutagenSyncService] ensureSshKey failed", e);
+            return TestResult.fail("ssh key setup: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage()));
         }
     }
 
@@ -339,7 +370,9 @@ public final class MutagenSyncService {
         sb.append("=== mutagen daemon status ===\n");
         sb.append("running=").append(MutagenDaemon.getInstance().isRunning()).append("\n\n");
 
-        sb.append("=== ssh control master ===\n");
+        sb.append("=== ssh auth strategy ===\n");
+        sb.append("client os: ").append(PlatformUtils.isWindows() ? "Windows (SSH key)"
+                : "macOS/Linux (ControlMaster)").append('\n');
         try {
             com.google.gson.JsonObject cfg =
                     new com.github.claudecodegui.settings.CodemossSettingsService()
@@ -348,10 +381,20 @@ public final class MutagenSyncService {
             String host = cfg.has("remoteHost") ? cfg.get("remoteHost").getAsString() : "";
             int port = cfg.has("remotePort") ? cfg.get("remotePort").getAsInt() : 22;
             if (!user.isEmpty() && !host.isEmpty()) {
-                SshControlMaster cm = SshControlMaster.getInstance();
-                sb.append("socket: ").append(cm.socketPath(host, port)).append('\n');
-                sb.append("alive:  ").append(cm.isMasterAlive(user, host, port)).append('\n');
-                sb.append("config block present: ").append(cm.configHasEntry(host)).append('\n');
+                if (PlatformUtils.isWindows()) {
+                    SshKeyManager mgr = SshKeyManager.getInstance();
+                    sb.append("key pair: ").append(mgr.privateKeyPath())
+                            .append(java.nio.file.Files.isRegularFile(mgr.privateKeyPath())
+                                    ? "  (present)" : "  (missing)").append('\n');
+                    sb.append("key accepted by remote: ")
+                            .append(mgr.probeKeyAuth(user, host, port)).append('\n');
+                    sb.append("config block present:   ").append(mgr.configHasEntry(host)).append('\n');
+                } else {
+                    SshControlMaster cm = SshControlMaster.getInstance();
+                    sb.append("socket: ").append(cm.socketPath(host, port)).append('\n');
+                    sb.append("alive:  ").append(cm.isMasterAlive(user, host, port)).append('\n');
+                    sb.append("config block present: ").append(cm.configHasEntry(host)).append('\n');
+                }
             } else {
                 sb.append("(remoteUser/remoteHost not configured)\n");
             }

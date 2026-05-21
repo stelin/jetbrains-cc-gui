@@ -1,4 +1,16 @@
 {
+  "chatHeader": {
+    "sync": {
+      "stopped": "Sync stopped",
+      "starting": "Connecting…",
+      "watching": "In sync",
+      "syncing": "Syncing",
+      "syncingWithSize": "Syncing {{done}}/{{total}}",
+      "disconnected": "Disconnected",
+      "conflict": "{{n}} conflict(s)",
+      "error": "Sync error"
+    }
+  },
   "common": {
     "ready": "Ready",
     "loading": "Loading",
@@ -334,6 +346,92 @@
     "skillsDesc": "Manage and configure skill modules",
     "remote": {
       "title": "Remote Mode"
+    },
+    "remoteSync": {
+      "title": "Remote Sync",
+      "subtitle": "Two-way file sync between this machine and a remote host via mutagen",
+      "masterOn": "Remote sync is ON",
+      "masterOff": "Remote sync is OFF",
+      "masterHint": "When off, the sync status bar in chat is hidden. Turn on to configure and start syncing.",
+      "configPlaceholder": "Sync configuration (SSH host, paths, password) will land in the next release",
+      "proxy": {
+        "title": "GitHub Proxy",
+        "hint": "Used for slow networks; leave empty to download directly. The proxy is prepended to the raw GitHub URL, e.g. https://ghfast.top/https://github.com/...",
+        "reset": "Reset to default"
+      },
+      "form": {
+        "title": "Sync configuration",
+        "toggleOn": "Enabled",
+        "toggleOff": "Disabled",
+        "toggleHint": "Turn on to edit the fields below and start syncing",
+        "needSdkWarning": "Install the mutagen tool above before using sync.",
+        "name": "Sync name",
+        "localPath": "Local path",
+        "remoteUser": "Remote user",
+        "remoteHost": "Remote host",
+        "remotePath": "Remote path",
+        "password": "SSH password",
+        "passwordSaved": "Saved (type a new password to overwrite)",
+        "passwordSave": "Save password",
+        "passwordClear": "Clear",
+        "passwordHintSaved": "✓ Stored in the OS keychain",
+        "mode": {
+          "title": "Sync mode",
+          "twoWaySafe": "Two-way (pause on conflicts)",
+          "twoWayResolved": "Two-way (local wins)",
+          "oneWayReplica": "One-way: local → remote"
+        },
+        "remoteOs": {
+          "title": "Remote OS",
+          "auto": "Auto-detect",
+          "windows": "Windows",
+          "unix": "macOS / Linux"
+        }
+      },
+      "actions": {
+        "title": "Test / Start",
+        "test": "Test connection",
+        "testing": "Testing…",
+        "start": "Start sync",
+        "starting": "Starting…",
+        "testOk": "Connection OK",
+        "needPassword": "Save the SSH password above before testing or starting",
+        "diagnostics": "View diagnostics"
+      },
+      "diagnostics": {
+        "title": "Mutagen diagnostics",
+        "copy": "Copy to clipboard"
+      },
+      "hostKey": {
+        "title": "First connection — verify host fingerprint",
+        "firstTime": "First connection to {{host}}:{{port}}. Please verify the fingerprint below.",
+        "warning": "Verify this fingerprint through a trusted out-of-band channel (sysadmin, IDC console, etc.). Trusting writes ~/.ssh/known_hosts so future connections skip this prompt.",
+        "trust": "Trust and continue"
+      },
+      "status": {
+        "title": "Sync status",
+        "disabled": "Disabled",
+        "stopped": "Stopped",
+        "starting": "Connecting…",
+        "watching": "Watching for changes",
+        "syncing": "Syncing",
+        "disconnected": "Disconnected · retrying",
+        "conflict": "{{n}} conflict(s)",
+        "error": "Error",
+        "pause": "Pause",
+        "resume": "Resume",
+        "stop": "Stop"
+      },
+      "sdk": {
+        "title": "mutagen tool",
+        "statusInstalled": "Installed v{{version}}",
+        "statusMissing": "Not installed",
+        "statusDownloading": "Downloading…",
+        "intro": "Remote sync requires the mutagen CLI (~97 MB, bundles all-platform agents).",
+        "download": "Download mutagen v{{version}}",
+        "reinstall": "Reinstall",
+        "downloadUrl": "Download URL"
+      }
     },
     "other": {
       "title": "Other Settings",

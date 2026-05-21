@@ -1218,6 +1218,137 @@ public class CodemossSettingsService {
         LOG.info("[CodemossSettings] Set remoteServerUrl: " + trimmed);
     }
 
+    // ==================== Remote Sync (mutagen) ====================
+
+    /** Default GitHub proxy used to fetch mutagen releases when none is configured. */
+    public static final String DEFAULT_GITHUB_PROXY = "https://ghfast.top";
+
+    /**
+     * Prefix prepended to the raw GitHub URL when downloading mutagen, e.g.
+     * "https://ghfast.top". Empty string disables the proxy. Falls back to
+     * {@link #DEFAULT_GITHUB_PROXY} when the setting is absent.
+     */
+    public String getRemoteSyncGithubProxy() {
+        try {
+            JsonObject config = readConfig();
+            if (config.has("remoteSync") && config.get("remoteSync").isJsonObject()) {
+                JsonObject rs = config.getAsJsonObject("remoteSync");
+                if (rs.has("githubProxy") && !rs.get("githubProxy").isJsonNull()) {
+                    return rs.get("githubProxy").getAsString();
+                }
+            }
+        } catch (IOException ignored) {}
+        return DEFAULT_GITHUB_PROXY;
+    }
+
+    public void setRemoteSyncGithubProxy(String proxy) throws IOException {
+        String trimmed = proxy == null ? "" : proxy.trim();
+        if (trimmed.endsWith("/")) trimmed = trimmed.substring(0, trimmed.length() - 1);
+        JsonObject config = readConfig();
+        JsonObject rs = (config.has("remoteSync") && config.get("remoteSync").isJsonObject())
+                ? config.getAsJsonObject("remoteSync")
+                : new JsonObject();
+        rs.addProperty("githubProxy", trimmed);
+        config.add("remoteSync", rs);
+        writeConfig(config);
+        LOG.info("[CodemossSettings] Set remoteSync.githubProxy: " + trimmed);
+    }
+
+    /** Default sync session name. Used when the user hasn't customised it. */
+    public static final String DEFAULT_REMOTE_SYNC_NAME = "codemoss-sync";
+
+    /** Default sync mode (two-way safe pauses on conflicts). */
+    public static final String DEFAULT_REMOTE_SYNC_MODE = "two-way-safe";
+
+    /**
+     * Read the full {@code remoteSync} JSON object with sensible defaults for
+     * every field. Never returns null. The returned object is a defensive copy
+     * — mutating it does not persist changes.
+     */
+    public JsonObject getRemoteSyncConfig() {
+        JsonObject rs = null;
+        try {
+            JsonObject config = readConfig();
+            if (config.has("remoteSync") && config.get("remoteSync").isJsonObject()) {
+                rs = config.getAsJsonObject("remoteSync").deepCopy();
+            }
+        } catch (IOException ignored) {}
+        if (rs == null) rs = new JsonObject();
+
+        if (!rs.has("enabled") || rs.get("enabled").isJsonNull()) {
+            rs.addProperty("enabled", false);
+        }
+        if (!rs.has("githubProxy") || rs.get("githubProxy").isJsonNull()) {
+            rs.addProperty("githubProxy", DEFAULT_GITHUB_PROXY);
+        }
+        if (!rs.has("name") || rs.get("name").isJsonNull() || rs.get("name").getAsString().isEmpty()) {
+            rs.addProperty("name", DEFAULT_REMOTE_SYNC_NAME);
+        }
+        if (!rs.has("localPath") || rs.get("localPath").isJsonNull()) {
+            rs.addProperty("localPath", "");
+        }
+        if (!rs.has("remoteUser") || rs.get("remoteUser").isJsonNull()) {
+            rs.addProperty("remoteUser", "");
+        }
+        if (!rs.has("remoteHost") || rs.get("remoteHost").isJsonNull()) {
+            rs.addProperty("remoteHost", "");
+        }
+        if (!rs.has("remotePort") || rs.get("remotePort").isJsonNull()) {
+            rs.addProperty("remotePort", 22);
+        }
+        if (!rs.has("remotePath") || rs.get("remotePath").isJsonNull()) {
+            rs.addProperty("remotePath", "");
+        }
+        if (!rs.has("mode") || rs.get("mode").isJsonNull() || rs.get("mode").getAsString().isEmpty()) {
+            rs.addProperty("mode", DEFAULT_REMOTE_SYNC_MODE);
+        }
+        if (!rs.has("remoteOs") || rs.get("remoteOs").isJsonNull() || rs.get("remoteOs").getAsString().isEmpty()) {
+            rs.addProperty("remoteOs", "auto");
+        }
+        return rs;
+    }
+
+    /**
+     * Merge the given fields into the persisted {@code remoteSync} block.
+     * Fields not present in {@code patch} keep their stored values, so the
+     * caller can update a subset (e.g. just {@code enabled}) without losing
+     * {@code githubProxy} or other unrelated state.
+     */
+    public void updateRemoteSyncConfig(JsonObject patch) throws IOException {
+        if (patch == null) return;
+        JsonObject config = readConfig();
+        JsonObject rs = (config.has("remoteSync") && config.get("remoteSync").isJsonObject())
+                ? config.getAsJsonObject("remoteSync")
+                : new JsonObject();
+
+        for (String key : patch.keySet()) {
+            rs.add(key, patch.get(key));
+        }
+        // Normalise common fields.
+        if (rs.has("githubProxy") && !rs.get("githubProxy").isJsonNull()) {
+            String proxy = rs.get("githubProxy").getAsString().trim();
+            if (proxy.endsWith("/")) proxy = proxy.substring(0, proxy.length() - 1);
+            rs.addProperty("githubProxy", proxy);
+        }
+        if (rs.has("name") && !rs.get("name").isJsonNull()) {
+            String name = rs.get("name").getAsString().trim();
+            if (name.isEmpty()) name = DEFAULT_REMOTE_SYNC_NAME;
+            rs.addProperty("name", name);
+        }
+        if (rs.has("remotePort") && rs.get("remotePort").isJsonPrimitive()) {
+            try {
+                int port = rs.get("remotePort").getAsInt();
+                if (port < 1 || port > 65535) port = 22;
+                rs.addProperty("remotePort", port);
+            } catch (Exception e) {
+                rs.addProperty("remotePort", 22);
+            }
+        }
+        config.add("remoteSync", rs);
+        writeConfig(config);
+        LOG.info("[CodemossSettings] Updated remoteSync keys=" + patch.keySet());
+    }
+
     // ==================== Path Mapping (per-project) ====================
 
     /**

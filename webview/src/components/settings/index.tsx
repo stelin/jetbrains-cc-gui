@@ -18,6 +18,7 @@ import PromptSection from './PromptSection';
 import CommitSection from './CommitSection';
 import OtherSettingsSection from './OtherSettingsSection';
 import RemoteServerSection from './RemoteServerSection';
+import RemoteSyncSection from './RemoteSyncSection';
 import { SkillsSettingsSection } from '../skills';
 import SettingsDialogs from './SettingsDialogs';
 
@@ -544,6 +545,11 @@ const SettingsView = ({
           {/* Remote mode (ai-bridge-server) */}
           <div style={{ display: currentTab === 'remote' ? 'block' : 'none' }}>
             <RemoteServerSection />
+          </div>
+
+          {/* Remote sync (mutagen) */}
+          <div style={{ display: currentTab === 'remoteSync' ? 'block' : 'none' }}>
+            <RemoteSyncSection />
           </div>
 
           {/* Other settings */}

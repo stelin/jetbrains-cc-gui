@@ -1,4 +1,16 @@
 {
+  "chatHeader": {
+    "sync": {
+      "stopped": "同步未启动",
+      "starting": "连接中…",
+      "watching": "已同步",
+      "syncing": "同步中",
+      "syncingWithSize": "同步中 {{done}}/{{total}}",
+      "disconnected": "连接断开",
+      "conflict": "{{n}} 个冲突",
+      "error": "同步错误"
+    }
+  },
   "common": {
     "ready": "就绪",
     "loading": "加载中",
@@ -334,6 +346,92 @@
     "skillsDesc": "管理和配置技能模块",
     "remote": {
       "title": "远程模式"
+    },
+    "remoteSync": {
+      "title": "远程同步",
+      "subtitle": "通过 mutagen 在本地与远程主机之间双向同步代码",
+      "masterOn": "远程同步已开启",
+      "masterOff": "远程同步已关闭",
+      "masterHint": "关闭后聊天窗口里的同步状态条会自动隐藏；开启后可在下方填写连接信息并启动",
+      "configPlaceholder": "同步配置（SSH 主机、路径、密码）将在下一版本提供",
+      "proxy": {
+        "title": "GitHub 代理",
+        "hint": "国内访问 GitHub 较慢时使用，留空则直连。代理会拼在原始 GitHub URL 前，例如 https://ghfast.top/https://github.com/...",
+        "reset": "恢复默认"
+      },
+      "form": {
+        "title": "同步配置",
+        "toggleOn": "已启用",
+        "toggleOff": "已关闭",
+        "toggleHint": "开启后才能编辑下方字段并启动同步",
+        "needSdkWarning": "请先在上方下载 mutagen 工具，才能使用同步功能。",
+        "name": "同步名称",
+        "localPath": "本地路径",
+        "remoteUser": "远端用户",
+        "remoteHost": "远端主机",
+        "remotePath": "远端路径",
+        "password": "SSH 密码",
+        "passwordSaved": "已保存（输入新密码可覆盖）",
+        "passwordSave": "保存密码",
+        "passwordClear": "清除",
+        "passwordHintSaved": "✓ 密码已加密存入系统钥匙串",
+        "mode": {
+          "title": "同步模式",
+          "twoWaySafe": "双向同步（冲突暂停）",
+          "twoWayResolved": "双向同步（本地优先）",
+          "oneWayReplica": "单向：本地 → 远端"
+        },
+        "remoteOs": {
+          "title": "远端系统",
+          "auto": "自动识别",
+          "windows": "Windows",
+          "unix": "macOS / Linux"
+        }
+      },
+      "actions": {
+        "title": "测试 / 启动",
+        "test": "测试连通性",
+        "testing": "测试中…",
+        "start": "启动同步",
+        "starting": "启动中…",
+        "testOk": "连接成功",
+        "needPassword": "请先在上方保存 SSH 密码后再测试或启动",
+        "diagnostics": "查看诊断信息"
+      },
+      "diagnostics": {
+        "title": "Mutagen 诊断信息",
+        "copy": "复制到剪贴板"
+      },
+      "hostKey": {
+        "title": "首次连接 — 确认主机指纹",
+        "firstTime": "首次连接 {{host}}:{{port}}，请核对下方指纹。",
+        "warning": "请通过其他可信渠道（如服务器管理员、IDC 控制台）核对该指纹。一旦确认信任，会写入 ~/.ssh/known_hosts，下次不再询问。",
+        "trust": "信任并继续"
+      },
+      "status": {
+        "title": "同步状态",
+        "disabled": "未启用",
+        "stopped": "已停止",
+        "starting": "连接中…",
+        "watching": "已同步 · 监听变更",
+        "syncing": "同步中",
+        "disconnected": "已断开 · 重试中",
+        "conflict": "{{n}} 个冲突待处理",
+        "error": "错误",
+        "pause": "暂停",
+        "resume": "恢复",
+        "stop": "停止"
+      },
+      "sdk": {
+        "title": "mutagen 工具",
+        "statusInstalled": "已安装 v{{version}}",
+        "statusMissing": "未安装",
+        "statusDownloading": "下载中…",
+        "intro": "同步功能需要先下载 mutagen 命令行工具（约 97MB，包含所有平台 agent）",
+        "download": "下载 mutagen v{{version}}",
+        "reinstall": "重新下载",
+        "downloadUrl": "下载地址"
+      }
     },
     "other": {
       "title": "其他设置",

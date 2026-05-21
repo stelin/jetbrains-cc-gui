@@ -41,6 +41,7 @@ import {
 } from './utils/turnScope';
 import type { Attachment, ChatInputBoxHandle, ReasoningEffort } from './components/ChatInputBox/types';
 import { StatusPanel, StatusPanelErrorBoundary } from './components/StatusPanel';
+import { SyncStatusBar } from './components/SyncStatusBar';
 import { ToastContainer, type ToastMessage } from './components/Toast';
 import { ScrollControl } from './components/ScrollControl';
 import { ChatHeader } from './components/ChatHeader';
@@ -614,6 +615,7 @@ const App = () => {
 
       {currentView === 'chat' && (
         <>
+          <SyncStatusBar />
           <StatusPanelErrorBoundary>
             <StatusPanel
               todos={globalTodos}

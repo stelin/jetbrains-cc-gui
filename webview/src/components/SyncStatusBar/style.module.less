@@ -1,0 +1,133 @@
+.banner {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 10px;
+  margin: 0 8px 6px 8px;
+  background: var(--bg-tertiary, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--border-primary, #3c3c3c);
+  border-radius: 6px;
+  font-size: 11px;
+  user-select: none;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.icon {
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.text {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.detail {
+  color: var(--vscode-descriptionForeground, #888);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+}
+
+.timeAgo {
+  margin-left: auto;
+  color: var(--vscode-descriptionForeground, #888);
+  flex-shrink: 0;
+  font-size: 10px;
+}
+
+.colWatching { color: #4ec9b0; }
+.colSyncing  { color: #c084fc; }
+.colWarn     { color: #dcdcaa; }
+.colErr      { color: #f48771; }
+.colProgress { color: #569cd6; }
+.colMuted    { color: var(--vscode-descriptionForeground, #888); }
+
+.progressBar {
+  width: 100%;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.progressFill {
+  height: 100%;
+  background: #c084fc;
+  transition: width 120ms ease-out;
+}
+
+.pathRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--vscode-descriptionForeground, #888);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+}
+
+.pathSeg {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.arrow {
+  flex-shrink: 0;
+}
+
+.console {
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.5;
+  max-height: 110px;
+  overflow-y: auto;
+}
+
+.consoleLine {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.consoleTime {
+  color: var(--vscode-descriptionForeground, #888);
+  flex-shrink: 0;
+}
+
+.consoleIcon {
+  flex-shrink: 0;
+}
+
+.consoleText {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

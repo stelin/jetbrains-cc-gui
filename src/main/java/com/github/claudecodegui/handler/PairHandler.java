@@ -2,13 +2,21 @@ package com.github.claudecodegui.handler;
 
 import com.github.claudecodegui.handler.core.BaseMessageHandler;
 import com.github.claudecodegui.handler.core.HandlerContext;
+import com.github.claudecodegui.path.PathMapper;
+import com.github.claudecodegui.path.PathMapperHolder;
 import com.github.claudecodegui.session.pair.ActionRouter;
 import com.github.claudecodegui.session.pair.PairSession;
 import com.github.claudecodegui.session.pair.PairSessionManager;
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.diagnostic.Logger;
+import com.intellij.openapi.project.Project;
+
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * Webview → Java IPC handler for Pair lifecycle.
@@ -161,6 +169,16 @@ public class PairHandler extends BaseMessageHandler {
                 sendError("pair_send_user_input", "empty text");
                 return;
             }
+
+            // Translate any `@<local-path>` references the composer extracted into
+            // remote-path form so the daemon Supervisor only ever sees paths it
+            // can resolve. Identity mapper is a no-op for local mode, so this is
+            // safe to run unconditionally.
+            JsonArray attachments = data.has("attachments") && data.get("attachments").isJsonArray()
+                    ? data.getAsJsonArray("attachments")
+                    : null;
+            text = translateUserInputPaths(text, attachments);
+
             PairSessionManager mgr = PairSessionManager.getInstance(context.getProject());
             PairSession session = pairId.isEmpty()
                     ? mgr.getActivePairs().stream()
@@ -180,6 +198,64 @@ public class PairHandler extends BaseMessageHandler {
             sendError("pair_send_user_input",
                     e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
         }
+    }
+
+    /**
+     * Rewrite the user-typed body so every {@code @<localPath>} occurrence is
+     * substituted with {@code @<remotePath>} based on the active project's
+     * {@link PathMapper}. Paths that don't match the configured mapping prefix
+     * are returned unchanged (per PathMapper's best-effort contract).
+     *
+     * <p>Only {@code @}-prefixed occurrences are rewritten; bare path mentions
+     * elsewhere in the text are left alone (per the "structured tokens only"
+     * design contract — see PathFields.java for the same rule on the main AI
+     * side).
+     */
+    private String translateUserInputPaths(String text, JsonArray attachments) {
+        if (attachments == null || attachments.isEmpty()) {
+            return text;
+        }
+        Project project = context.getProject();
+        if (project == null) {
+            return text;
+        }
+        PathMapper mapper;
+        try {
+            mapper = PathMapperHolder.getInstance(project).get();
+        } catch (Exception e) {
+            LOG.warn("[PairHandler] PathMapper lookup failed: " + e.getMessage());
+            return text;
+        }
+        if (!mapper.isActive()) {
+            return text;
+        }
+
+        // Sort by descending length so we don't shadow a longer path with a
+        // shorter prefix during substitution
+        // (e.g. /Users/me/proj/sub vs /Users/me/proj).
+        List<String> locals = new ArrayList<>();
+        for (JsonElement el : attachments) {
+            if (!el.isJsonObject()) continue;
+            JsonObject att = el.getAsJsonObject();
+            if (!att.has("path") || att.get("path").isJsonNull()) continue;
+            String p = att.get("path").getAsString();
+            if (p == null || p.isBlank()) continue;
+            locals.add(p);
+        }
+        locals.sort((a, b) -> Integer.compare(b.length(), a.length()));
+
+        String out = text;
+        for (String local : locals) {
+            String remote = mapper.toRemote(local);
+            if (remote == null || remote.equals(local)) {
+                // Either unmapped (PathMissTracker will surface) or already remote.
+                continue;
+            }
+            // Replace only when the local path is anchored to a preceding `@`.
+            // String#replace is literal and safe for path characters here.
+            out = out.replace("@" + local, "@" + remote);
+        }
+        return out;
     }
 
     private void handleHumanResponse(String content) {

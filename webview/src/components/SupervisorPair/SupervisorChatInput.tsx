@@ -1,15 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type {
-  SupervisorAgent,
-  SupervisorAgentListPayload,
   SelectedSupervisor,
+  SupervisorAgent,
 } from '../../types/supervisorAgent';
 import type { ModelInfo, ReasoningEffort } from '../ChatInputBox/types';
 import { ModelSelect } from '../ChatInputBox/selectors/ModelSelect';
 import { ReasoningSelect } from '../ChatInputBox/selectors/ReasoningSelect';
 import { SUPERVISOR_MODELS } from '../settings/SupervisorSection/templates';
-import PickerDialog from '../ChatInputBox/SupervisorToggle/PickerDialog';
+import SupervisorAgentSelect from './SupervisorAgentSelect';
 import { usePairContext } from './PairContext';
 import styles from './style.module.less';
 
@@ -19,14 +18,44 @@ const sendToJava = (message: string) => {
   }
 };
 
-/**
- * Convert SUPERVISOR_MODELS (settings template format) to ModelInfo[] so it
- * can be fed to the reused {@code ModelSelect} component.
- */
+/** Reformatted SUPERVISOR_MODELS as ModelInfo[] for the shared ModelSelect. */
 const SUPERVISOR_MODEL_INFOS: ModelInfo[] = SUPERVISOR_MODELS.map((m) => ({
   id: m.id,
   label: m.label,
 }));
+
+/**
+ * Match an absolute path that follows an `@` reference token, used to extract
+ * structured path attachments from the free-form supervisor message body.
+ *
+ *  - Unix-style:    `@/Users/me/foo/bar.go`
+ *  - Windows-style: `@C:\path\to\file` or `@C:/path/to/file`
+ *
+ * Terminator set is conservative: stops at whitespace or common punctuation
+ * (parens / brackets / quotes / backticks / angle brackets), so trailing
+ * markdown / code-comment punctuation is not absorbed into the path.
+ */
+const AT_PATH_PATTERN = /@(\/[^\s)\]}>"'`]+|[a-zA-Z]:[\\/][^\s)\]}>"'`]+)/g;
+
+/**
+ * Pull every `@<absolute-path>` reference out of the message body and return
+ * the unique paths in document order. The text itself is NOT rewritten here
+ * — Java translates the structured `attachments[].path` and substitutes the
+ * @-tags in `text` accordingly so the daemon-side Supervisor only ever sees
+ * remote paths.
+ */
+function extractAtPathAttachments(text: string): Array<{ path: string }> {
+  const seen = new Set<string>();
+  const out: Array<{ path: string }> = [];
+  for (const m of text.matchAll(AT_PATH_PATTERN)) {
+    const p = m[1]?.trim();
+    if (!p) continue;
+    if (seen.has(p)) continue;
+    seen.add(p);
+    out.push({ path: p });
+  }
+  return out;
+}
 
 interface SupervisorChatInputProps {
   /** The active supervisor this input addresses. */
@@ -34,16 +63,15 @@ interface SupervisorChatInputProps {
 }
 
 /**
- * Right-pane chat input — visual twin of the main ChatInputBox but scoped to
- * the active Supervisor. Reuses the `.chat-input-box` card chrome, the shared
- * `ModelSelect` / `ReasoningSelect` selectors, and the global `submit-button`
- * styling so both columns feel like the same surface.
+ * Right-pane chat input. Visually identical to the main {@code ChatInputBox}:
+ * shares the `.chat-input-box` card chrome, `.input-editable-wrapper`,
+ * `.selector-button` toolbar, and `.submit-button`.
  *
  * Differences from the main input:
- *  - No `/` command / `#` agent / `!` prompt / `$` command completions.
- *  - No provider switching (Supervisor is always Claude).
- *  - Model list is locked to {@link SUPERVISOR_MODELS}.
- *  - An "Agent" chip on the left lets the user switch the active supervisor.
+ *  - Plain textarea (no contenteditable, no `/ # ! $` completions).
+ *  - Provider is locked to Claude; model list locked to {@link SUPERVISOR_MODELS}.
+ *  - Left toolbar leads with an inline {@link SupervisorAgentSelect} for
+ *    switching the active supervisor without leaving the pane.
  */
 export default function SupervisorChatInput({ supervisor }: SupervisorChatInputProps) {
   const { t } = useTranslation();
@@ -54,39 +82,19 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
     reasoningByAgentId,
     setSupervisorReasoning,
     setSelected,
+    openManager,
   } = usePairContext();
 
   const [draft, setDraft] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Picker state for the agent chip. Subscribe to the supervisor-agents list
-  // exactly like SupervisorToggle does — both surfaces need fresh data.
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [agents, setAgents] = useState<SupervisorAgent[]>([]);
-  const [defaultAgentId, setDefaultAgentId] = useState<string | null>(null);
-
-  useEffect(() => {
-    const previous = window.updateSupervisorAgents;
-    window.updateSupervisorAgents = (jsonStr: string) => {
-      previous?.(jsonStr);
-      try {
-        const payload: SupervisorAgentListPayload = JSON.parse(jsonStr);
-        setAgents(payload.agents || []);
-        setDefaultAgentId(payload.defaultAgentId ?? null);
-      } catch {
-        /* ignore */
-      }
-    };
-    sendToJava('get_supervisor_agents:');
-    return () => {
-      window.updateSupervisorAgents = previous;
-    };
-  }, []);
-
   const handleSubmit = useCallback(() => {
     const text = draft.trim();
     if (!text) return;
-    sendUserInputToSupervisor(text);
+    // Pull out @-tagged absolute paths so the Java side can translate them
+    // local→remote before forwarding to the daemon Supervisor.
+    const attachments = extractAtPathAttachments(text);
+    sendUserInputToSupervisor(text, attachments);
     setDraft('');
     requestAnimationFrame(() => textareaRef.current?.focus());
   }, [draft, sendUserInputToSupervisor]);
@@ -101,8 +109,6 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
     [handleSubmit]
   );
 
-  // Drag-drop: same handling as the previous composer. Accept everything, then
-  // pull the first path-shaped MIME and insert as `@path ` at the caret.
   const handleDragOver = useCallback((e: React.DragEvent<HTMLElement>) => {
     e.preventDefault();
     e.stopPropagation();
@@ -144,10 +150,9 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
     });
   }, []);
 
-  // Switch which supervisor is active without leaving the right pane.
-  // Mirrors SupervisorToggle.handleConfirm: stop the current pair on the
-  // daemon, swap the selected list, then start a fresh pair with the new
-  // agent. Phase B Java side will reconcile the pair lifecycle.
+  // Switch which supervisor is active. Mirrors SupervisorToggle.handleConfirm:
+  // stop the running pair on the daemon, swap the selected list, then start a
+  // fresh pair with the new agent.
   const handleSwitchAgent = useCallback(
     (agent: SupervisorAgent) => {
       const next: SelectedSupervisor[] = [
@@ -169,12 +174,10 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
       } catch {
         /* ignore */
       }
-      setPickerOpen(false);
     },
     [setSelected]
   );
 
-  // Effective model = runtime override OR agent default OR first supervisor model.
   const effectiveModel =
     modelOverrideByAgentId[supervisor.agentId] ||
     supervisor.model ||
@@ -185,8 +188,6 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
 
   const handleModelChange = useCallback(
     (modelId: string) => {
-      // If user picks the agent's configured default, clear the override so
-      // the chip stops showing the "overridden" hint.
       setSupervisorModel(supervisor.agentId, modelId === supervisor.model ? null : modelId);
     },
     [setSupervisorModel, supervisor.agentId, supervisor.model]
@@ -201,16 +202,11 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
 
   return (
     <div
-      className={`chat-input-box ${styles.supervisorInput}`}
+      className="chat-input-box"
       data-provider="claude"
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >
-      <div className={styles.composerTargetLabel}>
-        <span className="codicon codicon-eye" />
-        <span>{t('pairLayout.composer.targetLabel', 'To Supervisor')}</span>
-      </div>
-
       <div className="input-editable-wrapper">
         <textarea
           ref={textareaRef}
@@ -221,27 +217,17 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
           onDragOver={handleDragOver}
           onDrop={handleDrop}
           placeholder={t('pairLayout.composer.placeholder')}
-          rows={3}
           spellCheck={false}
         />
       </div>
 
       <div className="button-area" data-provider="claude">
         <div className="button-area-left">
-          {/* Active supervisor chip — click to open the picker and switch. */}
-          <button
-            type="button"
-            className="selector-button"
-            onClick={() => setPickerOpen(true)}
-            title={t('pairLayout.composer.agentChip.tooltip', 'Switch supervisor')}
-          >
-            <span className="codicon codicon-eye" />
-            <span className="selector-button-text">{supervisor.name}</span>
-            <span
-              className="codicon codicon-chevron-down"
-              style={{ fontSize: '10px', marginLeft: '2px' }}
-            />
-          </button>
+          <SupervisorAgentSelect
+            value={supervisor.agentId}
+            onChange={handleSwitchAgent}
+            onOpenManager={openManager}
+          />
 
           <ModelSelect
             value={effectiveModel}
@@ -269,15 +255,6 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
           </button>
         </div>
       </div>
-
-      <PickerDialog
-        open={pickerOpen}
-        agents={agents}
-        defaultId={defaultAgentId}
-        initialSelectedId={supervisor.agentId}
-        onCancel={() => setPickerOpen(false)}
-        onConfirm={handleSwitchAgent}
-      />
     </div>
   );
 }

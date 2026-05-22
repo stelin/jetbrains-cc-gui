@@ -95,8 +95,17 @@ interface PairContextValue {
    * the main AI). Used by the right-pane composer to direct/coordinate the
    * Supervisor — e.g. "the design doc is at docs/plans/foo.md, coordinate
    * the main AI to implement it".
+   *
+   * {@code attachments} carries the structured local-path references the
+   * composer extracted from `@<path>` tokens in {@code text}. Java translates
+   * each `path` local→remote via {@code PathMapper} and substitutes the same
+   * `@<localPath>` occurrences in the text body before forwarding to the
+   * daemon, so the Supervisor only ever sees remote paths in its context.
    */
-  sendUserInputToSupervisor: (text: string) => void;
+  sendUserInputToSupervisor: (
+    text: string,
+    attachments?: Array<{ path: string }>
+  ) => void;
 }
 
 const PairContext = createContext<PairContextValue | null>(null);
@@ -216,28 +225,36 @@ export function PairProvider({ children }: PairProviderProps) {
     setPendingEscalate(null);
   }, []);
 
-  const sendUserInputToSupervisor = useCallback((text: string) => {
-    const trimmed = text.trim();
-    if (!trimmed) return;
-    const pid = pairIdRef.current ?? '';
-    sendToJava(`pair_send_user_input:${JSON.stringify({ pairId: pid, text: trimmed })}`);
-    // Optimistically render the message in the right pane so the user sees
-    // it immediately. The actual Supervisor response arrives via
-    // window.onPairActionEvent.
-    const firstAgentId = selected[0]?.agentId;
-    if (firstAgentId) {
-      setEntriesByAgentId((prev) => {
-        const next = prev[firstAgentId] ? [...prev[firstAgentId]] : [];
-        next.push({
-          id: `u_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-          kind: 'user',
-          text: trimmed,
+  const sendUserInputToSupervisor = useCallback(
+    (text: string, attachments?: Array<{ path: string }>) => {
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      const pid = pairIdRef.current ?? '';
+      const payload: Record<string, unknown> = { pairId: pid, text: trimmed };
+      if (attachments && attachments.length > 0) {
+        payload.attachments = attachments;
+      }
+      sendToJava(`pair_send_user_input:${JSON.stringify(payload)}`);
+      // Optimistically render the message in the right pane so the user sees
+      // it immediately. We show the ORIGINAL local-path text — that's what the
+      // user typed and expects to see; Java does the remote translation on
+      // the way to the daemon only.
+      const firstAgentId = selected[0]?.agentId;
+      if (firstAgentId) {
+        setEntriesByAgentId((prev) => {
+          const next = prev[firstAgentId] ? [...prev[firstAgentId]] : [];
+          next.push({
+            id: `u_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            kind: 'user',
+            text: trimmed,
+          });
+          const trimmedList = next.length > 500 ? next.slice(next.length - 500) : next;
+          return { ...prev, [firstAgentId]: trimmedList };
         });
-        const trimmedList = next.length > 500 ? next.slice(next.length - 500) : next;
-        return { ...prev, [firstAgentId]: trimmedList };
-      });
-    }
-  }, [selected]);
+      }
+    },
+    [selected]
+  );
 
   // Subscribe to Java callbacks for Pair lifecycle and action stream.
   useEffect(() => {
@@ -456,6 +473,9 @@ export function usePairContext(): PairContextValue {
     respondToEscalate: () => { /* no-op */ },
     dismissEscalate: () => { /* no-op */ },
     registerInjectPromptHandler: () => { /* no-op */ },
-    sendUserInputToSupervisor: () => { /* no-op */ },
+    sendUserInputToSupervisor: (
+      _text: string,
+      _attachments?: Array<{ path: string }>
+    ) => { /* no-op */ },
   };
 }

@@ -669,9 +669,9 @@
 }
 
 // ─────────── Input wrapper (right-pane chat input) ───────────
-// Hosts the SupervisorChatInput component, which reuses the main `.chat-input-box`
-// chrome so both columns look identical. We add a Supervisor-specific accent
-// (gradient top bar via ::before on .supervisorInput) and a small target label.
+// Hosts the SupervisorChatInput, which reuses the main `.chat-input-box`
+// chrome so both columns look identical. The wrapper only adds the outer
+// padding so the card breathes inside the pane edges.
 
 .inputWrapper {
   flex-shrink: 0;
@@ -680,61 +680,38 @@
   border-top: 1px solid var(--border-secondary);
 }
 
-.supervisorInput {
-  // Visual accent bar to mark this card as the Supervisor target (vs. main AI).
-  position: relative;
-
-  &::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: 2px;
-    background: linear-gradient(
-      90deg,
-      var(--chart-gradient-start),
-      var(--chart-gradient-end)
-    );
-    border-top-left-radius: 8px;
-    border-top-right-radius: 8px;
-    pointer-events: none;
-    z-index: 1;
-  }
-}
-
-.composerTargetLabel {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 12px 0;
-  font-size: 11px;
-  color: var(--text-muted);
-  font-weight: 500;
-  letter-spacing: 0.2px;
-
-  .codicon {
-    font-size: 12px;
-    color: var(--chart-gradient-end);
-  }
-}
-
+// Textarea inside the right-pane card. Mirrors `.input-editable` (the main
+// AI input's contenteditable div): same font-size, line-height, placeholder
+// color, and "no chrome" appearance so the card body matches.
+//
+// Height note: the left card carries a context bar (~24px) on top, so to keep
+// the overall card height visually aligned we give the textarea 5 lines of
+// min-height instead of the input-editable's 4 lines. The wrapper's max-height
+// (240px) still caps growth.
 .supervisorTextarea {
+  display: block;
   width: 100%;
-  padding: 4px 0;
+  min-height: calc(1.5em * 5);
+  padding: 0;
+  margin: 0;
   border: none;
   background: transparent;
   color: var(--text-primary);
-  font-size: 13px;
+  font-size: 14px;
   font-family: inherit;
   line-height: 1.5;
-  resize: vertical;
+  resize: none;
   box-sizing: border-box;
-  min-height: 60px;
   outline: none;
+  word-wrap: break-word;
+  white-space: pre-wrap;
 
   &::placeholder {
-    color: var(--text-placeholder);
+    color: var(--input-placeholder);
+  }
+
+  &:focus {
+    outline: none;
   }
 }
 

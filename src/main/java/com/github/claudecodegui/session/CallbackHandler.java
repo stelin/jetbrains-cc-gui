@@ -151,6 +151,16 @@ public class CallbackHandler {
     }
 
     /**
+     * Notify that the bridge classified a [SEND_ERROR] with a known code
+     * (e.g. {@code LONG_CONTEXT_NOT_ENTITLED}).
+     */
+    public void notifyClaudeErrorCode(String code) {
+        if (callback != null) {
+            callback.onClaudeErrorCode(code);
+        }
+    }
+
+    /**
      * Notify that a specific message received its provider UUID.
      */
     public void notifyUserMessageUuidPatched(String content, String uuid) {

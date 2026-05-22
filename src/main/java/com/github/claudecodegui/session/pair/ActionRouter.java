@@ -78,6 +78,35 @@ public class ActionRouter {
     }
 
     /**
+     * Surface a transport / lifecycle failure as a visible bubble in the right
+     * pane. We piggy-back on the regular action-event channel so the user sees
+     * the same message styling — there's no point inventing a second renderer
+     * for a rare path. The action is downgraded to {@code wait} so no effect
+     * fires; the message text carries the explanation.
+     */
+    public void dispatchTransportError(String message) {
+        webview.onThinking(pair.getAgentId(), false);
+
+        JsonObject action = new JsonObject();
+        action.addProperty("action", "wait");
+        action.addProperty("reason", "transport_error");
+        action.add("payload", new JsonObject());
+
+        JsonObject wrapper = new JsonObject();
+        wrapper.addProperty("pairId", pair.getPairId());
+        wrapper.addProperty("supervisorId", pair.getAgentId());
+        wrapper.addProperty("naturalText", "⚠️ " + (message != null ? message : "未知错误"));
+        wrapper.addProperty("reasoningText", "");
+        wrapper.add("action", action);
+        wrapper.addProperty("parseError", "transport_error");
+        wrapper.addProperty("rawText", message != null ? message : "");
+
+        try { webview.onActionEvent(wrapper); } catch (Exception e) {
+            LOG.warn("[ActionRouter] dispatchTransportError webview push failed: " + e.getMessage());
+        }
+    }
+
+    /**
      * Dispatch an action wrapper as emitted by the daemon
      * ({@code [SUPERVISOR_ACTION] {...}} line, already parsed).
      *

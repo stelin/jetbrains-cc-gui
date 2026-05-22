@@ -26,6 +26,14 @@ public class PairSession {
     private final ProgressManager progressManager;
     private final long startedAt = System.currentTimeMillis();
 
+    // Snapshot of the parameters that started the daemon-side supervisor runtime.
+    // EventBus uses these to lazily re-run supervisor.start after a daemon restart
+    // (in remote mode the Node process's in-memory runtime Map is lost on crash).
+    private final String agentDescription;
+    private final String planContent;
+    private final String projectSpec;
+    private final String model;
+
     private volatile EventBus eventBus;       // wired by PairSessionManager
     private volatile ActionRouter actionRouter;
     private volatile boolean disposed = false;
@@ -38,7 +46,11 @@ public class PairSession {
             Path pairDir,
             Path planSnapshotPath,
             SupervisorBridge supervisorBridge,
-            ProgressManager progressManager
+            ProgressManager progressManager,
+            String agentDescription,
+            String planContent,
+            String projectSpec,
+            String model
     ) {
         this.pairId = pairId;
         this.mainSessionId = mainSessionId;
@@ -48,6 +60,10 @@ public class PairSession {
         this.planSnapshotPath = planSnapshotPath;
         this.supervisorBridge = supervisorBridge;
         this.progressManager = progressManager;
+        this.agentDescription = agentDescription;
+        this.planContent = planContent;
+        this.projectSpec = projectSpec;
+        this.model = model;
     }
 
     public String getPairId() { return pairId; }
@@ -68,6 +84,11 @@ public class PairSession {
 
     public boolean isDisposed() { return disposed; }
     public void markDisposed() { this.disposed = true; }
+
+    public String getAgentDescription() { return agentDescription; }
+    public String getPlanContent() { return planContent; }
+    public String getProjectSpec() { return projectSpec; }
+    public String getModel() { return model; }
 
     /**
      * Current Supervisor agent ids (always size 1 in current iteration).

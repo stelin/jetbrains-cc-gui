@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { TFunction } from 'i18next';
 
 import { BackIcon } from '../Icons';
+import SupervisorToggle from '../ChatInputBox/SupervisorToggle';
+import type { SelectedSupervisor } from '../../types/supervisorAgent';
 
 export interface ChatHeaderProps {
   currentView: 'chat' | 'history' | 'settings';
@@ -14,6 +16,15 @@ export interface ChatHeaderProps {
   onSettings: () => void;
   onTitleChange?: (newTitle: string) => void;
   titleEditable?: boolean;
+  /**
+   * When provided, render the Supervisor toggle right after the session title
+   * so the user can flip the side-by-side Supervisor pane on/off from the
+   * header (instead of from the main input toolbar).
+   */
+  onSupervisorChange?: (selected: SelectedSupervisor[]) => void;
+  onOpenSupervisorManager?: () => void;
+  /** When false, the supervisor toggle is not rendered (e.g. provider doesn't support it). */
+  supervisorEnabled?: boolean;
 }
 
 export function ChatHeader({
@@ -27,6 +38,9 @@ export function ChatHeader({
   onSettings,
   onTitleChange,
   titleEditable = false,
+  onSupervisorChange,
+  onOpenSupervisorManager,
+  supervisorEnabled = true,
 }: ChatHeaderProps): React.ReactElement | null {
   const [editing, setEditing] = useState(false);
   const [editValue, setEditValue] = useState('');
@@ -125,6 +139,12 @@ export function ChatHeader({
               </button>
             )}
           </div>
+        )}
+        {currentView === 'chat' && supervisorEnabled && (
+          <SupervisorToggle
+            onChange={onSupervisorChange}
+            onOpenManager={onOpenSupervisorManager}
+          />
         )}
       </div>
       <div className="header-right">

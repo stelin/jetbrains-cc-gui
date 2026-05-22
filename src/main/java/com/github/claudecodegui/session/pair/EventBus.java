@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Forwards filtered main-AI events to the Supervisor session and dispatches
@@ -24,6 +25,13 @@ import java.util.concurrent.Executors;
 public class EventBus {
 
     private static final Logger LOG = Logger.getInstance(EventBus.class);
+
+    /** Stable marker thrown by the daemon when its in-memory supervisor runtime
+     *  is missing (typically because the Node process was restarted after a
+     *  remote-mode crash). Matched here to trigger a lazy supervisor.start. */
+    private static final String NOT_FOUND_MARKER = "SUPERVISOR_NOT_FOUND";
+
+    private static final long RESTART_TIMEOUT_SEC = 20;
 
     private final PairSession pair;
     private final ActionRouter router;
@@ -144,23 +152,86 @@ public class EventBus {
         // for daemon → SDK round-trip. ActionRouter.dispatch will clear it.
         try { router.signalThinking(true); } catch (Exception ignored) { /* best-effort */ }
         try {
-            JsonObject actionWrapper = pair.getSupervisorBridge().postEvent(event)
-                    .exceptionally(err -> {
-                        LOG.warn("[EventBus] supervisor postEvent failed: " + err.getMessage());
-                        return null;
-                    })
-                    .join();
-            if (actionWrapper != null) {
-                router.dispatch(actionWrapper);
+            String firstError = tryPostEvent(event);
+            if (firstError == null) {
+                return CompletableFuture.completedFuture(null);
+            }
+
+            // If the failure is "daemon-side runtime missing" (e.g. remote
+            // service restarted while we still hold the PairSession), re-run
+            // supervisor.start with the original parameters and retry once.
+            if (firstError.contains(NOT_FOUND_MARKER)) {
+                LOG.info("[EventBus] supervisor runtime missing on daemon — lazy restart for pair "
+                        + pair.getPairId());
+                if (restartSupervisor()) {
+                    String retryError = tryPostEvent(event);
+                    if (retryError == null) {
+                        return CompletableFuture.completedFuture(null);
+                    }
+                    pushTransportError("Supervisor 已自动恢复但本次重试仍失败: " + retryError);
+                } else {
+                    pushTransportError("Supervisor 服务暂时不可达,自动恢复失败,请稍后再发送。");
+                }
             } else {
-                // Failed silently — make sure thinking indicator clears.
-                try { router.signalThinking(false); } catch (Exception ignored) { /* best-effort */ }
+                pushTransportError("Supervisor 调用失败: " + firstError);
             }
         } catch (Exception e) {
             LOG.warn("[EventBus] forward exception: " + e.getMessage());
+            pushTransportError("Supervisor 调用异常: "
+                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+        } finally {
             try { router.signalThinking(false); } catch (Exception ignored) { /* best-effort */ }
         }
         return CompletableFuture.completedFuture(null);
+    }
+
+    /**
+     * Run one supervisor.postEvent round-trip. Returns null on success (action
+     * already dispatched to the router); returns an error message string on
+     * failure (caller decides what to do).
+     */
+    private String tryPostEvent(JsonObject event) {
+        try {
+            JsonObject actionWrapper = pair.getSupervisorBridge().postEvent(event).join();
+            if (actionWrapper != null) {
+                router.dispatch(actionWrapper);
+                return null;
+            }
+            return "no action returned";
+        } catch (Exception ex) {
+            // CompletionException unwrap: prefer the cause's message which
+            // carries the daemon-side error text (set by SupervisorBridge).
+            Throwable cause = ex.getCause() != null ? ex.getCause() : ex;
+            String msg = cause.getMessage() != null ? cause.getMessage() : cause.getClass().getSimpleName();
+            LOG.warn("[EventBus] supervisor postEvent failed: " + msg);
+            return msg;
+        }
+    }
+
+    /**
+     * Re-run supervisor.start on the daemon using the snapshot parameters
+     * captured when the Pair was created. Synchronous (blocks the dispatcher
+     * thread for up to {@link #RESTART_TIMEOUT_SEC} seconds).
+     */
+    private boolean restartSupervisor() {
+        try {
+            Boolean ok = pair.getSupervisorBridge()
+                    .start(pair.getAgentName(),
+                            pair.getAgentDescription(),
+                            pair.getPlanContent(),
+                            pair.getProjectSpec(),
+                            pair.getModel())
+                    .get(RESTART_TIMEOUT_SEC, TimeUnit.SECONDS);
+            return Boolean.TRUE.equals(ok);
+        } catch (Exception e) {
+            LOG.warn("[EventBus] supervisor restart failed: "
+                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+            return false;
+        }
+    }
+
+    private void pushTransportError(String message) {
+        try { router.dispatchTransportError(message); } catch (Exception ignored) { /* best-effort */ }
     }
 
     private JsonObject makeEvent(String type, JsonObject payload) {

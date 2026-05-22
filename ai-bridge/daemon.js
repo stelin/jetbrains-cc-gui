@@ -441,6 +441,7 @@ async function processRequest(request) {
   // Signal ready
   sendDaemonEvent('ready', {
     pid: process.pid,
+    version: DAEMON_VERSION,
     sdkPreloaded,
     supervisorSupport: SUPERVISOR_SUPPORT,
   });

@@ -14,6 +14,8 @@ import { drainPendingSettings, startInitialSettingsRequest } from '../settingsBo
 
 export function registerUsageModeCallbacks(options: UseWindowCallbacksOptions): void {
   const {
+    addToast,
+    t,
     setUsagePercentage,
     setUsageUsedTokens,
     setUsageMaxTokens,
@@ -30,6 +32,7 @@ export function registerUsageModeCallbacks(options: UseWindowCallbacksOptions): 
     setAutoOpenFileEnabled,
     currentProviderRef,
     syncActiveProviderModelMapping,
+    handleLongContextChange,
   } = options;
 
   window.onUsageUpdate = (json) => {
@@ -155,6 +158,24 @@ export function registerUsageModeCallbacks(options: UseWindowCallbacksOptions): 
       setAutoOpenFileEnabled(data.autoOpenFileEnabled ?? false);
     } catch (error) {
       console.error('[Frontend] Failed to parse auto open file enabled:', error);
+    }
+  };
+
+  // Structured Claude API error classification forwarded from the bridge.
+  // For now we only act on LONG_CONTEXT_NOT_ENTITLED: turn the 1M toggle off
+  // (which also re-syncs the model without the [1m] suffix and persists the
+  // preference via the usual save effect), and surface a toast so the user
+  // knows why their original send failed.
+  window.onClaudeErrorCode = (code) => {
+    if (code === 'LONG_CONTEXT_NOT_ENTITLED') {
+      handleLongContextChange(false);
+      addToast(
+        t('models.longContext.notEntitledToast', {
+          defaultValue:
+            '1M context is not available on your Claude plan — disabled automatically. Please resend.',
+        }),
+        'warning',
+      );
     }
   };
 

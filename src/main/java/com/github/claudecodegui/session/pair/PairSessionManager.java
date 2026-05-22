@@ -124,7 +124,11 @@ public final class PairSessionManager implements Disposable {
                 pairDir,
                 planSnapshot,
                 bridge,
-                progress
+                progress,
+                description,
+                planContent,
+                projectSpec,
+                model
         );
 
         // Start daemon-side supervisor.

@@ -127,6 +127,14 @@ public class ClaudeSession {
          */
         default void onReasoningEffortApplied(String effort) {
         }
+
+        /**
+         * Called when the bridge classifies a [SEND_ERROR] with a known code
+         * (e.g. {@code LONG_CONTEXT_NOT_ENTITLED}). The UI uses this to self-correct
+         * — e.g. auto-disable the 1M context toggle — without parsing raw error text.
+         */
+        default void onClaudeErrorCode(String code) {
+        }
     }
 
     public ClaudeSession(Project project, ClaudeSDKBridge claudeSDKBridge, CodexSDKBridge codexSDKBridge) {

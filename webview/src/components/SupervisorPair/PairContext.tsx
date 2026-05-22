@@ -11,6 +11,7 @@ import {
 import type { SelectedSupervisor } from '../../types/supervisorAgent';
 import type { SupervisorLogEntry } from './SupervisorSubPanel';
 import type { SupervisorActionType } from './ActionCard';
+import type { ReasoningEffort } from '../ChatInputBox/types';
 
 /**
  * Shape for an escalate request surfaced to the user by ActionRouter.
@@ -57,6 +58,26 @@ interface PairContextValue {
    * loading spinner in the right pane.
    */
   thinkingByAgentId: Record<string, boolean>;
+  /**
+   * Map of supervisor agentId → runtime model override. Set via the composer
+   * model picker; takes precedence over the agent's persisted default for the
+   * current pair session only (does NOT mutate settings).
+   * Empty/missing entry = use the agent's configured default.
+   */
+  modelOverrideByAgentId: Record<string, string>;
+  /**
+   * Set (or clear, with `null`) the runtime model override for a supervisor in
+   * the current pair. Also notifies Java so the next turn uses the new model.
+   */
+  setSupervisorModel: (agentId: string, model: string | null) => void;
+  /**
+   * Map of supervisor agentId → runtime reasoning effort override (low/medium/
+   * high/xhigh/max). Like the model override, this only lives for the duration
+   * of the current pair session — it does not persist back to agent config.
+   */
+  reasoningByAgentId: Record<string, ReasoningEffort>;
+  /** Set the runtime reasoning effort for a supervisor in the current pair. */
+  setSupervisorReasoning: (agentId: string, effort: ReasoningEffort) => void;
   /** Send the user's choice for the active escalate dialog. */
   respondToEscalate: (choice: string, note?: string) => void;
   /** Dismiss the active escalate dialog (no choice sent). */
@@ -101,6 +122,8 @@ export function PairProvider({ children }: PairProviderProps) {
   const [pairId, setPairId] = useState<string | null>(null);
   const [pendingEscalate, setPendingEscalate] = useState<EscalateRequest | null>(null);
   const [thinkingByAgentId, setThinkingByAgentId] = useState<Record<string, boolean>>({});
+  const [modelOverrideByAgentId, setModelOverrideByAgentId] = useState<Record<string, string>>({});
+  const [reasoningByAgentId, setReasoningByAgentId] = useState<Record<string, ReasoningEffort>>({});
 
   const openManagerRef = useRef<() => void>(() => { /* not registered yet */ });
   const injectHandlerRef = useRef<((pairId: string, supervisorId: string, prompt: string) => void) | null>(null);
@@ -116,7 +139,43 @@ export function PairProvider({ children }: PairProviderProps) {
       setPairId(null);
       setPendingEscalate(null);
       setThinkingByAgentId({});
+      setModelOverrideByAgentId({});
+      setReasoningByAgentId({});
     }
+  }, []);
+
+  const setSupervisorModel = useCallback((agentId: string, model: string | null) => {
+    setModelOverrideByAgentId((prev) => {
+      const next = { ...prev };
+      if (model) {
+        next[agentId] = model;
+      } else {
+        delete next[agentId];
+      }
+      return next;
+    });
+    // Notify Java so the next turn for this supervisor uses the new model.
+    // `model: ""` signals "fall back to the agent default".
+    const pid = pairIdRef.current ?? '';
+    sendToJava(
+      `pair_set_model:${JSON.stringify({
+        pairId: pid,
+        supervisorId: agentId,
+        model: model ?? '',
+      })}`
+    );
+  }, []);
+
+  const setSupervisorReasoning = useCallback((agentId: string, effort: ReasoningEffort) => {
+    setReasoningByAgentId((prev) => ({ ...prev, [agentId]: effort }));
+    const pid = pairIdRef.current ?? '';
+    sendToJava(
+      `pair_set_reasoning:${JSON.stringify({
+        pairId: pid,
+        supervisorId: agentId,
+        effort,
+      })}`
+    );
   }, []);
 
   const openManager = useCallback(() => {
@@ -201,6 +260,8 @@ export function PairProvider({ children }: PairProviderProps) {
       setPairId(null);
       setEntriesByAgentId({});
       setPendingEscalate(null);
+      setModelOverrideByAgentId({});
+      setReasoningByAgentId({});
     };
 
     window.onPairActionEvent = (json: string) => {
@@ -340,6 +401,10 @@ export function PairProvider({ children }: PairProviderProps) {
       pairId,
       pendingEscalate,
       thinkingByAgentId,
+      modelOverrideByAgentId,
+      setSupervisorModel,
+      reasoningByAgentId,
+      setSupervisorReasoning,
       respondToEscalate,
       dismissEscalate,
       registerInjectPromptHandler,
@@ -354,6 +419,10 @@ export function PairProvider({ children }: PairProviderProps) {
       pairId,
       pendingEscalate,
       thinkingByAgentId,
+      modelOverrideByAgentId,
+      setSupervisorModel,
+      reasoningByAgentId,
+      setSupervisorReasoning,
       respondToEscalate,
       dismissEscalate,
       registerInjectPromptHandler,
@@ -380,6 +449,10 @@ export function usePairContext(): PairContextValue {
     pairId: null,
     pendingEscalate: null,
     thinkingByAgentId: {},
+    modelOverrideByAgentId: {},
+    setSupervisorModel: () => { /* no-op */ },
+    reasoningByAgentId: {},
+    setSupervisorReasoning: () => { /* no-op */ },
     respondToEscalate: () => { /* no-op */ },
     dismissEscalate: () => { /* no-op */ },
     registerInjectPromptHandler: () => { /* no-op */ },

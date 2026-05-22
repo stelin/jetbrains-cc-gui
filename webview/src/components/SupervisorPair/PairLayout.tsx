@@ -39,10 +39,10 @@ export default function PairLayout({ children, status }: PairLayoutProps) {
   const MIN_PCT = 15;
   const MAX_PCT = 70;
   const [rightWidthPct, setRightWidthPct] = useState<number>(() => {
-    if (typeof window === 'undefined') return 40;
+    if (typeof window === 'undefined') return 50;
     const stored = window.localStorage.getItem(STORAGE_KEY);
     const parsed = stored ? parseFloat(stored) : NaN;
-    return Number.isFinite(parsed) && parsed >= MIN_PCT && parsed <= MAX_PCT ? parsed : 40;
+    return Number.isFinite(parsed) && parsed >= MIN_PCT && parsed <= MAX_PCT ? parsed : 50;
   });
   // Mirror the current pct in a ref so the global mouse listeners (mounted
   // once) can persist the latest value without re-binding on every tick.
@@ -95,10 +95,10 @@ export default function PairLayout({ children, status }: PairLayoutProps) {
     };
   }, []);
 
-  // Double-click the divider → reset to default 40 %.
+  // Double-click the divider → reset to default 50 %.
   const onDoubleClickDivider = useCallback(() => {
-    setRightWidthPct(40);
-    try { window.localStorage.setItem(STORAGE_KEY, '40'); } catch { /* ignore */ }
+    setRightWidthPct(50);
+    try { window.localStorage.setItem(STORAGE_KEY, '50'); } catch { /* ignore */ }
   }, []);
 
   // Resolve which supervisor name should appear in the escalate-dialog title.

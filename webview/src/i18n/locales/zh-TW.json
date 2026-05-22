@@ -1199,7 +1199,8 @@
       "label": "1M",
       "shortLabel": "1M上下文",
       "tooltipEnabled": "開啟/關閉1M上下文",
-      "tooltipDisabled": "Haiku不支援1M上下文"
+      "tooltipDisabled": "Haiku不支援1M上下文",
+      "notEntitledToast": "目前 Claude 方案不支援 1M 上下文,已自動關閉。請重新傳送。"
     },
     "codex": {
       "gpt53codex": {
@@ -1361,7 +1362,16 @@
     "composer": {
       "placeholder": "向 Supervisor 描述編碼任務、方案路徑、規範要求...\n例如: 方案在 docs/plans/get-user.md，按 Go 分層規範實現，跑通後再讓我看\n\n提示: 可拖檔案到此處自動插入 @路徑",
       "hint": "Enter 傳送，Shift+Enter 換行 · 支援拖檔案",
-      "send": "傳送給 Supervisor"
+      "send": "傳送給 Supervisor",
+      "targetLabel": "傳送給 Supervisor",
+      "agentChip": {
+        "tooltip": "點擊切換 Supervisor"
+      },
+      "modelPicker": {
+        "tooltip": "切換 Supervisor 模型 (僅當前會話生效)",
+        "defaultHint": "配置預設",
+        "resetToDefault": "恢復為預設"
+      }
     },
     "divider": {
       "tooltip": "拖動調整左右比例 · 雙擊重置"

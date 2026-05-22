@@ -3,8 +3,6 @@ import { useTranslation } from 'react-i18next';
 import { getFileIcon } from '../../utils/fileIcons';
 import { TokenIndicator } from './TokenIndicator';
 import type { SelectedAgent } from './types';
-import SupervisorToggle from './SupervisorToggle';
-import type { SelectedSupervisor } from '../../types/supervisorAgent';
 
 interface ContextBarProps {
   activeFile?: string;
@@ -31,12 +29,6 @@ interface ContextBarProps {
   autoOpenFileEnabled?: boolean;
   /** Callback to enable file context (called from placeholder click) */
   onRequestEnableFileContext?: () => void;
-  /** Notified when the user enables / changes / disables Supervisor on the session */
-  onSupervisorChange?: (selected: SelectedSupervisor[]) => void;
-  /** Optional callback to open Settings → Supervisor tab from the picker */
-  onOpenSupervisorManager?: () => void;
-  /** When false, the Supervisor toggle button is hidden from the bar */
-  supervisorEnabled?: boolean;
 }
 
 export const ContextBar: React.FC<ContextBarProps> = memo(({
@@ -57,9 +49,6 @@ export const ContextBar: React.FC<ContextBarProps> = memo(({
   onToggleStatusPanel,
   autoOpenFileEnabled = false,
   onRequestEnableFileContext,
-  onSupervisorChange,
-  onOpenSupervisorManager,
-  supervisorEnabled = true,
 }) => {
   const { t } = useTranslation();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -269,16 +258,8 @@ export const ContextBar: React.FC<ContextBarProps> = memo(({
         </div>
       )}
 
-      {/* Right side tools - Supervisor toggle, StatusPanel toggle and Rewind button */}
+      {/* Right side tools - StatusPanel toggle and Rewind button */}
       <div className="context-tools-right">
-        {/* Supervisor toggle (self-contained: button + picker) */}
-        {supervisorEnabled && (
-          <SupervisorToggle
-            onChange={onSupervisorChange}
-            onOpenManager={onOpenSupervisorManager}
-          />
-        )}
-
         {/* StatusPanel expand/collapse toggle - always visible */}
         {onToggleStatusPanel && (
           <button

@@ -50,22 +50,36 @@ export default function EscalateDialog({
 
   return (
     <div className={styles.escalateBackdrop} onClick={onCancel}>
-      <div className={styles.escalateDialog} onClick={(e) => e.stopPropagation()}>
+      <div
+        className={styles.escalateDialog}
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+      >
         <div className={styles.escalateTitle}>
           <span className="codicon codicon-warning" />
           {t('pairLayout.escalate.title', { name: supervisorName })}
         </div>
-        <div className={styles.escalateReason}>{reason}</div>
+        {reason && <div className={styles.escalateReason}>{reason}</div>}
         {question && <div className={styles.escalateBody}>{question}</div>}
         <div className={styles.escalateChoices}>
-          {choices.map((choice) => (
+          {choices.map((choice, idx) => (
             <button
               key={choice.id}
+              type="button"
               className={styles.escalateChoice}
               onClick={() => onSelect(choice.id)}
             >
-              <strong>{choice.label}</strong>
-              {choice.description && <div style={{ opacity: 0.7, marginTop: 2 }}>{choice.description}</div>}
+              <span className={styles.escalateChoiceBadge}>
+                {choice.id || String.fromCharCode(65 + idx)}
+              </span>
+              <span className={styles.escalateChoiceContent}>
+                <span className={styles.escalateChoiceLabel}>{choice.label}</span>
+                {choice.description && (
+                  <span className={styles.escalateChoiceDescription}>{choice.description}</span>
+                )}
+              </span>
+              <span className={`codicon codicon-chevron-right ${styles.escalateChoiceChevron}`} />
             </button>
           ))}
         </div>

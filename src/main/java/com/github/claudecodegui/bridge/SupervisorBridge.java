@@ -22,6 +22,24 @@ public class SupervisorBridge {
 
     public static final String ACTION_LINE_PREFIX = "[SUPERVISOR_ACTION]";
 
+    /**
+     * Translate the daemon's "Unknown provider: supervisor" / "Unknown supervisor command"
+     * errors into a message that tells the user what to actually do. These errors come
+     * from an out-of-date {@code daemon.js} that predates the supervisor channel —
+     * usually the result of a half-extracted bridge directory on Windows.
+     */
+    static String translateDaemonError(String error) {
+        if (error == null) return null;
+        if (error.contains("Unknown provider: supervisor")
+                || error.contains("Unknown supervisor command")) {
+            return "Bridge daemon is out of date (does not implement the supervisor channel). "
+                    + "Quit the IDE, delete the ai-bridge/ folder inside the plugin directory, "
+                    + "and restart to force a fresh extraction. "
+                    + "Original error: " + error;
+        }
+        return error;
+    }
+
     private final ClaudeSDKBridge sdkBridge;
     private final String pairId;
     private final String supervisorId;
@@ -73,6 +91,7 @@ public class SupervisorBridge {
         params.add("event", event);
 
         AtomicReference<JsonObject> captured = new AtomicReference<>();
+        AtomicReference<String> capturedError = new AtomicReference<>();
         CompletableFuture<JsonObject> result = new CompletableFuture<>();
 
         CompletableFuture<Boolean> sendFuture = sdkBridge.sendDaemonCommand(
@@ -108,7 +127,9 @@ public class SupervisorBridge {
 
                     @Override
                     public void onError(String error) {
-                        LOG.warn("[SupervisorBridge] Daemon error: " + error);
+                        String translated = translateDaemonError(error);
+                        LOG.warn("[SupervisorBridge] Daemon error: " + translated);
+                        if (translated != null) capturedError.set(translated);
                     }
 
                     @Override
@@ -116,8 +137,11 @@ public class SupervisorBridge {
                         if (success) {
                             result.complete(captured.get());
                         } else {
+                            String msg = capturedError.get();
                             result.completeExceptionally(new RuntimeException(
-                                    "supervisor.postEvent did not complete successfully"));
+                                    msg != null
+                                        ? "supervisor.postEvent failed: " + msg
+                                        : "supervisor.postEvent did not complete successfully"));
                         }
                     }
                 }
@@ -157,7 +181,7 @@ public class SupervisorBridge {
             }
             @Override
             public void onError(String error) {
-                LOG.warn("[SupervisorBridge:" + op + "] " + error);
+                LOG.warn("[SupervisorBridge:" + op + "] " + translateDaemonError(error));
             }
             @Override
             public void onComplete(boolean success) {

@@ -106,6 +106,12 @@ interface Window {
   onReasoningEffortApplied?: (effort: string) => void;
 
   /**
+   * Structured Claude API error classification from the bridge layer.
+   * Known codes: 'LONG_CONTEXT_NOT_ENTITLED'.
+   */
+  onClaudeErrorCode?: (code: string) => void;
+
+  /**
    * Mode changed callback
    */
   onModeChanged?: (mode: string) => void;

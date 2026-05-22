@@ -79,6 +79,7 @@ describe('useWindowCallbacks integration', () => {
     getOrCreateStreamingAssistantIndex: () => 0,
     patchAssistantForStreaming: (msg: ClaudeMessage) => msg,
     syncActiveProviderModelMapping: vi.fn(),
+    handleLongContextChange: vi.fn(),
     openPermissionDialog: vi.fn(),
     openAskUserQuestionDialog: vi.fn(),
     openPlanApprovalDialog: vi.fn(),

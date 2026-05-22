@@ -239,6 +239,51 @@ export async function loadCodexSdk() {
 }
 
 /**
+ * Load the {@code zod} package that ships alongside the Claude Agent SDK
+ * install (peer dependency). Used by the Supervisor's {@code emit_action}
+ * tool to declare its input schema.
+ *
+ * Resolves from ~/.codemoss/dependencies/claude-sdk/node_modules/zod, the
+ * same install dir DependencyManager populates when the user installs the
+ * Claude SDK — so this stays in sync with whatever zod major the SDK demands.
+ *
+ * @returns {Promise<{z: object, default: object}>}
+ */
+export async function loadZod() {
+    if (sdkCache.has('zod')) {
+        return sdkCache.get('zod');
+    }
+    if (loadingPromises.has('zod')) {
+        return loadingPromises.get('zod');
+    }
+
+    const sdkRootDir = getSdkRootDir('claude-sdk');
+    const zodPackageDir = join(sdkRootDir, 'node_modules', 'zod');
+    if (!existsSync(zodPackageDir)) {
+        throw new Error('SDK_NOT_INSTALLED:zod (expected at ' + zodPackageDir + ')');
+    }
+
+    const loadPromise = (async () => {
+        try {
+            const entry = resolveEntryFileFromPackageDir(zodPackageDir);
+            if (!entry) {
+                throw new Error('Unable to resolve zod entry file from ' + zodPackageDir);
+            }
+            const mod = await import(pathToFileURL(entry).href);
+            sdkCache.set('zod', mod);
+            return mod;
+        } catch (error) {
+            throw new Error(`Failed to load zod: ${error.message}`);
+        } finally {
+            loadingPromises.delete('zod');
+        }
+    })();
+
+    loadingPromises.set('zod', loadPromise);
+    return loadPromise;
+}
+
+/**
  * Load the base Anthropic SDK (used as an API fallback)
  * @returns {Promise<{Anthropic: Class}>}
  */

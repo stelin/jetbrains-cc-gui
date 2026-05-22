@@ -1464,7 +1464,8 @@
       "label": "1M",
       "shortLabel": "1M上下文",
       "tooltipEnabled": "开启/关闭1M上下文窗口",
-      "tooltipDisabled": "Haiku不支持1M上下文"
+      "tooltipDisabled": "Haiku不支持1M上下文",
+      "notEntitledToast": "当前 Claude 套餐不支持 1M 上下文,已自动关闭。请重新发送。"
     },
     "claude": {
       "sonnet46": {
@@ -1644,7 +1645,16 @@
     "composer": {
       "placeholder": "向 Supervisor 描述编码任务、方案路径、规范要求...\n例如: 方案在 docs/plans/get-user.md，按 Go 分层规范实现，跑通后再让我看\n\n提示: 可拖文件到此处自动插入 @路径",
       "hint": "Enter 发送，Shift+Enter 换行 · 支持拖文件",
-      "send": "发送给 Supervisor"
+      "send": "发送给 Supervisor",
+      "targetLabel": "发送给 Supervisor",
+      "agentChip": {
+        "tooltip": "点击切换 Supervisor"
+      },
+      "modelPicker": {
+        "tooltip": "切换 Supervisor 模型 (仅当前会话生效)",
+        "defaultHint": "配置默认",
+        "resetToDefault": "恢复为默认"
+      }
     },
     "divider": {
       "tooltip": "拖动调整左右比例 · 双击重置"

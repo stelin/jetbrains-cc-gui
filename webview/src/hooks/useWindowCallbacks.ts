@@ -90,6 +90,11 @@ export interface UseWindowCallbacksOptions {
 
   // Other functions
   syncActiveProviderModelMapping: (provider: ProviderConfig) => void;
+  /**
+   * Toggle the 1M context window setting. Invoked by the structured-error
+   * callback to auto-disable 1M when the account lacks the entitlement.
+   */
+  handleLongContextChange: (enabled: boolean) => void;
 
   // Permission dialog handlers from useDialogManagement
   openPermissionDialog: (request: PermissionRequest) => void;

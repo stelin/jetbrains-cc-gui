@@ -48,8 +48,9 @@ export function useModelProviderState({ addToast, t }: UseModelProviderStateOpti
   const [sendShortcut, setSendShortcut] = useState<'enter' | 'cmdEnter'>('enter');
   // Auto-open file setting
   const [autoOpenFileEnabled, setAutoOpenFileEnabled] = useState(false);
-  // Long context (1M) toggle state - default enabled, persisted with model selection
-  const [longContextEnabled, setLongContextEnabled] = useState(true);
+  // Long context (1M) toggle state - default disabled (requires API Tier 4 / paid credits);
+  // persisted with model selection
+  const [longContextEnabled, setLongContextEnabled] = useState(false);
 
   // SDK installation status
   const [sdkStatus, setSdkStatus] = useState<Record<string, { installed?: boolean; status?: string }>>({});
@@ -108,7 +109,7 @@ export function useModelProviderState({ addToast, t }: UseModelProviderStateOpti
       let restoredClaudePermissionMode: PermissionMode = 'bypassPermissions';
       let restoredCodexPermissionMode: PermissionMode = 'default';
       let initialPermissionMode: PermissionMode = 'bypassPermissions';
-      let restoredLongContextEnabled = true;  // Default enabled
+      let restoredLongContextEnabled = false;  // Default disabled (avoid 1M billing trap)
       let restoredReasoningEffort: ReasoningEffort = 'max';
 
       if (saved) {

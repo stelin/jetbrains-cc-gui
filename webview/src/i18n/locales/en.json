@@ -1459,7 +1459,8 @@
       "label": "1M",
       "shortLabel": "1M context",
       "tooltipEnabled": "Toggle 1M context window on/off",
-      "tooltipDisabled": "1M context not available for Haiku"
+      "tooltipDisabled": "1M context not available for Haiku",
+      "notEntitledToast": "1M context is not available on your Claude plan — disabled automatically. Please resend."
     },
     "claude": {
       "sonnet46": {
@@ -1639,7 +1640,16 @@
     "composer": {
       "placeholder": "Tell the Supervisor what to coordinate — design doc path, coding rules, success criteria...\nExample: Plan is at docs/plans/get-user.md, follow Go layering rules, ping me when done.\n\nTip: drop a file here to insert its @path.",
       "hint": "Enter to send, Shift+Enter for newline · drop files supported",
-      "send": "Send to Supervisor"
+      "send": "Send to Supervisor",
+      "targetLabel": "To Supervisor",
+      "agentChip": {
+        "tooltip": "Click to switch Supervisor"
+      },
+      "modelPicker": {
+        "tooltip": "Switch Supervisor model (this session only)",
+        "defaultHint": "Default",
+        "resetToDefault": "Reset to default"
+      }
     },
     "divider": {
       "tooltip": "Drag to resize · double-click to reset"

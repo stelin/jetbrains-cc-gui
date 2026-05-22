@@ -79,6 +79,7 @@ export default function SupervisorToggle({ onChange, onOpenManager }: Supervisor
       agentId: agent.id,
       name: agent.name,
       role: 'coordinator',
+      model: agent.model,
     }];
     setSelected(next);
     setPickerOpen(false);

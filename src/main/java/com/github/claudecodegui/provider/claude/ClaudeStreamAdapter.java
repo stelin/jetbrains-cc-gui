@@ -53,16 +53,25 @@ class ClaudeStreamAdapter {
         if (line.startsWith("[SEND_ERROR]")) {
             String jsonStr = line.substring("[SEND_ERROR]".length()).trim();
             String errorMessage = jsonStr;
+            String errorCode = null;
             try {
                 JsonObject obj = gson.fromJson(jsonStr, JsonObject.class);
                 if (obj.has("error")) {
                     errorMessage = obj.get("error").getAsString();
+                }
+                if (obj.has("code") && !obj.get("code").isJsonNull()) {
+                    errorCode = obj.get("code").getAsString();
                 }
             } catch (Exception ignored) {
             }
             hadSendError[0] = true;
             result.success = false;
             result.error = errorMessage;
+            // Surface the structured code before onError so the webview can react
+            // (e.g. auto-disable 1M context) even if the error path tears down state.
+            if (errorCode != null && !errorCode.isEmpty()) {
+                callback.onMessage("claude_error_code", errorCode);
+            }
             callback.onError(errorMessage);
             return;
         }

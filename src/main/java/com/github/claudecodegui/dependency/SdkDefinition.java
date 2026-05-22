@@ -15,7 +15,9 @@ public enum SdkDefinition {
         "Claude Code SDK",
         "@anthropic-ai/claude-agent-sdk",
         "^0.2.58",
-        Arrays.asList("@anthropic-ai/sdk", "@anthropic-ai/bedrock-sdk"),
+        // zod is a peer dependency required by the Supervisor's emit_action MCP tool.
+        // Listed explicitly so install behavior does not depend on the user's npm version.
+        Arrays.asList("@anthropic-ai/sdk", "@anthropic-ai/bedrock-sdk", "zod@^4.0.0"),
         Arrays.asList("0.2.88", "0.2.81", "0.2.58"),
         "Claude AI 提供商所需，包含 Agent SDK 和 Bedrock 支持。"
     ),

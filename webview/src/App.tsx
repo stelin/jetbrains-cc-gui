@@ -300,6 +300,7 @@ const App = () => {
     findLastAssistantIndex, extractRawBlocks,
     getOrCreateStreamingAssistantIndex, patchAssistantForStreaming,
     syncActiveProviderModelMapping,
+    handleLongContextChange,
     openPermissionDialog, openAskUserQuestionDialog, openPlanApprovalDialog,
     customSessionTitleRef, currentSessionIdRef, updateHistoryTitle,
   });
@@ -583,6 +584,10 @@ const App = () => {
             updateHistoryTitle(currentSessionId, newTitle);
           }
         }}
+        onOpenSupervisorManager={() => {
+          setSettingsInitialTab('supervisor');
+          setCurrentView('settings');
+        }}
       />
 
       {currentView === 'settings' ? (
@@ -643,21 +648,7 @@ const App = () => {
 
           {/* Scroll control button */}
           <ScrollControl containerRef={messagesContainerRef} inputAreaRef={inputAreaRef} />
-        </PairLayout>
-      ) : (
-        <HistoryView
-          historyData={historyData}
-          currentProvider={currentProvider}
-          onLoadSession={loadHistorySession}
-          onDeleteSession={deleteHistorySession}
-          onExportSession={exportHistorySession}
-          onToggleFavorite={toggleFavoriteSession}
-          onUpdateTitle={updateHistoryTitle}
-        />
-      )}
 
-      {currentView === 'chat' && (
-        <>
           <SyncStatusBar />
           <StatusPanelErrorBoundary>
             <StatusPanel
@@ -736,7 +727,17 @@ const App = () => {
               onLongContextChange={handleLongContextChange}
             />
           </div>
-        </>
+        </PairLayout>
+      ) : (
+        <HistoryView
+          historyData={historyData}
+          currentProvider={currentProvider}
+          onLoadSession={loadHistorySession}
+          onDeleteSession={deleteHistorySession}
+          onExportSession={exportHistorySession}
+          onToggleFavorite={toggleFavoriteSession}
+          onUpdateTitle={updateHistoryTitle}
+        />
       )}
 
       <div id="image-preview-root" />

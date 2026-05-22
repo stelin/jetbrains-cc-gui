@@ -50,6 +50,14 @@ public class LocalBridge implements IBridge {
     private static final int MAX_RESTART_ATTEMPTS = 3;
     private static final long RESTART_WINDOW_MS = 30_000; // Reset restart counter after this period of stability
 
+    /**
+     * Maximum number of self-heal attempts per {@link #start()} call when the
+     * daemon reports stale capabilities. One retry is enough in practice — if
+     * a fresh extraction still produces a stale daemon, the bundle itself is
+     * broken and further retries won't help.
+     */
+    private static final int MAX_SELF_HEAL_ATTEMPTS = 1;
+
     private final NodeDetector nodeDetector;
     private final BridgeDirectoryResolver directoryResolver;
     private final EnvironmentConfigurator envConfigurator;
@@ -68,6 +76,22 @@ public class LocalBridge implements IBridge {
     private final AtomicLong lastDaemonActivity = new AtomicLong(0);
     private final AtomicInteger activeRequestCount = new AtomicInteger(0);
     private final Object startLock = new Object();
+
+    /**
+     * Latest {@code version} string the daemon reported in its {@code starting}
+     * or {@code ready} event. {@code null} when no version has been observed
+     * yet (e.g. a pre-supervisor daemon that doesn't emit the field).
+     */
+    private final java.util.concurrent.atomic.AtomicReference<String> reportedDaemonVersion =
+            new java.util.concurrent.atomic.AtomicReference<>();
+
+    /**
+     * Whether the daemon advertised {@code supervisorSupport: true} in its
+     * ready event. {@code null} when the field was absent — which itself
+     * indicates an old daemon and triggers self-heal.
+     */
+    private final java.util.concurrent.atomic.AtomicReference<Boolean> reportedSupervisorSupport =
+            new java.util.concurrent.atomic.AtomicReference<>();
 
     // Pending request handlers: requestId -> handler
     private final ConcurrentHashMap<String, RequestHandler> pendingRequests = new ConcurrentHashMap<>();
@@ -93,10 +117,74 @@ public class LocalBridge implements IBridge {
      * Start the daemon process. Blocks until the daemon signals "ready"
      * or the timeout expires.
      *
-     * @return true if daemon started successfully
+     * <p>Wraps {@link #startInternal()} with a one-shot self-heal: if the
+     * freshly-started daemon doesn't advertise {@code supervisorSupport=true},
+     * we treat the bridge directory as stale, force a fresh extraction via
+     * {@link BridgeDirectoryResolver#invalidateAndForceReExtract()}, and try
+     * one more time. This is the runtime safety net for the case where
+     * {@code findSdkDir()} returned a structurally-valid-but-stale path that
+     * we couldn't catch at resolution time.
+     *
+     * @return true if the daemon is running (even if stale after exhausting self-heal)
      */
     @Override
     public boolean start() {
+        // Outer synchronization on startLock keeps multiple concurrent start()
+        // calls from interleaving self-heal restarts (which would observe each
+        // other's daemons and trigger spurious re-extractions). Java's
+        // synchronized is reentrant, so startInternal()'s own startLock
+        // acquisition inside this block is safe.
+        synchronized (startLock) {
+            for (int attempt = 0; attempt <= MAX_SELF_HEAL_ATTEMPTS; attempt++) {
+                // Reset capability flags before each attempt so we observe THIS daemon.
+                reportedDaemonVersion.set(null);
+                reportedSupervisorSupport.set(null);
+
+                boolean started = startInternal();
+                if (!started) {
+                    return false;
+                }
+
+                if (isDaemonHealthy()) {
+                    return true;
+                }
+
+                if (attempt >= MAX_SELF_HEAL_ATTEMPTS) {
+                    LOG.error("[LocalBridge] Self-heal budget exhausted; daemon remains stale "
+                            + "(version=" + reportedDaemonVersion.get()
+                            + ", supervisorSupport=" + reportedSupervisorSupport.get()
+                            + "). Supervisor-channel features will fail until the bridge is refreshed manually.");
+                    // Return true: the daemon IS running and most features work. Only
+                    // supervisor-channel calls will fail, and they now surface a clear
+                    // user-facing message via SupervisorBridge.translateDaemonError.
+                    return true;
+                }
+
+                LOG.warn("[LocalBridge] Stale daemon detected on attempt " + (attempt + 1)
+                        + " (version=" + reportedDaemonVersion.get()
+                        + ", supervisorSupport=" + reportedSupervisorSupport.get()
+                        + "). Self-healing…");
+
+                // Tear down the stale daemon and force a fresh bridge extraction.
+                // stop() sets isRunning=false before destroyForcibly(), so the
+                // reader-thread death path (handleDaemonDeath) is short-circuited
+                // and won't race with our explicit restart below.
+                stop();
+                File reExtracted = directoryResolver.invalidateAndForceReExtract();
+                if (reExtracted == null) {
+                    LOG.error("[LocalBridge] Force re-extract failed; aborting self-heal");
+                    return false;
+                }
+            }
+            // Unreachable — the loop always returns inside.
+            return false;
+        }
+    }
+
+    /**
+     * Internal daemon-spawn that does NOT self-heal. Called from {@link #start()}.
+     */
+    private boolean startInternal() {
         synchronized (startLock) {
             if (isRunning.get()) {
                 LOG.info("[LocalBridge] Daemon already running");
@@ -119,6 +207,11 @@ public class LocalBridge implements IBridge {
                     LOG.error("[LocalBridge] daemon.js not found at: " + daemonScript.getAbsolutePath());
                     return false;
                 }
+                // Log which daemon.js we're about to spawn — invaluable when a stale
+                // daemon mysteriously responds with "Unknown provider: supervisor"
+                // (proves whether the bridge directory we resolved is actually the
+                // one whose daemon ends up running).
+                logDaemonScriptIdentity(daemonScript);
 
                 String nodePath = nodeDetector.findNodeExecutable();
                 if (nodePath == null) {
@@ -188,6 +281,59 @@ public class LocalBridge implements IBridge {
                 return false;
             }
         }
+    }
+
+    /**
+     * Log the absolute path, file length, and declared {@code DAEMON_VERSION}
+     * of the daemon.js we're about to launch. Critical for diagnosing the
+     * "I see the new plugin code but a stale daemon is responding" class of
+     * bugs on Windows.
+     */
+    private void logDaemonScriptIdentity(File daemonScript) {
+        try {
+            long len = daemonScript.length();
+            String version = "<unparsed>";
+            try (java.io.FileInputStream in = new java.io.FileInputStream(daemonScript)) {
+                byte[] buf = new byte[8192];
+                int read = 0;
+                int n;
+                while (read < buf.length && (n = in.read(buf, read, buf.length - read)) > 0) {
+                    read += n;
+                }
+                if (read > 0) {
+                    String head = new String(buf, 0, read, StandardCharsets.UTF_8);
+                    java.util.regex.Matcher m = java.util.regex.Pattern.compile(
+                            "DAEMON_VERSION\\s*=\\s*['\\\"]([^'\\\"]+)['\\\"]").matcher(head);
+                    if (m.find()) version = m.group(1);
+                }
+            }
+            LOG.warn("[LocalBridge] About to spawn daemon: path=" + daemonScript.getAbsolutePath()
+                    + " size=" + len + " bytes, DAEMON_VERSION='" + version + "'");
+        } catch (Exception e) {
+            LOG.warn("[LocalBridge] Could not inspect daemon.js identity: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Whether the most recently-started daemon is fresh enough to handle all
+     * features. Treats a daemon as stale if either:
+     * <ul>
+     *   <li>{@code supervisorSupport} is null (field absent — old protocol) or false</li>
+     *   <li>{@code version} doesn't contain "supervisor" (sanity check)</li>
+     * </ul>
+     */
+    private boolean isDaemonHealthy() {
+        Boolean supSupport = reportedSupervisorSupport.get();
+        if (supSupport == null || !supSupport) {
+            return false;
+        }
+        String version = reportedDaemonVersion.get();
+        // If version is reported, it must mention supervisor. (Old daemons may not
+        // emit version at all, in which case we trust supSupport above.)
+        if (version != null && !version.contains("supervisor")) {
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -540,9 +686,35 @@ public class LocalBridge implements IBridge {
         LOG.info("[LocalBridge] Daemon event: " + event);
 
         switch (event) {
+            case "starting":
+                // Surface daemon version + capability flags early so stale-bridge
+                // diagnoses don't require digging through file contents.
+                String startingVersion = obj.has("version") ? obj.get("version").getAsString() : null;
+                LOG.info("[LocalBridge] Daemon starting, version=" + (startingVersion != null ? startingVersion : "<absent>"));
+                if (startingVersion != null) {
+                    reportedDaemonVersion.set(startingVersion);
+                }
+                break;
+
             case "ready":
                 if (obj.has("sdkPreloaded")) {
                     sdkPreloaded.set(obj.get("sdkPreloaded").getAsBoolean());
+                }
+                String readyVersion = obj.has("version") ? obj.get("version").getAsString() : null;
+                if (readyVersion != null) {
+                    reportedDaemonVersion.set(readyVersion);
+                }
+                // Newer daemons report supervisor capability explicitly. Absence
+                // of this field means the running daemon predates the supervisor
+                // channel — start() will self-heal if so.
+                Boolean supervisorSupport = obj.has("supervisorSupport")
+                        ? obj.get("supervisorSupport").getAsBoolean()
+                        : null;
+                reportedSupervisorSupport.set(supervisorSupport);
+                if (supervisorSupport == null || !supervisorSupport) {
+                    LOG.warn("[LocalBridge] Daemon ready but supervisorSupport=" + supervisorSupport
+                            + (readyVersion != null ? " (version=" + readyVersion + ")" : "")
+                            + ". Will trigger self-heal.");
                 }
                 readyLatch.countDown();
                 if (lifecycleListener != null) {

@@ -1,7 +1,7 @@
-import { useCallback, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import SupervisorSubPanel, { type SupervisorLogEntry } from './SupervisorSubPanel';
 import { usePairContext } from './PairContext';
+import SupervisorChatInput from './SupervisorChatInput';
 import styles from './style.module.less';
 
 interface SupervisorPaneProps {
@@ -26,84 +26,7 @@ export default function SupervisorPane({
   status,
 }: SupervisorPaneProps) {
   const { t } = useTranslation();
-  const { selected, setSelected, sendUserInputToSupervisor, thinkingByAgentId } = usePairContext();
-  const [draft, setDraft] = useState('');
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-  const handleSubmit = useCallback(() => {
-    const text = draft.trim();
-    if (!text) return;
-    sendUserInputToSupervisor(text);
-    setDraft('');
-    // Re-focus for fast follow-up.
-    requestAnimationFrame(() => textareaRef.current?.focus());
-  }, [draft, sendUserInputToSupervisor]);
-
-  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Enter to submit, Shift+Enter for newline (mirrors main chat input default).
-    // Skip submission while an IME composition is in progress (e.g. typing CJK).
-    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-      e.preventDefault();
-      handleSubmit();
-    }
-  }, [handleSubmit]);
-
-  // Drop a file path from the IDE editor / project tree into the composer.
-  // Matches main ChatInputBox.usePasteAndDrop: unconditionally accept the
-  // drag, then on drop read whichever MIME has a usable absolute path.
-  const handleDragOver = useCallback((e: React.DragEvent<HTMLElement>) => {
-    // Unconditional preventDefault — without this, the IDE-injected drop
-    // is rejected before we ever see a `drop` event. IDEA's drag uses
-    // multiple custom MIME types so we don't try to whitelist them.
-    e.preventDefault();
-    e.stopPropagation();
-    e.dataTransfer.dropEffect = 'copy';
-  }, []);
-
-  const handleDrop = useCallback((e: React.DragEvent<HTMLElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-
-    // Try the most common path-carrying MIME types in order.
-    // - text/plain        : IDE editor tab drags emit the absolute path here
-    // - text/uri-list     : project tree drags emit file:// URIs here
-    // - application/x-… : some IDEA versions emit custom types — ignore
-    let raw = e.dataTransfer?.getData('text/plain') ?? '';
-    if (!raw.trim()) {
-      const uri = e.dataTransfer?.getData('text/uri-list') ?? '';
-      if (uri.trim()) raw = uri;
-    }
-    raw = raw.trim();
-    if (!raw) return;
-
-    // text/uri-list may contain multiple lines; take the first non-comment one
-    // and strip the file:// prefix so we end up with a real path.
-    const firstLine = raw.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#')) ?? raw;
-    const filePath = firstLine.replace(/^file:\/\//, '');
-
-    // Add @ prefix unless already present, plus a trailing space so the
-    // Supervisor LLM clearly sees it as a reference token.
-    const insertion = (filePath.startsWith('@') ? filePath : `@${filePath}`) + ' ';
-
-    const ta = textareaRef.current;
-    if (!ta) {
-      setDraft((prev) => prev + insertion);
-      return;
-    }
-    const start = ta.selectionStart ?? ta.value.length;
-    const end = ta.selectionEnd ?? ta.value.length;
-    const before = ta.value.slice(0, start);
-    const after = ta.value.slice(end);
-    const nextValue = before + insertion + after;
-    setDraft(nextValue);
-    requestAnimationFrame(() => {
-      if (textareaRef.current) {
-        const caret = start + insertion.length;
-        textareaRef.current.focus();
-        textareaRef.current.setSelectionRange(caret, caret);
-      }
-    });
-  }, []);
+  const { selected, setSelected, thinkingByAgentId } = usePairContext();
 
   if (selected.length === 0) return null;
 
@@ -165,40 +88,11 @@ export default function SupervisorPane({
         ))}
       </div>
 
-      {/* Composer: user → Supervisor (free-form coordination message). */}
-      <div
-        className={styles.composer}
-        // Capture drop on the wrapper too: lets the user drop anywhere in the
-        // composer area, not only inside the textarea's exact bounds.
-        onDragOver={handleDragOver}
-        onDrop={handleDrop}
-      >
-        <textarea
-          ref={textareaRef}
-          className={styles.composerInput}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={handleKeyDown}
-          onDragOver={handleDragOver}
-          onDrop={handleDrop}
-          placeholder={t('pairLayout.composer.placeholder')}
-          rows={3}
-          spellCheck={false}
-        />
-        <div className={styles.composerActions}>
-          <span className={styles.composerHint}>
-            {t('pairLayout.composer.hint')}
-          </span>
-          <button
-            className={styles.composerSendButton}
-            onClick={handleSubmit}
-            disabled={draft.trim().length === 0}
-            title={t('pairLayout.composer.send')}
-          >
-            <span className="codicon codicon-send" />
-          </button>
+      {coordinator && (
+        <div className={styles.inputWrapper}>
+          <SupervisorChatInput supervisor={coordinator} />
         </div>
-      </div>
+      )}
     </div>
   );
 }

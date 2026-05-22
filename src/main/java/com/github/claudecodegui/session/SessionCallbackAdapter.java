@@ -369,6 +369,20 @@ public class SessionCallbackAdapter implements ClaudeSession.SessionCallback {
         });
     }
 
+    @Override
+    public void onClaudeErrorCode(String code) {
+        if (isInactive() || code == null || code.isEmpty()) {
+            return;
+        }
+        ApplicationManager.getApplication().invokeLater(() -> {
+            if (isInactive()) {
+                return;
+            }
+            jsTarget.callJavaScript("onClaudeErrorCode", JsUtils.escapeJs(code));
+            LOG.info("Claude error code forwarded to webview: " + code);
+        });
+    }
+
     /**
      * Dispose internal resources. Call when the parent window is disposed.
      */

@@ -40,12 +40,29 @@ public class BridgeDirectoryResolver {
     private static final Logger LOG = Logger.getInstance(BridgeDirectoryResolver.class);
     private static final String SDK_DIR_NAME = "ai-bridge";
     private static final String NODE_SCRIPT = "channel-manager.js";
+    private static final String DAEMON_SCRIPT = "daemon.js";
     private static final String SDK_ARCHIVE_NAME = "ai-bridge.zip";
     private static final String SDK_HASH_FILE_NAME = "ai-bridge.hash";
     private static final String BRIDGE_VERSION_FILE = ".bridge-version";
     private static final String BRIDGE_PATH_PROPERTY = "claude.bridge.path";
     private static final String BRIDGE_PATH_ENV = "CLAUDE_BRIDGE_PATH";
     private static final String PLUGIN_DIR_NAME = "idea-claude-code-gui";
+
+    /**
+     * Expected daemon.js DAEMON_VERSION. Keep in sync with ai-bridge/daemon.js.
+     * The embedded extraction path verifies the extracted daemon.js declares
+     * this version; if not, the directory is treated as stale and re-extracted.
+     * This guards against half-overwritten extractions (e.g. file locked by a
+     * lingering node process on Windows during plugin upgrade).
+     */
+    static final String EXPECTED_DAEMON_VERSION = "1.0.0-supervisor";
+
+    /** Sibling-directory suffixes used by the atomic-swap extraction flow. */
+    private static final String EXTRACTION_NEW_SUFFIX_PREFIX = SDK_DIR_NAME + ".new.";
+    private static final String EXTRACTION_OLD_SUFFIX_PREFIX = SDK_DIR_NAME + ".old.";
+
+    private static final java.util.regex.Pattern DAEMON_VERSION_PATTERN =
+            java.util.regex.Pattern.compile("DAEMON_VERSION\\s*=\\s*['\\\"]([^'\\\"]+)['\\\"]");
 
     private volatile File cachedSdkDir = null;
     /**
@@ -76,7 +93,7 @@ public class BridgeDirectoryResolver {
     public File findSdkDir() {
         // Priority 0: Manually set path (via setSdkDir(), highest priority)
         if (this.manuallySdkDir != null && isValidBridgeDir(this.manuallySdkDir)) {
-            LOG.debug("[BridgeResolver] Using manually set path: " + this.manuallySdkDir.getAbsolutePath());
+            LOG.warn("[BridgeResolver] resolution P0 (manuallySdkDir) hit: " + this.manuallySdkDir.getAbsolutePath());
             this.cachedSdkDir = this.manuallySdkDir;
             return this.cachedSdkDir;
         }
@@ -84,7 +101,7 @@ public class BridgeDirectoryResolver {
         // Priority 1: Configured path
         File configuredDir = resolveConfiguredBridgeDir();
         if (configuredDir != null) {
-            LOG.debug("[BridgeResolver] Using configured path: " + configuredDir.getAbsolutePath());
+            LOG.warn("[BridgeResolver] resolution P1 (configured) hit: " + configuredDir.getAbsolutePath());
             this.cachedSdkDir = configuredDir;
             return this.cachedSdkDir;
         }
@@ -98,7 +115,7 @@ public class BridgeDirectoryResolver {
         // Priority 2: Embedded ai-bridge.zip (preferred in production)
         File embeddedDir = ensureEmbeddedBridgeExtracted();
         if (embeddedDir != null) {
-            LOG.info("[BridgeResolver] Using embedded path: " + embeddedDir.getAbsolutePath());
+            LOG.warn("[BridgeResolver] resolution P2 (embedded) hit: " + embeddedDir.getAbsolutePath());
             // Verify that node_modules exists
             File nodeModules = new File(embeddedDir, "node_modules");
             LOG.debug("[BridgeResolver] node_modules exists: " + nodeModules.exists());
@@ -115,7 +132,7 @@ public class BridgeDirectoryResolver {
 
         // Priority 3: Use cached path (if it exists and is valid)
         if (this.cachedSdkDir != null && isValidBridgeDir(this.cachedSdkDir)) {
-            LOG.debug("[BridgeResolver] Using cached path: " + this.cachedSdkDir.getAbsolutePath());
+            LOG.warn("[BridgeResolver] resolution P3 (cachedSdkDir) hit: " + this.cachedSdkDir.getAbsolutePath());
             return this.cachedSdkDir;
         }
 
@@ -156,7 +173,7 @@ public class BridgeDirectoryResolver {
         for (File dir : possibleDirs) {
             if (isValidBridgeDir(dir)) {
                 this.cachedSdkDir = dir;
-                LOG.info("[BridgeResolver] Using fallback path: " + this.cachedSdkDir.getAbsolutePath());
+                LOG.warn("[BridgeResolver] resolution P4 (fallback) hit: " + this.cachedSdkDir.getAbsolutePath());
                 File nodeModules = new File(this.cachedSdkDir, "node_modules");
                 LOG.debug("[BridgeResolver] node_modules exists: " + nodeModules.exists());
                 return this.cachedSdkDir;
@@ -224,7 +241,15 @@ public class BridgeDirectoryResolver {
             LOG.debug("[BridgeResolver] Using " + source + ": " + dir.getAbsolutePath());
             return dir;
         }
-        LOG.warn("[BridgeResolver] " + source + " points to invalid directory: " + dir.getAbsolutePath());
+        // Differentiate "doesn't exist" from "exists but stale" so users debugging
+        // CLAUDE_BRIDGE_PATH can tell what's wrong.
+        if (dir.exists() && dir.isDirectory()) {
+            LOG.warn("[BridgeResolver] " + source + " points to a directory that exists but is not a "
+                    + "supported bridge (likely stale daemon.js or missing files): " + dir.getAbsolutePath()
+                    + " — ignoring and falling back to the embedded bundle");
+        } else {
+            LOG.warn("[BridgeResolver] " + source + " points to invalid directory: " + dir.getAbsolutePath());
+        }
         return null;
     }
 
@@ -326,6 +351,67 @@ public class BridgeDirectoryResolver {
         // AI SDKs (@anthropic-ai/claude-agent-sdk, @openai/codex-sdk, etc.)
         // are loaded dynamically from ~/.codemoss/dependencies/, no need to check within ai-bridge
 
+        // Final gate: the bridge directory may have channel-manager.js + node_modules
+        // but a stale daemon.js (e.g. half-overwritten on Windows during upgrade, or
+        // a developer-set CLAUDE_BRIDGE_PATH pointing to a pre-supervisor checkout).
+        // Reject such directories so the caller falls back to embedded extraction.
+        if (!isDaemonContentCurrent(dir)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * Read the {@code DAEMON_VERSION} string declared at the top of {@code daemon.js}.
+     * Returns {@code null} if the file is missing/unreadable or the version
+     * cannot be parsed.
+     *
+     * <p>Reads only the first 8KB to avoid loading the entire daemon — the
+     * constant is declared near the top of the file.
+     */
+    private String readDaemonVersion(File dir) {
+        File daemonJs = new File(dir, DAEMON_SCRIPT);
+        if (!daemonJs.exists() || !daemonJs.isFile()) {
+            return null;
+        }
+        try (FileInputStream in = new FileInputStream(daemonJs)) {
+            byte[] buf = new byte[8192];
+            int read = 0;
+            int n;
+            while (read < buf.length && (n = in.read(buf, read, buf.length - read)) > 0) {
+                read += n;
+            }
+            if (read <= 0) return null;
+            String head = new String(buf, 0, read, StandardCharsets.UTF_8);
+            java.util.regex.Matcher m = DAEMON_VERSION_PATTERN.matcher(head);
+            return m.find() ? m.group(1) : null;
+        } catch (IOException e) {
+            LOG.debug("[BridgeResolver] Failed to read daemon.js version: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Strict version check used by the embedded extraction path: the extracted
+     * daemon.js must declare the {@link #EXPECTED_DAEMON_VERSION} we shipped.
+     * If it doesn't, we know the directory is stale (e.g. half-overwritten
+     * because the file was locked at extraction time) and must be re-extracted
+     * — regardless of what {@code .bridge-version} says.
+     */
+    private boolean isDaemonContentCurrent(File dir) {
+        String actual = readDaemonVersion(dir);
+        if (actual == null) {
+            LOG.warn("[BridgeResolver] Cannot read DAEMON_VERSION from " + dir.getAbsolutePath()
+                    + " (daemon.js missing or malformed); treating as stale");
+            return false;
+        }
+        if (!EXPECTED_DAEMON_VERSION.equals(actual)) {
+            LOG.warn("[BridgeResolver] daemon.js version mismatch in " + dir.getAbsolutePath()
+                    + ": expected '" + EXPECTED_DAEMON_VERSION + "', got '" + actual + "'. "
+                    + "Bridge directory is stale and will be re-extracted.");
+            return false;
+        }
         return true;
     }
 
@@ -478,10 +564,16 @@ public class BridgeDirectoryResolver {
             LOG.info("[BridgeResolver] Version file path: " + versionFile.getAbsolutePath());
             LOG.info("[BridgeResolver] Version file exists: " + versionFile.exists());
 
+            // isValidBridgeDir now performs the strict daemon-version check too,
+            // so signatureMatches + isValid alone are sufficient.
             boolean isValid = isValidBridgeDir(extractedDir);
             boolean signatureMatches = bridgeSignatureMatches(versionFile, signature);
             LOG.info("[BridgeResolver] isValidBridgeDir: " + isValid);
             LOG.info("[BridgeResolver] signatureMatches: " + signatureMatches);
+
+            // Schedule cleanup of any leftover ai-bridge.new.*/ai-bridge.old.*
+            // siblings from prior attempts (fire-and-forget).
+            scheduleStaleSwapSiblingCleanup(pluginDir);
 
             if (isValid && signatureMatches) {
                 this.cachedSdkDir = extractedDir;
@@ -492,9 +584,15 @@ public class BridgeDirectoryResolver {
                 }
                 return extractedDir;
             }
+            if (signatureMatches && !isValid && extractedDir.exists()) {
+                LOG.warn("[BridgeResolver] Signature matches but bridge dir is stale "
+                        + "(likely half-extracted on a previous upgrade, or daemon.js version mismatch). "
+                        + "Forcing re-extraction.");
+            }
 
             synchronized (this.bridgeExtractionLock) {
-                if (isValidBridgeDir(extractedDir) && bridgeSignatureMatches(versionFile, signature)) {
+                if (isValidBridgeDir(extractedDir)
+                        && bridgeSignatureMatches(versionFile, signature)) {
                     this.cachedSdkDir = extractedDir;
                     // Ensure waiters are notified
                     this.extractionState.compareAndSet(ExtractionState.NOT_STARTED, ExtractionState.COMPLETED);
@@ -546,30 +644,17 @@ public class BridgeDirectoryResolver {
                 if (ApplicationManager.getApplication().isDispatchThread()) {
                     // Extract on background thread with progress indicator to avoid EDT freeze
                     LOG.debug("[BridgeResolver] EDT thread detected, using background task to avoid UI freeze");
-                    extractOnBackgroundThreadAsync(archiveFile, extractedDir, signature, versionFile);
+                    extractOnBackgroundThreadAsync(archiveFile, extractedDir, signature);
                     // DO NOT wait here - return null and let caller handle async initialization
                     // The extractionReadyFuture will be completed when extraction finishes
                     LOG.debug("[BridgeResolver] EDT thread not blocking, returning null. Use getExtractionFuture() to wait asynchronously");
                     return null;
                 } else {
-                    // Direct extraction on non-EDT thread
+                    // Direct extraction on non-EDT thread, using atomic sibling-swap
+                    // to avoid file-lock issues during in-place overwrite on Windows.
                     LOG.info("[BridgeResolver] Starting synchronous extraction on non-EDT thread");
                     try {
-                        LOG.info("[BridgeResolver] Step 1: Deleting old directory if exists");
-                        deleteDirectory(extractedDir);
-
-                        LOG.info("[BridgeResolver] Step 2: Unzipping archive");
-                        unzipArchive(archiveFile, extractedDir);
-                        LOG.info("[BridgeResolver] Unzip completed, extractedDir exists: " + extractedDir.exists());
-
-                        LOG.info("[BridgeResolver] Step 3: Writing version file");
-                        Files.writeString(versionFile.toPath(), signature, StandardCharsets.UTF_8);
-                        LOG.info("[BridgeResolver] Version file written");
-
-                        // Wait for filesystem to sync and validate with retry
-                        // This fixes race condition where unzip returns before files are fully synced
-                        LOG.info("[BridgeResolver] Step 4: Validating extracted directory");
-                        File validatedDir = waitForValidBridgeDir(extractedDir, 3, 100);
+                        File validatedDir = atomicExtractAndSwap(archiveFile, extractedDir, signature, null);
                         if (validatedDir != null) {
                             LOG.info("[BridgeResolver] Validation succeeded!");
                             this.extractionState.set(ExtractionState.COMPLETED);
@@ -689,7 +774,7 @@ public class BridgeDirectoryResolver {
      * Returns immediately, extraction runs in background.
      * NOTE: extractionFutureRef should already be initialized by the caller.
      */
-    private void extractOnBackgroundThreadAsync(File archiveFile, File extractedDir, String signature, File versionFile) {
+    private void extractOnBackgroundThreadAsync(File archiveFile, File extractedDir, String signature) {
         // extractionFutureRef should already be initialized by caller
         // Do NOT recreate it here to avoid race conditions
 
@@ -701,24 +786,10 @@ public class BridgeDirectoryResolver {
                     indicator.setText("Extracting ai-bridge.zip...");
 
                     try {
-                        // Delete old directory
+                        // Atomic sibling-swap extraction (Windows-lock safe).
                         indicator.setFraction(0.1);
-                        indicator.setText("Cleaning old files...");
-                        deleteDirectory(extractedDir);
-
-                        // Extract archive
-                        indicator.setFraction(0.2);
-                        indicator.setText("Extracting archive...");
-                        unzipArchiveWithProgress(archiveFile, extractedDir, indicator);
-
-                        // Write version file
-                        indicator.setFraction(0.9);
-                        indicator.setText("Finalizing...");
-                        Files.writeString(versionFile.toPath(), signature, StandardCharsets.UTF_8);
-
-                        // Validate with retry to handle filesystem sync delay
-                        indicator.setText("Validating extraction...");
-                        File validatedDir = waitForValidBridgeDir(extractedDir, 3, 100);
+                        indicator.setText("Preparing sibling directory...");
+                        File validatedDir = atomicExtractAndSwap(archiveFile, extractedDir, signature, indicator);
 
                         indicator.setFraction(1.0);
 
@@ -796,6 +867,169 @@ public class BridgeDirectoryResolver {
                 LOG.warn("[BridgeResolver] Cannot delete directory: " + dir.getAbsolutePath());
             }
         }
+    }
+
+    /**
+     * Atomic bridge-extraction primitive: unzip into a fresh sibling directory,
+     * write the version file, validate it, and only then swap it into place by
+     * renaming both directories. This sidesteps the Windows "locked file in
+     * extractedDir" problem entirely — the locked old directory becomes
+     * {@code ai-bridge.old.<ts>} and is cleaned up lazily; the new content is
+     * a separate filesystem entity until the final rename.
+     *
+     * <p>If the indicator is non-null, the extraction reports progress through
+     * it; otherwise extracts headlessly.
+     *
+     * @return validated bridge directory (== {@code targetDir}) on success, or {@code null} if validation fails.
+     * @throws IOException if extraction or rename fails fatally.
+     */
+    private File atomicExtractAndSwap(File archiveFile, File targetDir, String signature,
+                                      ProgressIndicator indicator) throws IOException {
+        File parent = targetDir.getParentFile();
+        if (parent == null) {
+            throw new IOException("Bridge target has no parent: " + targetDir.getAbsolutePath());
+        }
+        String ts = String.valueOf(System.currentTimeMillis());
+        File stagingDir = new File(parent, EXTRACTION_NEW_SUFFIX_PREFIX + ts);
+        File parkingDir = new File(parent, EXTRACTION_OLD_SUFFIX_PREFIX + ts);
+        File stagingVersionFile = new File(stagingDir, BRIDGE_VERSION_FILE);
+
+        // 1. Pre-clean: in the (rare) case stagingDir collides with a prior failed
+        // attempt, blow it away. Best-effort.
+        if (stagingDir.exists()) {
+            deleteDirectory(stagingDir);
+        }
+
+        // 2. Extract into stagingDir.
+        LOG.info("[BridgeResolver] Step 1/4: extracting to staging dir: " + stagingDir.getAbsolutePath());
+        try {
+            if (indicator != null) {
+                indicator.setFraction(0.2);
+                indicator.setText("Extracting archive...");
+                unzipArchiveWithProgress(archiveFile, stagingDir, indicator);
+            } else {
+                unzipArchive(archiveFile, stagingDir);
+            }
+        } catch (IOException e) {
+            // Staging extraction failed: clean up and rethrow.
+            deleteDirectory(stagingDir);
+            throw e;
+        }
+
+        // 3. Write version file inside staging (so it lands atomically with the rename).
+        LOG.info("[BridgeResolver] Step 2/4: writing version file in staging");
+        try {
+            Files.writeString(stagingVersionFile.toPath(), signature, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            deleteDirectory(stagingDir);
+            throw e;
+        }
+
+        // 4. Validate staging directory (retries handle filesystem sync delay).
+        //    isValidBridgeDir now includes the daemon-version check, so a stale
+        //    ai-bridge.zip bundled in the plugin will surface here as a validation
+        //    failure rather than silently swapping in a stale daemon.
+        LOG.info("[BridgeResolver] Step 3/4: validating staging dir");
+        File validatedStaging = waitForValidBridgeDir(stagingDir, 3, 100);
+        if (validatedStaging == null) {
+            LOG.error("[BridgeResolver] Staging dir failed validation. "
+                    + "Either ai-bridge.zip is incomplete or daemon.js does not declare DAEMON_VERSION='"
+                    + EXPECTED_DAEMON_VERSION + "' — this is a build-system bug. Discarding staging.");
+            deleteDirectory(stagingDir);
+            return null;
+        }
+
+        // 5. Atomic swap: target -> parking, staging -> target.
+        LOG.info("[BridgeResolver] Step 4/4: swapping staging into target");
+        boolean targetExisted = targetDir.exists();
+        if (targetExisted) {
+            try {
+                Files.move(targetDir.toPath(), parkingDir.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            } catch (Exception atomicFail) {
+                LOG.warn("[BridgeResolver] ATOMIC_MOVE for old dir failed (" + atomicFail.getMessage()
+                        + "), retrying without atomic flag");
+                try {
+                    Files.move(targetDir.toPath(), parkingDir.toPath());
+                } catch (IOException moveFail) {
+                    // Last-ditch: try to delete in-place so the next move can land. If
+                    // this also fails the renameOrDelete cycle is doomed — propagate.
+                    LOG.warn("[BridgeResolver] Plain move of old dir failed (" + moveFail.getMessage()
+                            + "), attempting in-place delete (best effort)");
+                    deleteDirectory(targetDir);
+                    if (targetDir.exists()) {
+                        // Roll back: stagingDir is still intact; leave it for the next run.
+                        throw new IOException("Cannot move or delete existing bridge dir; "
+                                + "file lock likely held by another process: "
+                                + targetDir.getAbsolutePath(), moveFail);
+                    }
+                }
+            }
+        }
+
+        try {
+            Files.move(stagingDir.toPath(), targetDir.toPath(), java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+        } catch (Exception atomicFail) {
+            LOG.warn("[BridgeResolver] ATOMIC_MOVE for staging failed (" + atomicFail.getMessage()
+                    + "), retrying without atomic flag");
+            try {
+                Files.move(stagingDir.toPath(), targetDir.toPath());
+            } catch (IOException moveFail) {
+                // Final rename failed and we already moved the old dir out of the way.
+                // Try to restore: parking -> target. If that fails too, both stagingDir
+                // and parkingDir remain on disk — caller will see null + clear error.
+                LOG.error("[BridgeResolver] Final rename failed; attempting rollback");
+                if (targetExisted && parkingDir.exists()) {
+                    try {
+                        Files.move(parkingDir.toPath(), targetDir.toPath());
+                    } catch (Exception rollbackFail) {
+                        LOG.error("[BridgeResolver] Rollback also failed: " + rollbackFail.getMessage());
+                    }
+                }
+                throw new IOException("Atomic bridge swap failed: " + moveFail.getMessage(), moveFail);
+            }
+        }
+
+        // 6. Schedule async cleanup of the parked old dir (and any stale siblings).
+        scheduleStaleSwapSiblingCleanup(parent);
+
+        LOG.info("[BridgeResolver] Bridge swap complete: " + targetDir.getAbsolutePath());
+        return targetDir;
+    }
+
+    /**
+     * Best-effort background cleanup of leftover {@code ai-bridge.old.*} and
+     * {@code ai-bridge.new.*} sibling directories from previous failed or
+     * partial extraction attempts. Cleanup runs on a daemon thread after a
+     * short delay so that any process still holding file handles has a chance
+     * to release them; if deletion still fails the directories stay on disk
+     * and the next IDE startup will retry.
+     */
+    private void scheduleStaleSwapSiblingCleanup(File parent) {
+        if (parent == null) return;
+        Thread t = new Thread(() -> {
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+            File[] children = parent.listFiles();
+            if (children == null) return;
+            for (File child : children) {
+                if (child == null || !child.isDirectory()) continue;
+                String name = child.getName();
+                if (name.startsWith(EXTRACTION_OLD_SUFFIX_PREFIX) || name.startsWith(EXTRACTION_NEW_SUFFIX_PREFIX)) {
+                    LOG.info("[BridgeResolver] Cleaning up stale swap sibling: " + name);
+                    deleteDirectory(child);
+                    if (child.exists()) {
+                        LOG.debug("[BridgeResolver] Stale sibling could not be removed (still locked?); "
+                                + "will retry on next startup: " + child.getAbsolutePath());
+                    }
+                }
+            }
+        }, "BridgeResolver-StaleCleanup");
+        t.setDaemon(true);
+        t.start();
     }
 
     private void unzipArchive(File archiveFile, File targetDir) throws IOException {
@@ -1022,6 +1256,59 @@ public class BridgeDirectoryResolver {
         this.extractionState.set(ExtractionState.NOT_STARTED);
         this.extractionFutureRef.set(null);
         this.extractionReadyFuture = new CompletableFuture<>();
+    }
+
+    /**
+     * Force-invalidate the bridge directory and re-extract from the embedded
+     * archive synchronously. Used by LocalBridge's self-heal flow when a stale
+     * daemon is detected at runtime.
+     *
+     * <p>Wipes both in-memory state (caches, extraction futures) and the on-disk
+     * {@code .bridge-version} marker so the next {@link #findSdkDir()} call goes
+     * through the full atomic extract-and-swap path even if the existing
+     * directory looks superficially valid.
+     *
+     * <p>Returns the freshly-extracted directory, or {@code null} if extraction
+     * failed (e.g. the bundled archive itself is malformed or no Node available).
+     */
+    public File invalidateAndForceReExtract() {
+        LOG.warn("[BridgeResolver] Invalidating bridge cache and forcing re-extraction");
+
+        // 1. Wipe in-memory caches and extraction state so findSdkDir() restarts cleanly.
+        this.cachedSdkDir = null;
+        this.extractionState.set(ExtractionState.NOT_STARTED);
+        this.extractionFutureRef.set(null);
+        this.extractionReadyFuture = new CompletableFuture<>();
+
+        // 2. Wipe the on-disk version marker so even if the dir survives, the
+        //    signatureMatches check will fail and we go through atomic re-extract.
+        try {
+            PluginId pluginId = PluginId.getId(PlatformUtils.getPluginId());
+            IdeaPluginDescriptor descriptor = PluginManagerCore.getPlugin(pluginId);
+            if (descriptor != null) {
+                File pluginDir = descriptor.getPluginPath().toFile();
+                File versionFile = new File(pluginDir, SDK_DIR_NAME + File.separator + BRIDGE_VERSION_FILE);
+                if (versionFile.exists()) {
+                    if (versionFile.delete()) {
+                        LOG.info("[BridgeResolver] Deleted version marker: " + versionFile.getAbsolutePath());
+                    } else {
+                        LOG.warn("[BridgeResolver] Could not delete version marker (will be overwritten by re-extract): "
+                                + versionFile.getAbsolutePath());
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            LOG.warn("[BridgeResolver] Could not locate version marker for invalidation: " + t.getMessage());
+        }
+
+        // 3. Trigger the full discovery + atomic extract pipeline.
+        File result = findSdkDir();
+        if (result == null) {
+            LOG.error("[BridgeResolver] Force re-extract did not produce a usable bridge directory");
+        } else {
+            LOG.info("[BridgeResolver] Force re-extract complete: " + result.getAbsolutePath());
+        }
+        return result;
     }
 
     /**

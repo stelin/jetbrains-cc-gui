@@ -51,4 +51,6 @@ export interface SelectedSupervisor {
   agentId: string;
   name: string;
   role: SupervisorRole;
+  /** Default model from agent config; runtime override is tracked in PairContext. */
+  model?: string;
 }

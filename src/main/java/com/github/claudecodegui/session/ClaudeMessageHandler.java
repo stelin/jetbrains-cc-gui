@@ -147,6 +147,9 @@ public class ClaudeMessageHandler implements MessageCallback {
             case "reasoning_effort_applied":
                 handleReasoningEffortApplied(content);
                 break;
+            case "claude_error_code":
+                callbackHandler.notifyClaudeErrorCode(content);
+                break;
             case "slash_commands":
                 handleSlashCommands(content);
                 break;

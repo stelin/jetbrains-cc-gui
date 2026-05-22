@@ -14,6 +14,8 @@
     "newTab": "新標籤頁",
     "history": "歷史記錄",
     "settings": "設定",
+    "enable": "啟用",
+    "manage": "管理",
     "thinking": "思考",
     "thinkingProcess": "思考過程",
     "success": "成功",
@@ -261,6 +263,41 @@
     "agentsDesc": "管理和配置AI代理",
     "skills": "Skills",
     "skillsDesc": "管理和配置技能模組",
+    "supervisor": {
+      "title": "Supervisor 監工",
+      "subtitle": "配置多個可掛載的 Supervisor Agent，會話級隨時啟用、即用即棄",
+      "searchPlaceholder": "搜尋...",
+      "newAgent": "新建 Agent",
+      "editAgent": "編輯 Agent",
+      "noAgents": "尚未配置任何 Supervisor",
+      "noAgentsCallToAction": "點選「新建 Agent」開始配置你的第一個監工",
+      "noMatches": "無符合項",
+      "selectAgentToEdit": "在左側選擇一個 Agent 檢視或編輯",
+      "defaultBadge": "預設",
+      "builtInBadge": "內建",
+      "setAsDefault": "設為預設",
+      "setAsDefaultTooltip": "啟用會話 Supervisor 時優先勾選該 Agent",
+      "deleteConfirm": "確認刪除「{{name}}」？此操作無法復原。",
+      "fields": {
+        "name": "名稱",
+        "namePlaceholder": "例如：Go 規範守衛",
+        "description": "描述（角色 + 規範定義）",
+        "descriptionPlaceholder": "你是 …，負責檢查 …\n\n# 規範\n- ...\n\n# 行為\n- ...",
+        "model": "模型"
+      },
+      "templates": {
+        "insertTemplate": "插入範本",
+        "roleOnly": "純職責式",
+        "roleWithRules": "職責 + 規範",
+        "complete": "完整版"
+      },
+      "toast": {
+        "addSuccess": "Supervisor 已新增",
+        "updateSuccess": "Supervisor 已更新",
+        "deleteSuccess": "Supervisor 已刪除",
+        "opFailed": "操作失敗"
+      }
+    },
     "other": {
       "title": "其他設定",
       "description": "配置其他雜項設定",
@@ -1281,6 +1318,54 @@
     "enableDescription": "開啟後，編輯器中當前打開的檔案路徑將發送給 AI。注意：僅傳遞檔案路徑，不會傳遞檔案內容。",
     "enable": "開啟",
     "cancel": "取消"
+  },
+  "chatInput": {
+    "supervisor": {
+      "label": "Supervisor",
+      "openTooltip": "啟用 Supervisor 監工",
+      "activeTooltip": "已啟用：{{name}}，點選切換",
+      "disable": "關閉",
+      "pickerTitle": "選擇 Supervisor",
+      "pickerHint": "每個會話僅可繫結一個 Supervisor",
+      "noAgentsConfigured": "尚未配置 Supervisor，請到設定中建立",
+      "defaultBadge": "預設",
+      "roleCoordinator": "主調度",
+      "roleReviewer": "協審",
+      "manage": "管理 Agents"
+    }
+  },
+  "pairLayout": {
+    "paneTitle": "Supervisor 監工",
+    "closePane": "關閉監工",
+    "coordinator": "主調度",
+    "reviewer": "協審",
+    "waitingForMainAI": "等待主 AI 事件...",
+    "composerPrompt": "在下方輸入框告訴 Supervisor 你的任務：方案在哪裡、規範要求、期望結果。",
+    "thinking": "Supervisor 思考中... ({{seconds}}s)",
+    "stepProgress": "步驟 {{current}}/{{total}}",
+    "stats": {
+      "autoRecover": "自癒 {{count}} 次",
+      "escalate": "升級 {{count}} 次"
+    },
+    "action": {
+      "inject": "已注入指令到主 AI",
+      "retry": "自癒中",
+      "approve": "通過，進入下一步",
+      "escalate": "請使用者決策",
+      "wait": "等待中"
+    },
+    "escalate": {
+      "title": "{{name}} 請求決策",
+      "defaultReason": "需要您決策"
+    },
+    "composer": {
+      "placeholder": "向 Supervisor 描述編碼任務、方案路徑、規範要求...\n例如: 方案在 docs/plans/get-user.md，按 Go 分層規範實現，跑通後再讓我看\n\n提示: 可拖檔案到此處自動插入 @路徑",
+      "hint": "Enter 傳送，Shift+Enter 換行 · 支援拖檔案",
+      "send": "傳送給 Supervisor"
+    },
+    "divider": {
+      "tooltip": "拖動調整左右比例 · 雙擊重置"
+    }
   },
   "rewind": {
     "title": "回溯檔案到之前的狀態",

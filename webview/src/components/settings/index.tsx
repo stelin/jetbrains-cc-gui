@@ -19,6 +19,7 @@ import CommitSection from './CommitSection';
 import OtherSettingsSection from './OtherSettingsSection';
 import RemoteServerSection from './RemoteServerSection';
 import RemoteSyncSection from './RemoteSyncSection';
+import SupervisorSection from './SupervisorSection';
 import { SkillsSettingsSection } from '../skills';
 import SettingsDialogs from './SettingsDialogs';
 
@@ -550,6 +551,14 @@ const SettingsView = ({
           {/* Remote sync (mutagen) */}
           <div style={{ display: currentTab === 'remoteSync' ? 'block' : 'none' }}>
             <RemoteSyncSection />
+          </div>
+
+          {/* Supervisor agents */}
+          <div style={{ display: currentTab === 'supervisor' ? 'block' : 'none' }}>
+            <SupervisorSection
+              onSuccess={(msg) => addToast(msg, 'success')}
+              onError={(msg) => addToast(msg, 'error')}
+            />
           </div>
 
           {/* Other settings */}

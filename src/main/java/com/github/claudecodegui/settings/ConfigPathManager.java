@@ -19,6 +19,7 @@ public class ConfigPathManager {
     private static final String CONFIG_FILE_NAME = "config.json";
     private static final String BACKUP_FILE_NAME = "config.json.bak";
     private static final String AGENT_FILE_NAME = "agent.json";
+    private static final String SUPERVISOR_AGENT_FILE_NAME = "supervisor-agents.json";
     private static final String PROMPT_FILE_NAME = "prompt.json";
     private static final String CLAUDE_DIR_NAME = ".claude";
     private static final String CLAUDE_SETTINGS_FILE_NAME = "settings.json";
@@ -67,6 +68,13 @@ public class ConfigPathManager {
      */
     public Path getPromptFilePath() {
         return getConfigDir().resolve(PROMPT_FILE_NAME);
+    }
+
+    /**
+     * Get the supervisor-agents.json file path.
+     */
+    public Path getSupervisorAgentFilePath() {
+        return getConfigDir().resolve(SUPERVISOR_AGENT_FILE_NAME);
     }
 
     /**

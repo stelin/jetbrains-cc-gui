@@ -51,6 +51,7 @@ import { MessageAnchorRail } from './components/MessageAnchorRail';
 import { FILE_MODIFY_TOOL_NAMES, isToolName } from './utils/toolConstants';
 import type { RewindableMessage } from './components/RewindSelectDialog';
 import { AppDialogs } from './components/AppDialogs';
+import { PairProvider, PairLayout, usePairContext } from './components/SupervisorPair';
 import { APP_VERSION } from './version/version';
 import type {
   ClaudeMessage,
@@ -59,6 +60,43 @@ import type {
 } from './types';
 
 const DEFAULT_STATUS = 'ready';
+
+/**
+ * Inner bridge that wires the Pair context to the outer App handlers:
+ *   - openManager → open Settings → Supervisor tab
+ *   - injectPromptHandler → execute a fake-user message as if the user typed it
+ *
+ * Must be mounted inside <PairProvider> so it can read the context via hook.
+ */
+const PairAppBridge = ({
+  setSettingsInitialTab,
+  setCurrentView,
+  executeMessage,
+}: {
+  setSettingsInitialTab: (t: SettingsTab) => void;
+  setCurrentView: (v: ViewMode) => void;
+  executeMessage: (content: string, attachments?: Attachment[]) => void;
+}) => {
+  const { registerOpenManager, registerInjectPromptHandler } = usePairContext();
+  useEffect(() => {
+    registerOpenManager(() => {
+      setSettingsInitialTab('supervisor');
+      setCurrentView('settings');
+    });
+  }, [registerOpenManager, setSettingsInitialTab, setCurrentView]);
+
+  useEffect(() => {
+    registerInjectPromptHandler((_pairId, _supervisorId, prompt) => {
+      // Mirror the chat input flow: enqueue the prompt as if the user typed it.
+      // Empty attachments — Supervisor never sends attachments.
+      if (prompt && prompt.trim().length > 0) {
+        executeMessage(prompt, []);
+      }
+    });
+  }, [registerInjectPromptHandler, executeMessage]);
+
+  return null;
+};
 
 const App = () => {
   const { t } = useTranslation();
@@ -519,7 +557,12 @@ const App = () => {
 
   // ── Render ──
   return (
-    <>
+    <PairProvider>
+      <PairAppBridge
+        setSettingsInitialTab={setSettingsInitialTab}
+        setCurrentView={setCurrentView}
+        executeMessage={executeMessage}
+      />
       <ToastContainer messages={toasts} onDismiss={dismissToast} />
       <ChatHeader
         currentView={currentView}
@@ -555,7 +598,7 @@ const App = () => {
           onAutoOpenFileEnabledChange={handleAutoOpenFileEnabledChange}
         />
       ) : currentView === 'chat' ? (
-        <>
+        <PairLayout>
           <div className="messages-shell">
             <MessageAnchorRail
               messages={mergedMessages}
@@ -600,7 +643,7 @@ const App = () => {
 
           {/* Scroll control button */}
           <ScrollControl containerRef={messagesContainerRef} inputAreaRef={inputAreaRef} />
-        </>
+        </PairLayout>
       ) : (
         <HistoryView
           historyData={historyData}
@@ -734,7 +777,7 @@ const App = () => {
         onCloseAddModel={() => setAddModelDialogOpen(false)}
         currentProvider={currentProvider}
       />
-    </>
+    </PairProvider>
   );
 };
 

@@ -22,6 +22,8 @@
     "add": "Add",
     "back": "Back",
     "close": "Close",
+    "enable": "Enable",
+    "manage": "Manage",
     "newSession": "New Session",
     "newTab": "New Tab",
     "history": "History",
@@ -431,6 +433,41 @@
         "download": "Download mutagen v{{version}}",
         "reinstall": "Reinstall",
         "downloadUrl": "Download URL"
+      }
+    },
+    "supervisor": {
+      "title": "Supervisor Agents",
+      "subtitle": "Configure pluggable supervisor personas — enable per session, opt-out anytime.",
+      "searchPlaceholder": "Search...",
+      "newAgent": "New Agent",
+      "editAgent": "Edit Agent",
+      "noAgents": "No supervisor agents configured yet",
+      "noAgentsCallToAction": "Click \"New Agent\" to configure your first supervisor",
+      "noMatches": "No matches",
+      "selectAgentToEdit": "Pick an agent on the left to view or edit",
+      "defaultBadge": "default",
+      "builtInBadge": "built-in",
+      "setAsDefault": "Set as default",
+      "setAsDefaultTooltip": "Auto-checked when enabling Supervisor on a session",
+      "deleteConfirm": "Delete \"{{name}}\"? This cannot be undone.",
+      "fields": {
+        "name": "Name",
+        "namePlaceholder": "e.g. Go Strict Reviewer",
+        "description": "Description (role + rules definition)",
+        "descriptionPlaceholder": "You are a …, responsible for …\n\n# Rules\n- ...\n\n# Behavior\n- ...",
+        "model": "Model"
+      },
+      "templates": {
+        "insertTemplate": "Insert template",
+        "roleOnly": "Role-only",
+        "roleWithRules": "Role + rules",
+        "complete": "Complete"
+      },
+      "toast": {
+        "addSuccess": "Supervisor added",
+        "updateSuccess": "Supervisor updated",
+        "deleteSuccess": "Supervisor deleted",
+        "opFailed": "Operation failed"
       }
     },
     "other": {
@@ -1559,6 +1596,54 @@
     "enableDescription": "When enabled, the currently opened file path in the editor will be sent to AI. Note: only the file path is transmitted, not the file content.",
     "enable": "Enable",
     "cancel": "Cancel"
+  },
+  "chatInput": {
+    "supervisor": {
+      "label": "Supervisor",
+      "openTooltip": "Enable Supervisor",
+      "activeTooltip": "Active: {{name}} — click to switch",
+      "disable": "Disable",
+      "pickerTitle": "Choose Supervisor",
+      "pickerHint": "One supervisor per session",
+      "noAgentsConfigured": "No supervisor agents configured. Open settings to create one.",
+      "defaultBadge": "default",
+      "roleCoordinator": "Coordinator",
+      "roleReviewer": "Reviewer",
+      "manage": "Manage agents"
+    }
+  },
+  "pairLayout": {
+    "paneTitle": "Supervisor",
+    "closePane": "Close Supervisor pane",
+    "coordinator": "Coordinator",
+    "reviewer": "Reviewer",
+    "waitingForMainAI": "Waiting for main AI events...",
+    "composerPrompt": "Tell the Supervisor your task in the box below: where the plan is, coding rules, expected outcome.",
+    "thinking": "Supervisor thinking... ({{seconds}}s)",
+    "stepProgress": "Step {{current}}/{{total}}",
+    "stats": {
+      "autoRecover": "{{count}} auto-recover",
+      "escalate": "{{count}} escalate"
+    },
+    "action": {
+      "inject": "Injected prompt to main AI",
+      "retry": "Auto-recovering",
+      "approve": "Approved, moving to next step",
+      "escalate": "Awaiting user decision",
+      "wait": "Waiting"
+    },
+    "escalate": {
+      "title": "{{name}} requests a decision",
+      "defaultReason": "Decision required"
+    },
+    "composer": {
+      "placeholder": "Tell the Supervisor what to coordinate — design doc path, coding rules, success criteria...\nExample: Plan is at docs/plans/get-user.md, follow Go layering rules, ping me when done.\n\nTip: drop a file here to insert its @path.",
+      "hint": "Enter to send, Shift+Enter for newline · drop files supported",
+      "send": "Send to Supervisor"
+    },
+    "divider": {
+      "tooltip": "Drag to resize · double-click to reset"
+    }
   },
   "rewind": {
     "title": "Rewind Files to Previous State",

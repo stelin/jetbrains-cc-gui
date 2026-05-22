@@ -292,6 +292,33 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
         return queryExecutor.executeQueryStream(prompt, callback);
     }
 
+    /**
+     * Send a raw daemon command (NDJSON method + params) on the active daemon
+     * bridge and stream output lines to the supplied callback.
+     *
+     * <p>Used by features that piggy-back on the existing daemon process — e.g.
+     * the Supervisor channel ({@code supervisor.start} / {@code supervisor.postEvent}
+     * / {@code supervisor.stop}). Returns a failed future if no daemon is running.
+     *
+     * @param method  e.g. {@code supervisor.postEvent}
+     * @param params  command parameters; may include {@code env} which the daemon honours
+     * @param callback NDJSON output callback
+     */
+    public CompletableFuture<Boolean> sendDaemonCommand(
+            String method,
+            com.google.gson.JsonObject params,
+            com.github.claudecodegui.provider.common.IBridge.DaemonOutputCallback callback
+    ) {
+        com.github.claudecodegui.provider.common.IBridge bridge = daemonCoordinator.getDaemonBridge();
+        if (bridge == null) {
+            CompletableFuture<Boolean> failed = new CompletableFuture<>();
+            failed.completeExceptionally(new IllegalStateException(
+                    "Daemon bridge not available — cannot send method " + method));
+            return failed;
+        }
+        return bridge.sendCommand(method, params, callback);
+    }
+
     // ============================================================================
     // Multi-turn interaction support
     // ============================================================================

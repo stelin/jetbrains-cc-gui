@@ -5,6 +5,9 @@ import com.github.claudecodegui.handler.SettingsHandler;
 import com.github.claudecodegui.notifications.ClaudeNotifier;
 import com.github.claudecodegui.provider.common.MessageCallback;
 import com.github.claudecodegui.provider.common.SDKResult;
+import com.github.claudecodegui.session.pair.EventBus;
+import com.github.claudecodegui.session.pair.PairSession;
+import com.github.claudecodegui.session.pair.PairSessionManager;
 import com.github.claudecodegui.util.TokenUsageUtils;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -13,7 +16,9 @@ import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.project.Project;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Claude message callback handler.
@@ -56,6 +61,19 @@ public class ClaudeMessageHandler implements MessageCallback {
     // (read/written across SDK callback threads and EDT).
     private volatile int syncedContentOffset = 0;
     private volatile int syncedThinkingOffset = 0;
+
+    // ---- Supervisor Pair turn tracking ----
+    // Tool uses and modified files seen since the most recent user message,
+    // forwarded as a single turn_end summary when onComplete()/onError()/
+    // handleStreamEnd() fires (whichever comes first).
+    private final List<EventBus.ToolUseRecord> turnToolUses = new ArrayList<>();
+    private final Set<String> turnModifiedFiles = new LinkedHashSet<>();
+    private volatile long turnStartedAt = 0;
+    private final java.util.concurrent.atomic.AtomicInteger turnRetryCount =
+            new java.util.concurrent.atomic.AtomicInteger(0);
+    // Re-entrance guard: stream_end can fire first, then onComplete arrives — we
+    // don't want to emit turn_end to the Supervisor twice for one turn.
+    private volatile boolean turnEndPublished = false;
 
     /**
      * Constructor.
@@ -182,6 +200,9 @@ public class ClaudeMessageHandler implements MessageCallback {
 
         // Show error in status bar
         ClaudeNotifier.showError(project, error);
+
+        // Notify attached Supervisor Pair (if any).
+        publishErrorIfPair(error);
     }
 
     /**
@@ -201,6 +222,9 @@ public class ClaudeMessageHandler implements MessageCallback {
             state.setBusy(false);
             state.setLoading(false);
             callbackHandler.notifyStateChange(state.isBusy(), state.isLoading(), state.getError());
+            // Notify attached Supervisor Pair (turn really ended; reset retry counter).
+            turnRetryCount.set(0);
+            publishTurnEndIfPair();
             return;
         }
 
@@ -236,6 +260,10 @@ public class ClaudeMessageHandler implements MessageCallback {
         }
 
         callbackHandler.notifyStateChange(state.isBusy(), state.isLoading(), state.getError());
+
+        // Notify attached Supervisor Pair (turn really ended; reset retry counter).
+        turnRetryCount.set(0);
+        publishTurnEndIfPair();
     }
 
     // ===== Private methods: handle different message types =====
@@ -300,6 +328,8 @@ public class ClaudeMessageHandler implements MessageCallback {
                             String type = blockObj.get("type").getAsString();
                             if ("tool_use".equals(type)) {
                                 hasToolUse = true;
+                                // Record for Supervisor turn_end summary (Pair only — no-op when no Pair attached).
+                                recordTurnToolUse(blockObj);
                                 if (pathMapper.isActive() && blockObj.has("input")
                                         && blockObj.get("input").isJsonObject()) {
                                     try {
@@ -772,6 +802,11 @@ public class ClaudeMessageHandler implements MessageCallback {
         thinkingSegmentActive = false;
         syncedContentOffset = 0;
         syncedThinkingOffset = 0;
+        // Supervisor Pair: stream_start is the earliest authoritative "new turn"
+        // marker, even when the main AI produces no tool_use this round.
+        // Re-arming here makes sure stream_end can publish even for tool-less turns.
+        turnEndPublished = false;
+        if (turnStartedAt == 0) turnStartedAt = System.currentTimeMillis();
         callbackHandler.notifyStreamStart();
     }
 
@@ -808,6 +843,12 @@ public class ClaudeMessageHandler implements MessageCallback {
         state.setLoading(false);
         state.updateLastModifiedTime();
         callbackHandler.notifyStateChange(state.isBusy(), state.isLoading(), state.getError());
+
+        // Notify attached Supervisor Pair. Stream end is the authoritative turn
+        // boundary in streaming mode — earlier than (or instead of) onComplete.
+        // publishTurnEndIfPair is idempotent so a subsequent onComplete is safe.
+        turnRetryCount.set(0);
+        publishTurnEndIfPair();
     }
 
     /**
@@ -1087,5 +1128,163 @@ public class ClaudeMessageHandler implements MessageCallback {
 
         target.addProperty("thinking", existing + delta);
         return true;
+    }
+
+    // ============================================================================
+    // Supervisor Pair integration
+    // ============================================================================
+
+    /**
+     * Find the {@link PairSession} (if any) attached to the current main session.
+     *
+     * <p>Lookup order:
+     * <ol>
+     *   <li>Exact match on {@code state.sessionId} (set after SDK assigns one)</li>
+     *   <li>Fallback to the project's single active pair — the SDK-assigned
+     *       sessionId only arrives on the first response, so a pair started
+     *       <em>before</em> the first turn would otherwise miss every event.
+     *       Since current iteration enforces 1 plan : 1 active pair, this is
+     *       safe.</li>
+     * </ol>
+     */
+    private PairSession findAttachedPair() {
+        if (project == null) return null;
+        try {
+            PairSessionManager mgr = PairSessionManager.getInstance(project);
+            String sid = state != null ? state.getSessionId() : null;
+            if (sid != null && !sid.isEmpty()) {
+                PairSession exact = mgr.findByMainSession(sid);
+                if (exact != null) return exact;
+            }
+            // Fallback: project has at most one active pair in this iteration.
+            return mgr.getActivePairs().stream()
+                    .filter(p -> !p.isDisposed())
+                    .reduce((a, b) -> a.getStartedAt() > b.getStartedAt() ? a : b)
+                    .orElse(null);
+        } catch (Throwable t) {
+            // PairSessionManager service may not exist in pure unit tests.
+            return null;
+        }
+    }
+
+    /**
+     * Append a tool_use record to the in-flight turn buffer. Called from
+     * {@link #handleAssistantMessage(String)} whenever a tool_use block is seen.
+     */
+    private void recordTurnToolUse(JsonObject toolBlock) {
+        if (toolBlock == null) return;
+        if (turnStartedAt == 0) {
+            turnStartedAt = System.currentTimeMillis();
+            // Fresh turn detected — re-arm the publish guard so stream_end /
+            // onComplete for THIS turn can emit again.
+            turnEndPublished = false;
+        }
+        String name = toolBlock.has("name") && !toolBlock.get("name").isJsonNull()
+                ? toolBlock.get("name").getAsString() : "?";
+        String path = null;
+        if (toolBlock.has("input") && toolBlock.get("input").isJsonObject()) {
+            JsonObject input = toolBlock.getAsJsonObject("input");
+            // Common path field names across tools (Read/Edit/Write/Bash use different keys).
+            for (String key : new String[]{"path", "file_path", "filePath", "filename", "target"}) {
+                if (input.has(key) && !input.get(key).isJsonNull()) {
+                    path = input.get(key).getAsString();
+                    break;
+                }
+            }
+        }
+        // Defer ok=true until tool_result arrives; for turn_end summary we assume success
+        // unless we later see a tool_result indicating an error. Refinement is future work.
+        turnToolUses.add(new EventBus.ToolUseRecord(name, path, true));
+        if (path != null && !path.isEmpty()) {
+            turnModifiedFiles.add(path);
+        }
+    }
+
+    /**
+     * Forward this turn's accumulated activity to the Supervisor EventBus
+     * (if a Pair is attached). Idempotent within one turn: stream_end and a
+     * subsequent onComplete will only emit once.
+     */
+    private void publishTurnEndIfPair() {
+        if (turnEndPublished) {
+            // Already sent for this turn — ignore the follow-up trigger.
+            return;
+        }
+        PairSession pair = findAttachedPair();
+        if (pair == null || pair.getEventBus() == null) {
+            resetTurnBuffer();
+            return;
+        }
+        long now = System.currentTimeMillis();
+        long startedAt = turnStartedAt == 0 ? now : turnStartedAt;
+        long durationMs = now - startedAt;
+        List<String> modifiedFiles = new ArrayList<>(turnModifiedFiles);
+        try {
+            // No plan-aware in/off split here — that's the Supervisor's job using plan.md.
+            pair.getEventBus().publishTurnEnd(
+                    /*stepIndex*/ 0,
+                    /*stepTitle*/ null,
+                    new ArrayList<>(turnToolUses),
+                    modifiedFiles,
+                    /*modifiedOffPlan*/ null,
+                    durationMs
+            );
+            turnEndPublished = true;
+        } catch (Exception e) {
+            LOG.debug("[Supervisor] publishTurnEnd failed: " + e.getMessage());
+        }
+        resetTurnBuffer();
+    }
+
+    /**
+     * Forward an error event to the Supervisor EventBus (if a Pair is attached).
+     * Best-effort classification: code is set from the prefix of the error
+     * message; the Supervisor LLM does the final triage.
+     */
+    private void publishErrorIfPair(String error) {
+        PairSession pair = findAttachedPair();
+        if (pair == null || pair.getEventBus() == null) {
+            resetTurnBuffer();
+            return;
+        }
+        String code = classifyErrorCode(error);
+        Integer status = null;
+        if (code != null && code.matches("\\d{3}")) {
+            try { status = Integer.parseInt(code); } catch (NumberFormatException ignored) { /* fall-through */ }
+        }
+        int attempt = turnRetryCount.incrementAndGet();
+        try {
+            pair.getEventBus().publishError(
+                    /*stepIndex*/ 0,
+                    code,
+                    status,
+                    /*retryAfter*/ null,
+                    error,
+                    attempt
+            );
+        } catch (Exception e) {
+            LOG.debug("[Supervisor] publishError failed: " + e.getMessage());
+        }
+        resetTurnBuffer();
+    }
+
+    private void resetTurnBuffer() {
+        turnToolUses.clear();
+        turnModifiedFiles.clear();
+        turnStartedAt = 0;
+    }
+
+    private static String classifyErrorCode(String error) {
+        if (error == null) return null;
+        String e = error.toLowerCase();
+        if (e.contains("429") || e.contains("rate_limit") || e.contains("rate limit")) return "429";
+        if (e.contains("401") || e.contains("unauthorized")) return "401";
+        if (e.contains("403") || e.contains("forbidden")) return "403";
+        if (e.contains("500") || e.contains("502") || e.contains("503") || e.contains("504")) return "5xx";
+        if (e.contains("timeout") || e.contains("timed out")) return "timeout";
+        if (e.contains("context") && (e.contains("overflow") || e.contains("too long") || e.contains("limit"))) {
+            return "context_overflow";
+        }
+        return null;
     }
 }

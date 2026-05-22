@@ -4,6 +4,8 @@ import com.github.claudecodegui.i18n.ClaudeCodeGuiBundle;
 import com.github.claudecodegui.session.ClaudeSession;
 import com.github.claudecodegui.settings.CodemossSettingsService;
 import com.github.claudecodegui.handler.AgentHandler;
+import com.github.claudecodegui.handler.SupervisorAgentHandler;
+import com.github.claudecodegui.handler.PairHandler;
 import com.github.claudecodegui.handler.ClipboardHandler;
 import com.github.claudecodegui.handler.CodexMcpServerHandler;
 import com.github.claudecodegui.handler.DependencyHandler;
@@ -271,6 +273,8 @@ public class ChatWindowDelegate {
         messageDispatcher.registerHandler(new DiffHandler(handlerContext));
         messageDispatcher.registerHandler(new PromptEnhancerHandler(handlerContext));
         messageDispatcher.registerHandler(new AgentHandler(handlerContext));
+        messageDispatcher.registerHandler(new SupervisorAgentHandler(handlerContext));
+        messageDispatcher.registerHandler(new PairHandler(handlerContext));
         messageDispatcher.registerHandler(new PromptHandler(handlerContext));
         messageDispatcher.registerHandler(new TabHandler(handlerContext));
         messageDispatcher.registerHandler(new RewindHandler(handlerContext));

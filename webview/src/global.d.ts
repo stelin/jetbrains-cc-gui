@@ -455,6 +455,36 @@ interface Window {
   agentImportResult?: (json: string) => void;
 
   /**
+   * Update supervisor agents list
+   */
+  updateSupervisorAgents?: (json: string) => void;
+
+  /**
+   * Supervisor agent operation result callback
+   */
+  supervisorAgentOperationResult?: (json: string) => void;
+
+  /**
+   * Single supervisor agent fetched
+   */
+  onSupervisorAgentReceived?: (json: string) => void;
+
+  /**
+   * Default supervisor agent fetched / changed
+   */
+  onDefaultSupervisorAgentReceived?: (json: string) => void;
+  onDefaultSupervisorAgentChanged?: (json: string) => void;
+
+  // Pair lifecycle callbacks (Phase B):
+  onPairStarted?: (json: string) => void;
+  onPairStopped?: (json: string) => void;
+  onPairOperationError?: (json: string) => void;
+  onPairActionEvent?: (json: string) => void;
+  onPairInjectPrompt?: (json: string) => void;
+  onPairEscalate?: (json: string) => void;
+  onPairThinking?: (json: string) => void;
+
+  /**
    * Update prompts list
    */
   updatePrompts?: (json: string) => void;

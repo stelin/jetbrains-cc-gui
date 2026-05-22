@@ -1,7 +1,7 @@
 import styles from './style.module.less';
 import { useTranslation } from 'react-i18next';
 
-export type SettingsTab = 'basic' | 'providers' | 'dependencies' | 'usage' | 'permissions' | 'commit' | 'mcp' | 'agents' | 'prompts' | 'skills' | 'remote' | 'remoteSync' | 'other' | 'community';
+export type SettingsTab = 'basic' | 'providers' | 'dependencies' | 'usage' | 'permissions' | 'commit' | 'mcp' | 'agents' | 'prompts' | 'skills' | 'remote' | 'remoteSync' | 'supervisor' | 'other' | 'community';
 
 interface SidebarItem {
   key: SettingsTab;
@@ -22,6 +22,7 @@ const sidebarItems: SidebarItem[] = [
   { key: 'skills', icon: 'codicon-book', labelKey: 'settings.skills' },
   { key: 'remote', icon: 'codicon-cloud', labelKey: 'settings.remote.title' },
   { key: 'remoteSync', icon: 'codicon-sync', labelKey: 'settings.remoteSync.title' },
+  { key: 'supervisor', icon: 'codicon-eye', labelKey: 'settings.supervisor.title' },
   { key: 'other', icon: 'codicon-ellipsis', labelKey: 'settings.other.title' },
   { key: 'community', icon: 'codicon-comment-discussion', labelKey: 'settings.community' },
 ];

@@ -1,0 +1,622 @@
+// ─────────── Layout ───────────
+
+.pairLayout {
+  display: flex;
+  flex-direction: row;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.leftPane {
+  // Width is set inline by PairLayout (% of container) so the divider drag
+  // and window-resize both behave naturally.
+  flex-shrink: 0;
+  flex-grow: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.divider {
+  // Hit-area: 6px wide for easy grabbing; a 1px line plus the dot-grip is the
+  // visible part. Flex centers the grip vertically.
+  position: relative;
+  width: 6px;
+  background: var(--vscode-panel-border);
+  cursor: col-resize;
+  flex-shrink: 0;
+  transition: background 0.15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+
+  // Wider invisible hit area on either side so the user doesn't have to be pixel-perfect.
+  &::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -3px;
+    right: -3px;
+  }
+
+  &:hover {
+    background: var(--vscode-focusBorder);
+  }
+}
+
+.dividerActive {
+  background: var(--vscode-focusBorder);
+}
+
+// "Three-dot" vertical grip indicator centered on the divider — communicates
+// "this is interactive" without dominating the visual.
+.dividerGrip {
+  display: block;
+  width: 2px;
+  height: 28px;
+  background:
+    radial-gradient(circle at center, var(--vscode-foreground) 1px, transparent 1.5px) 0 4px / 2px 8px no-repeat,
+    radial-gradient(circle at center, var(--vscode-foreground) 1px, transparent 1.5px) 0 14px / 2px 8px no-repeat,
+    radial-gradient(circle at center, var(--vscode-foreground) 1px, transparent 1.5px) 0 24px / 2px 8px no-repeat;
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.divider:hover .dividerGrip,
+.dividerActive .dividerGrip {
+  opacity: 0.9;
+}
+
+// Wrapper that holds the SupervisorPane and gets its width via inline style.
+.rightPaneWrapper {
+  flex-shrink: 0;
+  flex-grow: 0;
+  min-width: 280px;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.rightPane {
+  // The pane itself just fills its wrapper; sizing is handled by .rightPaneWrapper.
+  width: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  overflow: hidden;
+}
+
+// ─────────── Header ───────────
+
+.paneHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.headerTitle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.statusDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--vscode-charts-green, #4caf50);
+}
+
+.statusDot.idle {
+  background: var(--vscode-charts-yellow, #d4a017);
+}
+
+.statusDot.error {
+  background: var(--vscode-charts-red, #f14c4c);
+}
+
+.iconButton {
+  background: transparent;
+  border: none;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  padding: 3px;
+  border-radius: 3px;
+
+  &:hover {
+    background: var(--vscode-list-hoverBackground);
+  }
+}
+
+// ─────────── SubPanel ───────────
+
+.subPanelList {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.subPanel {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.subPanel:last-child {
+  border-bottom: none;
+}
+
+.subPanelHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--vscode-titleBar-inactiveBackground, var(--vscode-editor-background));
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+
+  &:hover {
+    background: var(--vscode-list-hoverBackground);
+  }
+}
+
+.subPanelRoleBadge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 2px;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+}
+
+.subPanelRoleBadge.reviewer {
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  border: 1px solid var(--vscode-input-border);
+}
+
+.subPanelName {
+  flex: 1;
+  font-weight: 600;
+}
+
+.subPanelStats {
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.subPanelBody {
+  display: flex;
+  flex-direction: column;
+  padding: 8px 12px;
+  gap: 8px;
+  max-height: 50vh;
+  overflow-y: auto;
+  font-size: 12px;
+}
+
+.subPanelBody.collapsed {
+  display: none;
+}
+
+// ─────────── Chat-style body (new) ───────────
+
+.chatBody {
+  display: flex;
+  flex-direction: column;
+  padding: 10px 10px 6px;
+  gap: 10px;
+  flex: 1;
+  overflow-y: auto;
+  font-size: 12px;
+  min-height: 0;
+}
+
+.chatBody.collapsed {
+  display: none;
+}
+
+.chatMessage {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.supervisorMessage {
+  justify-content: flex-start;
+}
+
+.userMessage {
+  justify-content: flex-end;
+}
+
+.avatar {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+}
+
+.userMessage .avatar {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+}
+
+.bubbleSupervisorWrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: calc(100% - 32px);
+  min-width: 0;
+}
+
+.bubbleSupervisor {
+  background: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.12));
+  color: var(--vscode-foreground);
+  padding: 7px 10px;
+  border-radius: 4px 12px 12px 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.bubbleThinking {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-style: italic;
+  color: var(--vscode-descriptionForeground);
+}
+
+.bubbleUser {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  padding: 7px 10px;
+  border-radius: 12px 4px 12px 12px;
+  max-width: calc(100% - 32px);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+// Foldable "Thinking" header for Supervisor reasoning content — mirrors the
+// main AI message thinking-block visual.
+.thinkingFold {
+  border: 1px dashed var(--vscode-input-border);
+  border-radius: 4px;
+  background: rgba(127, 127, 127, 0.04);
+  overflow: hidden;
+}
+
+.thinkingFoldHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  user-select: none;
+
+  &:hover {
+    background: var(--vscode-list-hoverBackground);
+  }
+}
+
+.thinkingFoldTitle {
+  font-weight: 500;
+}
+
+.thinkingFoldChevron {
+  font-size: 9px;
+}
+
+.thinkingFoldBody {
+  padding: 6px 8px 8px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+  border-top: 1px dashed var(--vscode-input-border);
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+// Standalone status note (ok/warn/error), centered, smaller, no bubble.
+.statusNote {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  padding: 2px 0;
+}
+
+.placeholderHint {
+  padding: 12px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  text-align: center;
+  font-style: italic;
+}
+
+.thinkingRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.thinkingSpinner {
+  font-size: 14px;
+  color: var(--vscode-button-background);
+}
+
+.thinkingText {
+  font-style: italic;
+}
+
+// ─────────── Messages inside SubPanel ───────────
+
+.eventRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  line-height: 1.5;
+}
+
+.eventIcon {
+  flex-shrink: 0;
+  margin-top: 2px;
+  font-size: 14px;
+}
+
+.eventThink { color: var(--vscode-descriptionForeground); }
+.eventOk    { color: var(--vscode-charts-green, #4caf50); }
+.eventWarn  { color: var(--vscode-charts-yellow, #d4a017); }
+.eventError { color: var(--vscode-charts-red, #f14c4c); }
+.eventUser  { color: var(--vscode-button-background); }
+
+.userRow {
+  align-items: flex-start;
+}
+
+.userBubble {
+  background: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.1));
+  border-left: 2px solid var(--vscode-button-background);
+  padding: 6px 8px;
+  border-radius: 4px;
+}
+
+.eventText {
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+// ─────────── Action card ───────────
+
+.actionCard {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--vscode-input-border);
+  background: var(--vscode-input-background);
+  font-size: 12px;
+}
+
+.actionCard.inject {
+  border-color: var(--vscode-charts-green, #4caf50);
+  background: rgba(76, 175, 80, 0.08);
+}
+
+.actionCard.retry {
+  border-color: var(--vscode-charts-yellow, #d4a017);
+  background: rgba(212, 160, 23, 0.08);
+}
+
+.actionCard.escalate {
+  border-color: var(--vscode-charts-red, #f14c4c);
+  background: rgba(241, 76, 76, 0.08);
+}
+
+.actionCard.approve {
+  border-color: var(--vscode-input-border);
+}
+
+.actionCardIcon {
+  flex-shrink: 0;
+  font-size: 16px;
+}
+
+.actionCardBody {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.actionCardLabel {
+  font-weight: 600;
+}
+
+.actionCardDetail {
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+// ─────────── Escalate dialog ───────────
+
+.escalateBackdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1100;
+}
+
+.escalateDialog {
+  background: var(--vscode-editor-background);
+  color: var(--vscode-foreground);
+  border: 1px solid var(--vscode-panel-border);
+  border-left: 4px solid var(--vscode-charts-red, #f14c4c);
+  border-radius: 6px;
+  width: 480px;
+  max-width: 92vw;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  gap: 12px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+}
+
+.escalateTitle {
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.escalateReason {
+  font-size: 12px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.escalateBody {
+  font-size: 13px;
+  white-space: pre-wrap;
+}
+
+.escalateChoices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.escalateChoice {
+  padding: 8px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--vscode-input-border);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+  color: var(--vscode-foreground);
+
+  &:hover {
+    background: var(--vscode-list-hoverBackground);
+  }
+}
+
+// ─────────── Composer (user → Supervisor) ───────────
+
+.composer {
+  flex-shrink: 0;
+  border-top: 1px solid var(--vscode-panel-border);
+  padding: 8px 10px;
+  background: var(--vscode-editor-background);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.composerInput {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--vscode-input-border);
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: var(--vscode-editor-font-family, ui-monospace, monospace);
+  line-height: 1.5;
+  resize: vertical;
+  box-sizing: border-box;
+  min-height: 60px;
+
+  &:focus {
+    outline: 1px solid var(--vscode-focusBorder);
+  }
+}
+
+.composerActions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.composerHint {
+  font-size: 10px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.composerSendButton {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  border: none;
+  border-radius: 4px;
+  padding: 4px 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+
+  &:hover:not(:disabled) {
+    background: var(--vscode-button-hoverBackground);
+  }
+
+  &:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+}
+
+// ─────────── Toolbar at top of right pane ───────────
+
+.paneToolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  flex-shrink: 0;
+}

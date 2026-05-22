@@ -26,6 +26,12 @@
 import { createInterface } from 'readline';
 import { handleClaudeCommand } from './channels/claude-channel.js';
 import { handleCodexCommand } from './channels/codex-channel.js';
+import {
+  startSupervisorSession,
+  postEventToSupervisor,
+  stopSupervisorSession,
+  stopAllSupervisorSessions,
+} from './channels/supervisor-channel.js';
 import { loadClaudeSdk, isClaudeSdkAvailable } from './utils/sdk-loader.js';
 import {
   sendMessagePersistent,
@@ -53,7 +59,8 @@ injectNetworkEnvVars();
 // =============================================================================
 
 // NOTE: Keep in sync with package.json version when updating.
-const DAEMON_VERSION = '1.0.0';
+const DAEMON_VERSION = '1.0.0-supervisor';
+const SUPERVISOR_SUPPORT = true;
 
 // =============================================================================
 // State
@@ -271,6 +278,7 @@ async function processRequest(request) {
 
   // --- Graceful shutdown ---
   if (method === 'shutdown') {
+    await stopAllSupervisorSessions();
     await shutdownPersistentRuntimes();
     sendDaemonEvent('shutdown', { reason: 'requested' });
     writeRawLine({ id: id || '0', done: true, success: true });
@@ -329,6 +337,19 @@ async function processRequest(request) {
       await preconnectPersistent(stdinData);
     } else if (provider === 'claude' && command === 'resetRuntime') {
       await resetRuntimePersistent(stdinData);
+    } else if (provider === 'supervisor') {
+      // Supervisor commands: start / postEvent / stop.
+      // They share the same NDJSON envelope; output (ACTION lines) is written
+      // via the standard process.stdout, which gets tagged with the request id.
+      if (command === 'start') {
+        await startSupervisorSession(stdinData);
+      } else if (command === 'postEvent') {
+        await postEventToSupervisor(stdinData);
+      } else if (command === 'stop') {
+        await stopSupervisorSession(stdinData);
+      } else {
+        throw new Error(`Unknown supervisor command: ${command}`);
+      }
     } else {
       // Dispatch to the existing handlers for non-send commands.
       switch (provider) {
@@ -421,7 +442,11 @@ async function processRequest(request) {
   sendDaemonEvent('ready', {
     pid: process.pid,
     sdkPreloaded,
+    supervisorSupport: SUPERVISOR_SUPPORT,
   });
+  // Print a clearly grep-able marker so users diagnosing "is the new daemon
+  // actually running?" can verify in idea.log.
+  _originalStderrWrite('[daemon] supervisor channel: LOADED (v' + DAEMON_VERSION + ')\n', 'utf8');
 
   // --- Listen for requests on stdin ---
   const rl = createInterface({

@@ -22,6 +22,8 @@
     "add": "添加",
     "back": "返回",
     "close": "关闭",
+    "enable": "启用",
+    "manage": "管理",
     "newSession": "新会话",
     "newTab": "新标签页",
     "history": "历史记录",
@@ -431,6 +433,41 @@
         "download": "下载 mutagen v{{version}}",
         "reinstall": "重新下载",
         "downloadUrl": "下载地址"
+      }
+    },
+    "supervisor": {
+      "title": "Supervisor 监工",
+      "subtitle": "配置多个可挂载的 Supervisor Agent，会话级随时启用、即用即弃",
+      "searchPlaceholder": "搜索...",
+      "newAgent": "新建 Agent",
+      "editAgent": "编辑 Agent",
+      "noAgents": "尚未配置任何 Supervisor",
+      "noAgentsCallToAction": "点击「新建 Agent」开始配置你的第一个监工",
+      "noMatches": "无匹配项",
+      "selectAgentToEdit": "在左侧选择一个 Agent 查看或编辑",
+      "defaultBadge": "默认",
+      "builtInBadge": "内置",
+      "setAsDefault": "设为默认",
+      "setAsDefaultTooltip": "启用会话 Supervisor 时优先勾选该 Agent",
+      "deleteConfirm": "确认删除「{{name}}」？此操作不可恢复。",
+      "fields": {
+        "name": "名称",
+        "namePlaceholder": "例如：Go 规范守卫",
+        "description": "描述（角色 + 规范定义）",
+        "descriptionPlaceholder": "你是 …，负责检查 …\n\n# 规范\n- ...\n\n# 行为\n- ...",
+        "model": "模型"
+      },
+      "templates": {
+        "insertTemplate": "插入模板",
+        "roleOnly": "纯职责式",
+        "roleWithRules": "职责 + 规范",
+        "complete": "完整版"
+      },
+      "toast": {
+        "addSuccess": "Supervisor 已添加",
+        "updateSuccess": "Supervisor 已更新",
+        "deleteSuccess": "Supervisor 已删除",
+        "opFailed": "操作失败"
       }
     },
     "other": {
@@ -1564,6 +1601,54 @@
     "enableDescription": "开启后，编辑器中当前打开的文件路径将发送给 AI。注意：仅传递文件路径，不会传递文件内容。",
     "enable": "开启",
     "cancel": "取消"
+  },
+  "chatInput": {
+    "supervisor": {
+      "label": "Supervisor",
+      "openTooltip": "启用 Supervisor 监工",
+      "activeTooltip": "已启用：{{name}}，点击切换",
+      "disable": "关闭",
+      "pickerTitle": "选择 Supervisor",
+      "pickerHint": "每个会话仅可绑定一个 Supervisor",
+      "noAgentsConfigured": "尚未配置 Supervisor，请到设置中创建",
+      "defaultBadge": "默认",
+      "roleCoordinator": "主调度",
+      "roleReviewer": "协审",
+      "manage": "管理 Agents"
+    }
+  },
+  "pairLayout": {
+    "paneTitle": "Supervisor 监工",
+    "closePane": "关闭监工",
+    "coordinator": "主调度",
+    "reviewer": "协审",
+    "waitingForMainAI": "等待主 AI 事件...",
+    "composerPrompt": "在下方输入框告诉 Supervisor 你的任务：方案在哪里、规范要求、期望结果。",
+    "thinking": "Supervisor 思考中... ({{seconds}}s)",
+    "stepProgress": "步骤 {{current}}/{{total}}",
+    "stats": {
+      "autoRecover": "自愈 {{count}} 次",
+      "escalate": "升级 {{count}} 次"
+    },
+    "action": {
+      "inject": "已注入指令到主 AI",
+      "retry": "自愈中",
+      "approve": "通过，进入下一步",
+      "escalate": "请用户决策",
+      "wait": "等待中"
+    },
+    "escalate": {
+      "title": "{{name}} 请求决策",
+      "defaultReason": "需要您决策"
+    },
+    "composer": {
+      "placeholder": "向 Supervisor 描述编码任务、方案路径、规范要求...\n例如: 方案在 docs/plans/get-user.md，按 Go 分层规范实现，跑通后再让我看\n\n提示: 可拖文件到此处自动插入 @路径",
+      "hint": "Enter 发送，Shift+Enter 换行 · 支持拖文件",
+      "send": "发送给 Supervisor"
+    },
+    "divider": {
+      "tooltip": "拖动调整左右比例 · 双击重置"
+    }
   },
   "rewind": {
     "title": "回溯文件到之前的状态",

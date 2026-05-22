@@ -55,6 +55,7 @@ public class CodemossSettingsService {
     private final CodexMcpServerManager codexMcpServerManager;
     private final WorkingDirectoryManager workingDirectoryManager;
     private final AgentManager agentManager;
+    private final SupervisorAgentManager supervisorAgentManager;
     private final SkillManager skillManager;
     private final McpServerManager mcpServerManager;
     private final ProviderManager providerManager;
@@ -89,6 +90,14 @@ public class CodemossSettingsService {
 
         // Initialize AgentManager
         this.agentManager = new AgentManager(gson, pathManager);
+
+        // Initialize SupervisorAgentManager
+        this.supervisorAgentManager = new SupervisorAgentManager(gson, pathManager);
+        try {
+            this.supervisorAgentManager.ensureDefaults();
+        } catch (IOException e) {
+            LOG.warn("[CodemossSettings] Failed to seed default supervisor agents: " + e.getMessage());
+        }
 
         // Initialize SkillManager
         this.skillManager = new SkillManager(
@@ -789,6 +798,40 @@ public class CodemossSettingsService {
 
     public AgentManager getAgentManager() {
         return agentManager;
+    }
+
+    // ==================== Supervisor Agents Management ====================
+
+    public List<JsonObject> getSupervisorAgents() throws IOException {
+        return supervisorAgentManager.getAgents();
+    }
+
+    public JsonObject getSupervisorAgent(String id) throws IOException {
+        return supervisorAgentManager.getAgent(id);
+    }
+
+    public void addSupervisorAgent(JsonObject agent) throws IOException {
+        supervisorAgentManager.addAgent(agent);
+    }
+
+    public void updateSupervisorAgent(String id, JsonObject updates) throws IOException {
+        supervisorAgentManager.updateAgent(id, updates);
+    }
+
+    public boolean deleteSupervisorAgent(String id) throws IOException {
+        return supervisorAgentManager.deleteAgent(id);
+    }
+
+    public String getDefaultSupervisorAgentId() throws IOException {
+        return supervisorAgentManager.getDefaultAgentId();
+    }
+
+    public void setDefaultSupervisorAgentId(String agentId) throws IOException {
+        supervisorAgentManager.setDefaultAgentId(agentId);
+    }
+
+    public SupervisorAgentManager getSupervisorAgentManager() {
+        return supervisorAgentManager;
     }
 
     // ==================== Prompts Management ====================

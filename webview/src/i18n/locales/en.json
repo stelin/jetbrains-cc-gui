@@ -8,7 +8,9 @@
       "syncingWithSize": "Syncing {{done}}/{{total}}",
       "disconnected": "Disconnected",
       "conflict": "{{n}} conflict(s)",
-      "error": "Sync error"
+      "error": "Sync error",
+      "expand": "Show sync details",
+      "collapse": "Hide sync details"
     }
   },
   "common": {
@@ -1624,7 +1626,9 @@
     "stepProgress": "Step {{current}}/{{total}}",
     "stats": {
       "autoRecover": "{{count}} auto-recover",
-      "escalate": "{{count}} escalate"
+      "escalate": "{{count}} escalate",
+      "decisionTotal": "{{count}} self-decision",
+      "decisionReviewFlag": "{{count}} to review"
     },
     "action": {
       "inject": "Injected prompt to main AI",
@@ -1633,9 +1637,34 @@
       "escalate": "Awaiting user decision",
       "wait": "Waiting"
     },
+    "decision": {
+      "step": "Step {{n}}",
+      "category": {
+        "A": "self-decided",
+        "B": "grey-zone"
+      },
+      "planExcerpt": "Plan",
+      "ambiguity": "Ambiguity",
+      "choice": "Choice",
+      "rationale": "Rationale",
+      "scope": "Scope",
+      "scopeValue": {
+        "local": "local",
+        "this-file": "this file",
+        "cross-file": "cross-file"
+      },
+      "reviewFlag": "Suggest human review"
+    },
     "escalate": {
       "title": "{{name}} requests a decision",
-      "defaultReason": "Decision required"
+      "defaultReason": "Decision required",
+      "summary": {
+        "stepsCompleted": "Steps completed: {{done}} / {{total}}",
+        "decisionTotal": "Self-decisions: {{count}}",
+        "decisionReviewFlag": "{{count}} flagged for review",
+        "autoRecover": "API auto-recoveries: {{count}}",
+        "reviewReject": "Review fixes: {{count}}"
+      }
     },
     "composer": {
       "placeholder": "Tell the Supervisor what to coordinate — design doc path, coding rules, success criteria...\nExample: Plan is at docs/plans/get-user.md, follow Go layering rules, ping me when done.\n\nTip: drop a file here to insert its @path.",

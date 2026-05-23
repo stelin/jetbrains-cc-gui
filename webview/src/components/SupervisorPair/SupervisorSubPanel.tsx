@@ -9,10 +9,21 @@ import styles from './style.module.less';
  * dev preview can pass synthetic samples to verify rendering.
  * Phase B: populated from Event Bus stream coming through Java.
  */
+export interface SupervisorDecisionRecord {
+  step: number;
+  category: 'A' | 'B';
+  plan_excerpt: string;
+  ambiguity: string;
+  choice: string;
+  rationale: string;
+  scope: string;
+  review_flag?: boolean;
+}
+
 export interface SupervisorLogEntry {
   id: string;
   /** kind decides icon + color */
-  kind: 'think' | 'reasoning' | 'ok' | 'warn' | 'error' | 'action' | 'user';
+  kind: 'think' | 'reasoning' | 'ok' | 'warn' | 'error' | 'action' | 'user' | 'decision';
   /** Free text content (for think/reasoning/ok/warn/error/user kinds). */
   text?: string;
   /** Action payload (only when kind === 'action'). */
@@ -21,6 +32,12 @@ export interface SupervisorLogEntry {
     summary?: string;
     detail?: string;
   };
+  /**
+   * v3 self-decision payload (only when kind === 'decision'). Rendered as a
+   * standalone foldable card under the chat stream — sits between supervisor
+   * bubbles so the human reviewer can scrub the micro-judgments later.
+   */
+  decision?: SupervisorDecisionRecord;
   /**
    * Optional grouping key: entries with the same {@code groupKey} belong to
    * the same Supervisor "turn" and render inside a single message bubble.
@@ -61,7 +78,8 @@ type MessageGroup =
       /** Trailing action card */
       action?: SupervisorLogEntry['action'];
     }
-  | { kind: 'status'; id: string; iconKind: 'ok' | 'warn' | 'error'; text: string };
+  | { kind: 'status'; id: string; iconKind: 'ok' | 'warn' | 'error'; text: string }
+  | { kind: 'decision'; id: string; decision: SupervisorDecisionRecord };
 
 /**
  * Group entries into renderable messages.
@@ -84,6 +102,10 @@ function groupEntries(entries: SupervisorLogEntry[]): MessageGroup[] {
     }
     if (e.kind === 'ok' || e.kind === 'warn' || e.kind === 'error') {
       groups.push({ kind: 'status', id: e.id, iconKind: e.kind, text: e.text ?? '' });
+      continue;
+    }
+    if (e.kind === 'decision' && e.decision) {
+      groups.push({ kind: 'decision', id: e.id, decision: e.decision });
       continue;
     }
     if (e.kind === 'reasoning' || e.kind === 'think' || e.kind === 'action') {
@@ -111,6 +133,64 @@ const STATUS_ICONS: Record<'ok' | 'warn' | 'error', { icon: string; cls: string 
   warn:  { icon: 'codicon-bell',  cls: styles.eventWarn },
   error: { icon: 'codicon-error', cls: styles.eventError },
 };
+
+/**
+ * Self-decision card. Foldable summary row + expanded full record. The
+ * `review_flag=true` variant gets a warning border so reviewers can spot the
+ * grey-zone calls (category B) at a glance.
+ */
+function DecisionCard({ decision }: { decision: SupervisorDecisionRecord }) {
+  const { t } = useTranslation();
+  const [expanded, setExpanded] = useState(false);
+  const flag = decision.review_flag === true;
+  const cardCls = `${styles.decisionCard} ${flag ? styles.decisionFlagged : ''}`;
+  const scopeLabel = t(
+    `pairLayout.decision.scopeValue.${decision.scope}`,
+    { defaultValue: decision.scope }
+  );
+  const categoryLabel = t(`pairLayout.decision.category.${decision.category}`);
+
+  return (
+    <div className={cardCls}>
+      <div className={styles.decisionHead} onClick={() => setExpanded((v) => !v)}>
+        <span className={styles.decisionIcon}>{flag ? '⚠️' : '📝'}</span>
+        <span className={styles.decisionStep}>
+          {t('pairLayout.decision.step', { n: decision.step })}
+        </span>
+        <span className={`${styles.decisionBadge} ${flag ? styles.decisionBadgeFlag : ''}`}>
+          {categoryLabel}
+        </span>
+        <span className={styles.decisionChoice}>{decision.choice}</span>
+        <span className={styles.decisionChevron}>{expanded ? '▼' : '▶'}</span>
+      </div>
+      {expanded && (
+        <div className={styles.decisionBody}>
+          <DecisionField label={t('pairLayout.decision.planExcerpt')} value={decision.plan_excerpt} />
+          <DecisionField label={t('pairLayout.decision.ambiguity')} value={decision.ambiguity} />
+          <DecisionField label={t('pairLayout.decision.choice')} value={decision.choice} />
+          <DecisionField label={t('pairLayout.decision.rationale')} value={decision.rationale} />
+          <DecisionField label={t('pairLayout.decision.scope')} value={scopeLabel} />
+          {flag && (
+            <div className={styles.decisionFlagNote}>
+              <span className="codicon codicon-warning" />
+              <span>{t('pairLayout.decision.reviewFlag')}</span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DecisionField({ label, value }: { label: string; value: string }) {
+  if (!value) return null;
+  return (
+    <div className={styles.decisionRow}>
+      <span className={styles.decisionFieldLabel}>{label}</span>
+      <span className={styles.decisionFieldValue}>{value}</span>
+    </div>
+  );
+}
 
 /**
  * Foldable Supervisor message bubble. Mirrors the main-AI message render:
@@ -237,6 +317,9 @@ export default function SupervisorSubPanel({
                 <span>{g.text}</span>
               </div>
             );
+          }
+          if (g.kind === 'decision') {
+            return <DecisionCard key={g.id} decision={g.decision} />;
           }
           // supervisor
           return (

@@ -193,6 +193,8 @@ function inventoryString(s: SyncStatus): string {
   return parts.join(' / ');
 }
 
+const COLLAPSED_KEY = 'cc-gui.syncStatusBar.collapsed';
+
 export function SyncStatusBar() {
   const { t } = useTranslation();
   const [enabled, setEnabled] = useState(false);
@@ -200,8 +202,29 @@ export function SyncStatusBar() {
   const [config, setConfig] = useState<SyncConfig>({ enabled: false });
   const [log, setLog] = useState<LogEntry[]>([]);
   const [, setTick] = useState(0);
+  // Whether the banner is collapsed to just the one-line status row. Persisted
+  // so the user's preference survives reloads — the bar used to always render
+  // path + log lines which got noisy during long sessions.
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      return window.localStorage.getItem(COLLAPSED_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
   const lastSignature = useRef<string>('');
   const lastStatus = useRef<SyncStatus | null>(null);
+
+  const toggleCollapsed = () => {
+    setCollapsed((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(COLLAPSED_KEY, next ? '1' : '0');
+      } catch { /* ignore */ }
+      return next;
+    });
+  };
 
   useEffect(() => {
     ensureRemoteSyncBridge();
@@ -278,13 +301,25 @@ export function SyncStatusBar() {
           <span className={styles.detail}>{status.message}</span>
         )}
         <span className={styles.timeAgo}>{timeAgo(status?.updatedAt)}</span>
+        <button
+          type="button"
+          className={styles.toggleButton}
+          onClick={toggleCollapsed}
+          title={collapsed
+            ? t('chatHeader.sync.expand', 'Show path & log')
+            : t('chatHeader.sync.collapse', 'Hide path & log')}
+          aria-label={collapsed ? 'Expand sync details' : 'Collapse sync details'}
+          aria-expanded={!collapsed}
+        >
+          <span className={`codicon ${collapsed ? 'codicon-chevron-down' : 'codicon-chevron-up'}`} />
+        </button>
       </div>
-      {showProgress && (
+      {!collapsed && showProgress && (
         <div className={styles.progressBar}>
           <div className={styles.progressFill} style={{ width: `${pct}%` }} />
         </div>
       )}
-      {(config.localPath || remoteLabel) && (
+      {!collapsed && (config.localPath || remoteLabel) && (
         <div className={styles.pathRow}>
           <span className={styles.pathSeg} title={config.localPath}>
             {shortenPath(config.localPath || '')}
@@ -295,7 +330,7 @@ export function SyncStatusBar() {
           </span>
         </div>
       )}
-      {showLog && (
+      {!collapsed && showLog && (
         <div className={styles.console}>
           {log.map((e, i) => (
             <div className={styles.consoleLine} key={i}>

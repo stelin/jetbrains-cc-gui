@@ -121,6 +121,8 @@ export default function PairLayout({ children, status }: PairLayoutProps) {
             reason={pendingEscalate.reason ?? ''}
             question={pendingEscalate.question}
             choices={escalateChoices}
+            stats={pendingEscalate.stats}
+            steps={pendingEscalate.steps}
             onSelect={(choiceId) => respondToEscalate(choiceId)}
             onCancel={dismissEscalate}
           />
@@ -165,6 +167,8 @@ export default function PairLayout({ children, status }: PairLayoutProps) {
           reason={pendingEscalate.reason ?? t('pairLayout.escalate.defaultReason', 'Decision required')}
           question={pendingEscalate.question}
           choices={escalateChoices}
+          stats={pendingEscalate.stats}
+          steps={pendingEscalate.steps}
           onSelect={(choiceId) => respondToEscalate(choiceId)}
           onCancel={dismissEscalate}
         />

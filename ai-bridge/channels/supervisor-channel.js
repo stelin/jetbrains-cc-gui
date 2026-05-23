@@ -34,6 +34,12 @@ import {
 
 const DEFAULT_MODEL = 'claude-haiku-4-5-20251001';
 
+// v3: read-only file tools granted to the supervisor so it can perform
+// in-turn review (Glob to locate produced files, Read to inspect contents,
+// Grep to flag TODO/FIXME/stub functions). Write/Edit/Bash remain forbidden
+// — supervisors decide, the main AI edits.
+const SUPERVISOR_READ_TOOLS = ['Read', 'Glob', 'Grep'];
+
 /** @type {Map<string, SupervisorRuntime>} */
 const runtimes = new Map();
 
@@ -120,10 +126,17 @@ function buildSystemPrompt({ name, description, planContent, specContent }) {
         '',
         '若不确定下一步，调用 `emit_action(action="wait")`——**绝不可以只输出文字不调用工具**。',
         '',
+        '# 你可用的只读工具',
+        '除 `emit_action` 外，你拥有 **只读** 文件工具：`Read`、`Glob`、`Grep`。',
+        '- review 时**必须**亲自打开本步骤涉及的文件：Glob 找路径 → Read 读关键段 → Grep 检查 TODO / FIXME / 桩函数 / 假数据。',
+        '- 不要只信主 AI 的自述。主 AI 说"我加了错误处理"——你必须 Read 验证。',
+        '- 一个 turn 内可以多次调用文件工具，最后调用 **一次** `emit_action` 收尾。',
+        '- 你**没有**写工具——不能调用 Edit / Write / Bash。修改代码靠 inject_prompt 让主 AI 做。',
+        '',
         '# 行为约束',
         '- 方案 plan.md 是标准答案。主 AI 不能擅自偏离；偏离时升级用户（escalate_to_human）或要求修正（inject_prompt）。',
         '- 一轮只调用一次 emit_action。',
-        '- 不要执行其它工具——你只有 emit_action 一个工具可用。'
+        '- 文件工具仅用于 review 检查产出，不要用来探查无关代码。'
     );
 
     return sections.join('\n');
@@ -182,8 +195,14 @@ export async function startSupervisorSession(params) {
         runtime.lastCapturedAction = action;
     });
 
-    // Allow only emit_action by default; callers may opt-in to extra tools.
-    const allowedToolList = [QUALIFIED_EMIT_ACTION, ...runtime.allowedTools];
+    // Allow emit_action + read-only file tools by default; callers may opt-in
+    // to extra tools. Read/Glob/Grep are required by the v3 supervisor prompt
+    // to perform in-turn code review (see SUPERVISOR_READ_TOOLS comment).
+    const allowedToolList = [
+        QUALIFIED_EMIT_ACTION,
+        ...SUPERVISOR_READ_TOOLS,
+        ...runtime.allowedTools,
+    ];
 
     // SDK options. Supervisor judgment-only: no project-scoped settings, no
     // file checkpointing. We do still pass a cwd because the SDK requires one.
@@ -206,12 +225,15 @@ export async function startSupervisorSession(params) {
                 if (toolName === QUALIFIED_EMIT_ACTION) {
                     return { behavior: 'allow' };
                 }
+                if (SUPERVISOR_READ_TOOLS.includes(toolName)) {
+                    return { behavior: 'allow' };
+                }
                 if (runtime.allowedTools.includes(toolName)) {
                     return { behavior: 'allow' };
                 }
                 return {
                     behavior: 'deny',
-                    message: `Supervisor sessions may only call ${QUALIFIED_EMIT_ACTION}.`,
+                    message: `Supervisor sessions may only call ${QUALIFIED_EMIT_ACTION} or read-only file tools (Read/Glob/Grep).`,
                 };
             },
         },

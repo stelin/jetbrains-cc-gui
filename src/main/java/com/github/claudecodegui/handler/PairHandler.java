@@ -42,7 +42,9 @@ public class PairHandler extends BaseMessageHandler {
             "pair_start",
             "pair_stop",
             "pair_human_response",
-            "pair_send_user_input"
+            "pair_send_user_input",
+            "pair_set_model",
+            "pair_set_reasoning"
     };
 
     private final Gson gson;
@@ -71,6 +73,12 @@ public class PairHandler extends BaseMessageHandler {
                 return true;
             case "pair_send_user_input":
                 handleUserInput(content);
+                return true;
+            case "pair_set_model":
+                handleSetModel(content);
+                return true;
+            case "pair_set_reasoning":
+                handleSetReasoning(content);
                 return true;
             default:
                 return false;
@@ -157,6 +165,86 @@ public class PairHandler extends BaseMessageHandler {
             LOG.warn("[PairHandler] pair_stop failed: " + e.getMessage());
             sendError("pair_stop", e.getMessage());
         }
+    }
+
+    /**
+     * Right-pane composer model picker → update the model the Supervisor uses
+     * on its next restart. The supervisor channel has no live setModel
+     * protocol yet, so this does NOT hot-swap — the new value is picked up
+     * when {@code EventBus.restartSupervisor()} runs (daemon recovery, or
+     * when the user toggles Pair off and back on).
+     *
+     * <p>Returning a hard error here would surface a red toast on every model
+     * tweak, so we accept the request optimistically and just log if we
+     * can't find a matching pair.
+     */
+    private void handleSetModel(String content) {
+        try {
+            JsonObject data = gson.fromJson(content, JsonObject.class);
+            String pairId = data.has("pairId") && !data.get("pairId").isJsonNull()
+                    ? data.get("pairId").getAsString() : "";
+            String model = data.has("model") && !data.get("model").isJsonNull()
+                    ? data.get("model").getAsString() : "";
+
+            PairSession session = resolvePair(pairId);
+            if (session == null) {
+                LOG.info("[PairHandler] pair_set_model ignored — no active pair for id=" + pairId);
+                return;
+            }
+            session.setModel(model);
+            LOG.info("[PairHandler] pair_set_model recorded for pair=" + session.getPairId()
+                    + " model=" + (model.isEmpty() ? "(default)" : model)
+                    + " — applies on next supervisor restart");
+        } catch (Exception e) {
+            LOG.warn("[PairHandler] pair_set_model failed: "
+                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getName()), e);
+            sendError("pair_set_model",
+                    e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Right-pane composer reasoning picker → like {@link #handleSetModel}, this
+     * only stages the value; the supervisor channel has no setReasoning
+     * protocol yet, so the new effort takes effect on next supervisor restart.
+     */
+    private void handleSetReasoning(String content) {
+        try {
+            JsonObject data = gson.fromJson(content, JsonObject.class);
+            String pairId = data.has("pairId") && !data.get("pairId").isJsonNull()
+                    ? data.get("pairId").getAsString() : "";
+            String effort = data.has("effort") && !data.get("effort").isJsonNull()
+                    ? data.get("effort").getAsString() : "";
+
+            PairSession session = resolvePair(pairId);
+            if (session == null) {
+                LOG.info("[PairHandler] pair_set_reasoning ignored — no active pair for id=" + pairId);
+                return;
+            }
+            session.setReasoningEffort(effort);
+            LOG.info("[PairHandler] pair_set_reasoning recorded for pair=" + session.getPairId()
+                    + " effort=" + (effort.isEmpty() ? "(default)" : effort)
+                    + " — applies on next supervisor restart");
+        } catch (Exception e) {
+            LOG.warn("[PairHandler] pair_set_reasoning failed: "
+                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getName()), e);
+            sendError("pair_set_reasoning",
+                    e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Look up an active pair by id, falling back to the most-recently-started
+     * pair when the webview didn't track the id (mirrors handleStop / handleUserInput).
+     */
+    private PairSession resolvePair(String pairId) {
+        PairSessionManager mgr = PairSessionManager.getInstance(context.getProject());
+        if (pairId == null || pairId.isEmpty()) {
+            return mgr.getActivePairs().stream()
+                    .reduce((a, b) -> a.getStartedAt() > b.getStartedAt() ? a : b)
+                    .orElse(null);
+        }
+        return mgr.get(pairId);
     }
 
     private void handleUserInput(String content) {

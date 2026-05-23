@@ -76,6 +76,25 @@ function buildEmitActionSchema(z) {
         mark_step_complete: z.number().optional().describe(
             'Used when action is approve_and_continue. Step index to mark as done.'
         ),
+        // v3 self-decision log. Can be attached to any action when supervisor
+        // made A/B-level adjustments this turn. C-level must escalate, NOT be
+        // recorded here — enforced by the `category` enum below.
+        decisions: z.array(z.object({
+            step: z.number().describe('Plan step number (0 for the discovery turn).'),
+            category: z.enum(['A', 'B']).describe(
+                'A=self-decidable detail; B=grey-zone (auto review_flag=true). C-level decisions must escalate, NOT be recorded here.'
+            ),
+            plan_excerpt: z.string().describe('Original plan text (one sentence).'),
+            ambiguity: z.string().describe('The ambiguity or gap in the plan (one sentence).'),
+            choice: z.string().describe('The choice you made (one sentence).'),
+            rationale: z.string().describe('Why you chose this (one sentence).'),
+            scope: z.string().describe('"local" | "this-file" | "cross-file".'),
+            review_flag: z.boolean().optional().describe(
+                'Mark for mandatory human review. Forced true for category B.'
+            ),
+        })).optional().describe(
+            'Optional self-decision records. Attach when supervisor made any A/B-level adjustments this turn.'
+        ),
     };
 }
 
@@ -130,6 +149,21 @@ export function normalizeAction(args) {
         case 'wait':
         default:
             break;
+    }
+
+    // v3: decisions[] can ride along any action type. Force review_flag=true
+    // for category B (grey-zone) so the UI always highlights them.
+    if (Array.isArray(args.decisions) && args.decisions.length > 0) {
+        payload.decisions = args.decisions.map((d) => ({
+            step: typeof d.step === 'number' ? d.step : 0,
+            category: d.category,
+            plan_excerpt: String(d.plan_excerpt || ''),
+            ambiguity: String(d.ambiguity || ''),
+            choice: String(d.choice || ''),
+            rationale: String(d.rationale || ''),
+            scope: String(d.scope || 'local'),
+            review_flag: d.category === 'B' ? true : (d.review_flag === true),
+        }));
     }
 
     return {

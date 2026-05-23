@@ -9,6 +9,7 @@ import java.io.File;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -271,18 +272,25 @@ public class SupervisorAgentManager {
         return null;
     }
 
+    /** Legacy built-in agent ids replaced by v3's single code-supervisor. */
+    private static final String[] LEGACY_BUILTIN_IDS = { "full-auto", "go-strict", "security" };
+
     /**
-     * Ensure the 3 built-in supervisor agents exist, and refresh their
-     * description to the current plugin's preset if they look stale.
+     * Ensure the single built-in supervisor agent ("code-supervisor") exists,
+     * and refresh its description to the current plugin's preset if stale.
      *
-     * <p>"Stale" rule: an agent whose {@code builtIn==true} and whose
-     * description doesn't yet contain the current preset's first-line marker
-     * will be replaced — this lets plugin updates ship improved persona text
-     * without forcing the user to manually copy it from the docs.
+     * <p>v3 migration: legacy built-in agents (full-auto / go-strict /
+     * security) that are still {@code builtIn=true} get removed — they've
+     * been collapsed into a single code-supervisor persona. User-customised
+     * copies (where {@code builtIn} was unset) are preserved untouched.
      *
-     * <p>User-modified or user-created agents are never touched. To opt out
-     * of refresh, simply un-set {@code builtIn} on the agent (then it becomes
-     * "owned" by the user).
+     * <p>"Stale" rule: a built-in agent whose description doesn't contain
+     * the current preset's first-line marker is refreshed — this lets plugin
+     * updates ship improved persona text without forcing the user to copy
+     * it from the docs.
+     *
+     * <p>To opt out of refresh, un-set {@code builtIn} on the agent (then
+     * it becomes "owned" by the user).
      */
     public void ensureDefaults() throws IOException {
         JsonObject config = readConfig();
@@ -290,24 +298,34 @@ public class SupervisorAgentManager {
         long now = System.currentTimeMillis();
         boolean dirty = false;
 
-        dirty |= ensureOrRefresh(agents, "full-auto",
-                "全自动监工 / Full Auto",
-                PRESET_FULL_AUTO_DESCRIPTION,
+        // v3 migration: drop legacy built-in agents superseded by code-supervisor.
+        for (String legacyId : LEGACY_BUILTIN_IDS) {
+            if (!agents.has(legacyId)) continue;
+            JsonObject legacy = agents.getAsJsonObject(legacyId);
+            boolean wasBuiltIn = legacy.has("builtIn")
+                    && !legacy.get("builtIn").isJsonNull()
+                    && legacy.get("builtIn").getAsBoolean();
+            if (wasBuiltIn) {
+                agents.remove(legacyId);
+                dirty = true;
+                LOG.info("[SupervisorAgentManager] Removed legacy built-in agent: " + legacyId);
+            }
+        }
+
+        dirty |= ensureOrRefresh(agents, "code-supervisor",
+                "编码监督者 / Code Supervisor",
+                loadPreset("code-supervisor"),
                 DEFAULT_MODEL,
                 now);
-        dirty |= ensureOrRefresh(agents, "go-strict",
-                "Go 规范守卫 / Go Strict",
-                PRESET_GO_STRICT_DESCRIPTION,
-                DEFAULT_MODEL,
-                now + 1);
-        dirty |= ensureOrRefresh(agents, "security",
-                "安全审查员 / Security",
-                PRESET_SECURITY_DESCRIPTION,
-                "claude-sonnet-4-6",
-                now + 2);
 
-        if (!config.has("defaultAgentId")) {
-            config.addProperty("defaultAgentId", "full-auto");
+        // Default points at code-supervisor unless the user picked something
+        // else that still exists. If the previous default referenced a removed
+        // legacy id, redirect.
+        String currentDefault = config.has("defaultAgentId") && !config.get("defaultAgentId").isJsonNull()
+                ? config.get("defaultAgentId").getAsString() : null;
+        boolean defaultMissing = currentDefault == null || !agents.has(currentDefault);
+        if (defaultMissing) {
+            config.addProperty("defaultAgentId", "code-supervisor");
             dirty = true;
         }
 
@@ -318,11 +336,38 @@ public class SupervisorAgentManager {
     }
 
     /**
+     * Load a built-in supervisor persona from the classpath at
+     * {@code /supervisor/<name>.md}. Returns empty string on miss/error;
+     * {@link #ensureOrRefresh} treats empty preset as a no-op.
+     */
+    private static String loadPreset(String name) {
+        String path = "/supervisor/" + name + ".md";
+        try (InputStream is = SupervisorAgentManager.class.getResourceAsStream(path)) {
+            if (is == null) {
+                LOG.warn("[SupervisorAgentManager] Preset resource not found: " + path);
+                return "";
+            }
+            return new String(is.readAllBytes(), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            LOG.warn("[SupervisorAgentManager] Failed to load preset " + path + ": " + e.getMessage());
+            return "";
+        }
+    }
+
+    /**
      * Insert or refresh a built-in agent in place.
      * @return true if the agents object was mutated (caller decides whether to write).
      */
     private boolean ensureOrRefresh(JsonObject agents, String id, String name,
                                     String preset, String model, long ts) {
+        // Defensive: an empty preset (e.g. resource lookup failed at runtime)
+        // would yield an empty marker that matches every existing description
+        // and silently skip refresh forever. Treat as no-op instead.
+        if (preset == null || preset.isEmpty()) {
+            LOG.warn("[SupervisorAgentManager] Empty preset for: " + id + " — skipping ensure/refresh");
+            return false;
+        }
+
         // First-line marker of the current preset — used to detect "user has the new copy".
         int newlineIdx = preset.indexOf('\n');
         String marker = newlineIdx > 0 ? preset.substring(0, newlineIdx) : preset;
@@ -375,8 +420,15 @@ public class SupervisorAgentManager {
         return agent;
     }
 
-    // ==================== Preset descriptions ====================
-
+    // v3: built-in supervisor personas live as classpath resources under
+    // /supervisor/<id>.md. The `code-supervisor` preset mirrors the doc at
+    // docs/supervisor/code.md so the markdown source-of-truth and the
+    // packaged persona stay in lock-step. Loaded lazily via loadPreset().
+    //
+    // Legacy v2 PRESET_* constants below are no longer referenced; they're
+    // retained for one release as a reference for users migrating off the
+    // old built-ins, and will be removed once the migration window closes.
+    @SuppressWarnings("unused")
     private static final String PRESET_FULL_AUTO_DESCRIPTION =
             "你是任务调度监工兼代码审查员（v2）。严格按用户提供的方案推进主 AI，并在每一步完成后强制 review。\n\n" +
             "# 核心铁律\n" +
@@ -428,6 +480,7 @@ public class SupervisorAgentManager {
             "# 输出格式\n" +
             "每次决策只输出一个 ACTION，附简短 reason。不要长篇大论。\n";
 
+    @SuppressWarnings("unused")
     private static final String PRESET_GO_STRICT_DESCRIPTION =
             "你是 Go 代码严格审查员。\n\n" +
             "# 强制规范\n" +
@@ -442,6 +495,7 @@ public class SupervisorAgentManager {
             "- 全部通过 → approve_and_continue\n" +
             "- 发现违规 → inject_prompt，反馈中必须包含：违反的规范名、文件:行号、建议改法\n";
 
+    @SuppressWarnings("unused")
     private static final String PRESET_SECURITY_DESCRIPTION =
             "你是代码安全审查员。\n\n" +
             "# 重点关注\n" +

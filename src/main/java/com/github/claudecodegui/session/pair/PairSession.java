@@ -29,10 +29,15 @@ public class PairSession {
     // Snapshot of the parameters that started the daemon-side supervisor runtime.
     // EventBus uses these to lazily re-run supervisor.start after a daemon restart
     // (in remote mode the Node process's in-memory runtime Map is lost on crash).
+    // `model` and `reasoningEffort` are mutable so the right-pane composer can
+    // change them mid-session; the new values are picked up on the next daemon
+    // lazy-restart (immediate hot-swap is not supported by the supervisor channel
+    // yet — would need a new supervisor.setModel daemon protocol).
     private final String agentDescription;
     private final String planContent;
     private final String projectSpec;
-    private final String model;
+    private volatile String model;
+    private volatile String reasoningEffort;
 
     private volatile EventBus eventBus;       // wired by PairSessionManager
     private volatile ActionRouter actionRouter;
@@ -89,6 +94,29 @@ public class PairSession {
     public String getPlanContent() { return planContent; }
     public String getProjectSpec() { return projectSpec; }
     public String getModel() { return model; }
+
+    /**
+     * Replace the model used on next supervisor restart. Pass null/empty to
+     * clear the override and fall back to the agent's configured default on
+     * the daemon side. Does NOT trigger an immediate restart — the new value
+     * takes effect when {@code EventBus.restartSupervisor()} fires next
+     * (typically on daemon crash recovery or when the user toggles the
+     * supervisor off/on).
+     */
+    public void setModel(String model) {
+        this.model = (model != null && !model.isEmpty()) ? model : null;
+    }
+
+    public String getReasoningEffort() { return reasoningEffort; }
+
+    /**
+     * Replace the reasoning-effort hint used on next supervisor restart.
+     * Like {@link #setModel(String)}, this is not hot-swapped — the daemon
+     * supervisor channel currently has no setReasoning protocol.
+     */
+    public void setReasoningEffort(String effort) {
+        this.reasoningEffort = (effort != null && !effort.isEmpty()) ? effort : null;
+    }
 
     /**
      * Current Supervisor agent ids (always size 1 in current iteration).

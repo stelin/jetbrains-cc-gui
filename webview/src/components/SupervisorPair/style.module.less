@@ -486,6 +486,125 @@
   word-break: break-word;
 }
 
+// ─────────── Decision card (v3 self-decision log) ───────────
+// Rendered as its own row in the chat stream. A category-B (grey-zone) entry
+// has `review_flag=true` and gets a warning border so the human reviewer can
+// spot it later when scrubbing the session.
+
+.decisionCard {
+  border: 1px solid var(--border-secondary);
+  background: var(--bg-elevated);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+}
+
+.decisionCard.decisionFlagged {
+  border-color: var(--color-warning);
+  background: var(--color-notice-warning-bg);
+}
+
+.decisionHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  user-select: none;
+
+  &:hover {
+    background: var(--bg-hover);
+  }
+}
+
+.decisionIcon {
+  flex-shrink: 0;
+  font-size: 14px;
+}
+
+.decisionStep {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.decisionBadge {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 2px;
+  background: var(--accent-primary);
+  color: var(--color-button-text);
+}
+
+.decisionBadge.decisionBadgeFlag {
+  background: var(--color-warning);
+}
+
+.decisionChoice {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.decisionChevron {
+  flex-shrink: 0;
+  font-size: 9px;
+  color: var(--text-muted);
+}
+
+.decisionBody {
+  padding: 6px 10px 8px;
+  border-top: 1px dashed var(--border-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.decisionRow {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  line-height: 1.5;
+  font-size: 11px;
+}
+
+.decisionFieldLabel {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-weight: 500;
+  min-width: 56px;
+}
+
+.decisionFieldValue {
+  flex: 1;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.decisionFlagNote {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 4px 6px;
+  background: var(--color-notice-warning-bg);
+  border: 1px solid var(--color-warning);
+  border-radius: 3px;
+  font-size: 11px;
+  color: var(--color-warning);
+
+  .codicon {
+    font-size: 12px;
+  }
+}
+
 // ─────────── Escalate dialog ───────────
 // Surfaced when Supervisor escalates a decision to the user. The previous
 // version used near-transparent backdrop + flat outlined buttons which read
@@ -554,6 +673,39 @@
   background: var(--bg-elevated);
   border-radius: 4px;
   border: 1px solid var(--border-secondary);
+}
+
+// v3: session summary block in escalate dialog. Populated only when stats are
+// attached to the escalate (verification at end-of-plan).
+.escalateSummary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-secondary);
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.escalateSummaryRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-primary);
+}
+
+.escalateSummaryLabel {
+  color: var(--text-primary);
+}
+
+.escalateSummaryFlag {
+  font-size: 11px;
+  color: var(--color-warning);
+  padding: 1px 6px;
+  border-radius: 2px;
+  border: 1px solid var(--color-warning);
+  background: var(--color-notice-warning-bg);
 }
 
 .escalateBody {
@@ -684,14 +836,16 @@
 // AI input's contenteditable div): same font-size, line-height, placeholder
 // color, and "no chrome" appearance so the card body matches.
 //
-// Height note: the left card carries a context bar (~24px) on top, so to keep
-// the overall card height visually aligned we give the textarea 5 lines of
-// min-height instead of the input-editable's 4 lines. The wrapper's max-height
-// (240px) still caps growth.
+// Height note: the left column stacks StatusPanel (task / subagent / edit
+// tabs ~40px) + context bar (~32px) + input-editable (4 lines) above its
+// toolbar — none of which exist on the right side. To make both columns
+// visually finish at the same baseline, give the supervisor textarea 8 lines
+// of min-height (≈ the missing 72px on top of the 5-line previous default).
+// The wrapper's max-height (240px) still caps growth.
 .supervisorTextarea {
   display: block;
   width: 100%;
-  min-height: calc(1.5em * 5);
+  min-height: calc(1.5em * 8);
   padding: 0;
   margin: 0;
   border: none;

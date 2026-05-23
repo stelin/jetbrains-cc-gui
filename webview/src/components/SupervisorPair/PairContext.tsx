@@ -30,6 +30,21 @@ export interface EscalateRequest {
   /** When non-empty, ActionRouter raised an amendment request rather than a regular escalate. */
   kind?: 'amendment_request';
   proposal?: string;
+  /**
+   * v3: session stats snapshot attached when ActionRouter dispatches a normal
+   * escalate (verification at end-of-plan). Rendered as the summary header in
+   * EscalateDialog so the user can see how the session went at a glance.
+   */
+  stats?: {
+    auto_recover_count?: number;
+    escalate_count?: number;
+    decision_count?: number;
+    decision_review_flag_count?: number;
+    review_reject_count?: number;
+    verify_fail_count?: number;
+  };
+  /** v3: step-level progress snapshot, paired with `stats`. */
+  steps?: Array<{ index?: number; status?: string }>;
 }
 
 interface PairContextValue {
@@ -287,6 +302,18 @@ export function PairProvider({ children }: PairProviderProps) {
         const agentId: string | undefined = evt?.supervisorId;
         if (!agentId) return;
 
+        // v3: a decision_record event carries a single self-decision entry
+        // outside the normal action stream. Each one is rendered as its own
+        // standalone card (not grouped under a supervisor message bubble).
+        if (evt?.kind === 'decision_record' && evt.decision && typeof evt.decision === 'object') {
+          appendEntry(agentId, {
+            id: `d_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            kind: 'decision',
+            decision: evt.decision,
+          });
+          return;
+        }
+
         const baseId = `m_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
         // Each turn is rendered as ONE supervisor message bubble carrying:
         //   - reasoning (foldable, when present)
@@ -374,6 +401,8 @@ export function PairProvider({ children }: PairProviderProps) {
           contextFiles: Array.isArray(payload.context_files) ? payload.context_files : undefined,
           kind: o?.kind,
           proposal: payload.proposal,
+          stats: o?.stats && typeof o.stats === 'object' ? o.stats : undefined,
+          steps: Array.isArray(o?.steps) ? o.steps : undefined,
         });
       } catch { /* ignore */ }
     };

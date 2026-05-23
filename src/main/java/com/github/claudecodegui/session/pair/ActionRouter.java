@@ -1,5 +1,7 @@
 package com.github.claudecodegui.session.pair;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.project.Project;
@@ -129,6 +131,11 @@ public class ActionRouter {
         JsonObject payload = action.has("payload") && action.get("payload").isJsonObject()
                 ? action.getAsJsonObject("payload") : new JsonObject();
 
+        // v3: a `decisions[]` array may ride along ANY action type. Process it
+        // before the action switch so counters and webview cards are updated
+        // even if the action itself is a no-op (e.g. wait).
+        dispatchDecisions(payload);
+
         switch (type) {
             case "inject_prompt":
                 handleInjectPrompt(payload, /*delaySec*/ 0);
@@ -147,6 +154,16 @@ public class ActionRouter {
                 break;
             case "escalate_to_human":
                 pair.getProgressManager().incrementCounter("escalate_count");
+                // v3: attach a stats/steps snapshot so the verification dialog
+                // can render a full session summary (counters increment first,
+                // so the snapshot already reflects this escalate).
+                JsonObject snapshot = pair.getProgressManager().snapshot();
+                if (snapshot.has("stats")) {
+                    action.add("stats", snapshot.get("stats"));
+                }
+                if (snapshot.has("steps")) {
+                    action.add("steps", snapshot.get("steps"));
+                }
                 webview.onEscalate(action);
                 break;
             case "request_amendment":
@@ -163,6 +180,45 @@ public class ActionRouter {
             default:
                 // intentionally no-op
                 break;
+        }
+    }
+
+    /**
+     * v3: surface each self-decision record as its own webview card so the user
+     * can scrub through the supervisor's micro-judgments after the session,
+     * and bump the running counters so the verification dialog reflects them.
+     *
+     * <p>Records are pushed individually (rather than as one combined payload)
+     * so the existing right-pane event log keeps its "one card per row"
+     * cadence — the renderer just needs to recognize the new {@code kind}.
+     */
+    private void dispatchDecisions(JsonObject payload) {
+        if (payload == null || !payload.has("decisions") || !payload.get("decisions").isJsonArray()) {
+            return;
+        }
+        JsonArray decisions = payload.getAsJsonArray("decisions");
+        for (JsonElement el : decisions) {
+            if (el == null || !el.isJsonObject()) continue;
+            JsonObject d = el.getAsJsonObject();
+
+            pair.getProgressManager().incrementCounter("decision_count");
+            boolean reviewFlag = d.has("review_flag")
+                    && !d.get("review_flag").isJsonNull()
+                    && d.get("review_flag").getAsBoolean();
+            if (reviewFlag) {
+                pair.getProgressManager().incrementCounter("decision_review_flag_count");
+            }
+
+            JsonObject evt = new JsonObject();
+            evt.addProperty("kind", "decision_record");
+            evt.addProperty("pairId", pair.getPairId());
+            evt.addProperty("supervisorId", pair.getAgentId());
+            evt.add("decision", d);
+            try {
+                webview.onActionEvent(evt);
+            } catch (Exception e) {
+                LOG.warn("[ActionRouter] decision push failed: " + e.getMessage());
+            }
         }
     }
 

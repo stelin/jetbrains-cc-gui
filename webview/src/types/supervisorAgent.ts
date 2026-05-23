@@ -10,8 +10,21 @@ export interface SupervisorAgent {
   name: string;
   /** Role + rules definition; used directly as system prompt body */
   description: string;
-  /** Claude model (default: haiku) */
+  /** Claude model (default: opus-4-7) */
   model?: string;
+  /**
+   * Per-agent default for the right-pane 1M-context toggle. PairContext seeds
+   * the global toggle from this on first activation; once the user toggles
+   * manually the persisted value wins.
+   */
+  defaultLongContext?: boolean;
+  /**
+   * Per-agent default reasoning-effort tier. PairContext seeds
+   * {@link SelectedSupervisor.role}=coordinator's reasoning entry from this
+   * on first activation; once the user picks a tier the per-agent value wins.
+   * Stored as the bare tier id (matches `ReasoningEffort` on the web side).
+   */
+  defaultReasoning?: string;
   /** Whether this is a system built-in persona */
   builtIn?: boolean;
   /** Creation timestamp */
@@ -58,4 +71,10 @@ export interface SelectedSupervisor {
   role: SupervisorRole;
   /** Default model from agent config; runtime override is tracked in PairContext. */
   model?: string;
+  /** Carried through from {@link SupervisorAgent.defaultLongContext} so PairContext
+   * can seed the 1M toggle on first activation. */
+  defaultLongContext?: boolean;
+  /** Carried through from {@link SupervisorAgent.defaultReasoning} so PairContext
+   * can seed the reasoning tier on first activation. */
+  defaultReasoning?: string;
 }

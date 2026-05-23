@@ -167,6 +167,8 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
           name: agent.name,
           role: 'coordinator',
           model: agent.model,
+          defaultLongContext: agent.defaultLongContext,
+          defaultReasoning: agent.defaultReasoning,
         },
       ];
       try {

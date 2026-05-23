@@ -80,6 +80,8 @@ export default function SupervisorToggle({ onChange, onOpenManager }: Supervisor
       name: agent.name,
       role: 'coordinator',
       model: agent.model,
+      defaultLongContext: agent.defaultLongContext,
+      defaultReasoning: agent.defaultReasoning,
     }];
     setSelected(next);
     setPickerOpen(false);

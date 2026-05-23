@@ -129,6 +129,37 @@ function trimHistory(list: ClaudeMessage[]): ClaudeMessage[] {
 }
 
 /**
+ * Whether a content block emitted on a user-role SDK message has anything for
+ * ContentBlockRenderer to display. Anything else (empty `text`, unrecognised
+ * SDK-internal markers, sidecar tool metadata) would land as an invisible
+ * blue square in the pane, so we drop it before constructing the bubble.
+ *
+ * Compaction makes this matter in practice: the Claude Agent SDK injects
+ * synthetic user messages around `compact_boundary` whose payload can be a
+ * single empty `text` block, and we used to render one empty bubble per such
+ * message — typically a pair right after auto-compact triggered.
+ */
+function isRenderableUserBlock(block: unknown): boolean {
+  if (!block || typeof block !== 'object') return false;
+  const b = block as { type?: string; text?: string; src?: string; fileName?: string; thinking?: string };
+  switch (b.type) {
+    case 'text':
+      return typeof b.text === 'string' && b.text.trim().length > 0;
+    case 'image':
+      return typeof b.src === 'string' && b.src.length > 0;
+    case 'attachment':
+      return typeof b.fileName === 'string' && b.fileName.length > 0;
+    case 'thinking':
+      return (typeof b.thinking === 'string' && b.thinking.length > 0)
+          || (typeof b.text === 'string' && b.text.length > 0);
+    case 'tool_use':
+      return true;
+    default:
+      return false;
+  }
+}
+
+/**
  * Top-level provider for the Supervisor Pair UI.
  */
 export function PairProvider({ children }: PairProviderProps) {
@@ -168,6 +199,32 @@ export function PairProvider({ children }: PairProviderProps) {
       setThinkingByAgentId({});
       setModelOverrideByAgentId({});
       setReasoningByAgentId({});
+      return;
+    }
+    // Seed per-agent defaults on activation:
+    //   - 1M-context toggle: applied only if the user has never set the global
+    //     storage key — once they've explicitly toggled it, that choice wins
+    //     even when re-selecting the agent.
+    //   - reasoning tier: applied only if no per-agent entry exists yet, so
+    //     subsequent re-selects respect what the user picked last time.
+    // Built-in code-/design-supervisor agents ship with defaultLongContext=true
+    // + defaultReasoning="max", so this is what makes "enable supervisor ⇒
+    // Opus 4.7 + 1M + max effort" the out-of-the-box behaviour.
+    const agent = next[0];
+    if (agent.defaultLongContext !== undefined) {
+      try {
+        const stored = window.localStorage.getItem(LONG_CONTEXT_KEY);
+        if (stored === null) {
+          setLongContextEnabledState(agent.defaultLongContext);
+          window.localStorage.setItem(LONG_CONTEXT_KEY, agent.defaultLongContext ? '1' : '0');
+        }
+      } catch { /* ignore storage failures */ }
+    }
+    if (agent.defaultReasoning) {
+      const tier = agent.defaultReasoning as ReasoningEffort;
+      setReasoningByAgentId((prev) =>
+        prev[agent.agentId] ? prev : { ...prev, [agent.agentId]: tier }
+      );
     }
   }, []);
 
@@ -280,17 +337,19 @@ export function PairProvider({ children }: PairProviderProps) {
    * Attach tool_result blocks to whichever assistant message in the history
    * already contains the matching tool_use. We append the result blocks to
    * that message's raw.content so the main-AI findToolResult scan locates
-   * them. Falls back to creating a synthetic user message if no matching
-   * tool_use is found (defensive — shouldn't happen during normal flow).
+   * them. Orphan tool_results (no matching tool_use — typically because
+   * auto-compaction discarded the original assistant turn) are silently
+   * dropped: a `tool_result` block has nothing user-renderable on its own,
+   * so surfacing it as a sidecar user bubble would just render an empty
+   * blue square in the pane.
    */
   const attachToolResults = useCallback(
-    (agentId: string, turnId: number, results: ToolResultBlock[]) => {
+    (agentId: string, results: ToolResultBlock[]) => {
       if (results.length === 0) return;
       setMessagesByAgentId((prev) => {
         const list = prev[agentId] ? [...prev[agentId]] : [];
-        const orphan: ToolResultBlock[] = [];
+        let changed = false;
         for (const r of results) {
-          let matched = false;
           for (let i = list.length - 1; i >= 0; i -= 1) {
             const target = list[i];
             if (target.type !== 'assistant') continue;
@@ -305,22 +364,13 @@ export function PairProvider({ children }: PairProviderProps) {
                 ...target,
                 raw: { ...rawObj, content: [...content, r] },
               };
-              matched = true;
+              changed = true;
               break;
             }
           }
-          if (!matched) orphan.push(r);
         }
-        let next = list;
-        if (orphan.length > 0) {
-          next = [...list, {
-            type: 'user',
-            raw: { content: orphan },
-            __turnId: turnId,
-            timestamp: new Date().toISOString(),
-          }];
-        }
-        return { ...prev, [agentId]: trimHistory(next) };
+        if (!changed) return prev;
+        return { ...prev, [agentId]: trimHistory(list) };
       });
     },
     []
@@ -526,18 +576,20 @@ export function PairProvider({ children }: PairProviderProps) {
             if (!block || typeof block !== 'object') continue;
             if (block.type === 'tool_result') {
               toolResults.push(block as ToolResultBlock);
-            } else {
+            } else if (isRenderableUserBlock(block)) {
               userBlocks.push(block as ClaudeContentOrResultBlock);
             }
           }
           if (toolResults.length > 0) {
-            attachToolResults(agentId, turnId, toolResults);
+            attachToolResults(agentId, toolResults);
           }
           if (userBlocks.length > 0) {
             // Non-tool-result content in a user message is supervisor input
             // (the prompt the daemon assembled from main-AI events) — render
             // it as a user bubble so the operator can see what the supervisor
-            // was given.
+            // was given. Blocks that ContentBlockRenderer cannot display
+            // (empty text, SDK internal markers) are filtered above so they
+            // do not surface as an empty blue bubble in the pane.
             setMessagesByAgentId((prev) => {
               const list = prev[agentId] ? [...prev[agentId]] : [];
               list.push({

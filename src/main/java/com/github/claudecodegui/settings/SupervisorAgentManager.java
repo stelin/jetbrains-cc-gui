@@ -27,7 +27,23 @@ public class SupervisorAgentManager {
     public static final int CONFIG_VERSION = 1;
     public static final int MAX_NAME_LENGTH = 30;
     public static final int MAX_DESCRIPTION_LENGTH = 100_000;
-    public static final String DEFAULT_MODEL = "claude-haiku-4-5-20251001";
+    /**
+     * Default model for built-in supervisor personas. Opus 4.7 paired with the
+     * built-in {@code defaultLongContext=true} / {@code defaultReasoning="max"}
+     * fields gives the supervisor enough room (1M ctx) and judgment depth (max
+     * effort) to handle the multi-step review protocol baked into the v3 prompt.
+     * The bare base id is stored here; the [1m] suffix is applied at send time
+     * by the webview when {@code longContextEnabled} is on.
+     */
+    public static final String DEFAULT_MODEL = "claude-opus-4-7";
+    /** Default reasoning-effort tier seeded on built-in supervisor agents. */
+    public static final String DEFAULT_REASONING_EFFORT = "max";
+    /** Default 1M-context flag seeded on built-in supervisor agents. */
+    public static final boolean DEFAULT_LONG_CONTEXT = true;
+
+    /** Legacy DEFAULT_MODEL value, retained so {@link #isKnownPresetModel}
+     * recognises old Haiku-seeded agents and migrates them to the new default. */
+    private static final String LEGACY_HAIKU_MODEL_ID = "claude-haiku-4-5-20251001";
 
     /** Default auto-compact trigger as a % of context window (CLI default ≈ 95). */
     public static final int DEFAULT_AUTO_COMPACT_THRESHOLD = 70;
@@ -358,6 +374,16 @@ public class SupervisorAgentManager {
                 DEFAULT_MODEL,
                 now);
 
+        // v3.1: second built-in persona — upstream "design / plan supervisor"
+        // that consumes a raw design doc and emits the structured plan that
+        // code-supervisor downstream consumes. Lives next to code-supervisor in
+        // the picker; default still points at code-supervisor (see below).
+        dirty |= ensureOrRefresh(agents, "design-supervisor",
+                "方案监督者 / Design Supervisor",
+                loadPreset("design-supervisor"),
+                DEFAULT_MODEL,
+                now);
+
         // Default points at code-supervisor unless the user picked something
         // else that still exists. If the previous default referenced a removed
         // legacy id, redirect.
@@ -396,21 +422,27 @@ public class SupervisorAgentManager {
 
     /**
      * Insert or refresh a built-in agent in place.
+     *
+     * <p>Refresh triggers on any drift between the persisted agent and the
+     * preset — description, defaultLongContext, or defaultReasoning differs.
+     * Earlier versions used a first-line marker to detect "is the description
+     * still the old copy", but that silently failed whenever a prompt rewrite
+     * kept the same opening line; full-content comparison is more reliable.
+     *
+     * <p>Model is only refreshed when the persisted value is still a known
+     * preset model (so users who switched to e.g. Sonnet don't get yanked
+     * back to the default).
+     *
      * @return true if the agents object was mutated (caller decides whether to write).
      */
     private boolean ensureOrRefresh(JsonObject agents, String id, String name,
                                     String preset, String model, long ts) {
         // Defensive: an empty preset (e.g. resource lookup failed at runtime)
-        // would yield an empty marker that matches every existing description
-        // and silently skip refresh forever. Treat as no-op instead.
+        // would match nothing and trigger refresh every startup; skip instead.
         if (preset == null || preset.isEmpty()) {
             LOG.warn("[SupervisorAgentManager] Empty preset for: " + id + " — skipping ensure/refresh");
             return false;
         }
-
-        // First-line marker of the current preset — used to detect "user has the new copy".
-        int newlineIdx = preset.indexOf('\n');
-        String marker = newlineIdx > 0 ? preset.substring(0, newlineIdx) : preset;
 
         if (!agents.has(id)) {
             agents.add(id, buildBuiltInAgent(id, name, preset, model, ts));
@@ -428,12 +460,20 @@ public class SupervisorAgentManager {
 
         String currentDesc = existing.has("description") && !existing.get("description").isJsonNull()
                 ? existing.get("description").getAsString() : "";
-        if (currentDesc.contains(marker)) {
-            // Already up to date.
+        boolean descMatches = currentDesc.equals(preset);
+        boolean longCtxMatches = existing.has("defaultLongContext")
+                && !existing.get("defaultLongContext").isJsonNull()
+                && existing.get("defaultLongContext").getAsBoolean() == DEFAULT_LONG_CONTEXT;
+        boolean reasoningMatches = existing.has("defaultReasoning")
+                && !existing.get("defaultReasoning").isJsonNull()
+                && DEFAULT_REASONING_EFFORT.equals(existing.get("defaultReasoning").getAsString());
+        if (descMatches && longCtxMatches && reasoningMatches) {
             return false;
         }
 
         existing.addProperty("description", preset);
+        existing.addProperty("defaultLongContext", DEFAULT_LONG_CONTEXT);
+        existing.addProperty("defaultReasoning", DEFAULT_REASONING_EFFORT);
         existing.addProperty("updatedAt", ts);
         // Refresh model only if user hasn't customised it away from a known preset model.
         if (!existing.has("model") || existing.get("model").isJsonNull()
@@ -445,7 +485,11 @@ public class SupervisorAgentManager {
     }
 
     private static boolean isKnownPresetModel(String m) {
-        return DEFAULT_MODEL.equals(m) || "claude-sonnet-4-6".equals(m) || "claude-opus-4-7".equals(m);
+        return DEFAULT_MODEL.equals(m)
+                || LEGACY_HAIKU_MODEL_ID.equals(m)
+                || "claude-sonnet-4-6".equals(m)
+                || "claude-opus-4-7".equals(m)
+                || "claude-opus-4-6".equals(m);
     }
 
     private JsonObject buildBuiltInAgent(String id, String name, String description, String model, long ts) {
@@ -454,6 +498,8 @@ public class SupervisorAgentManager {
         agent.addProperty("name", name);
         agent.addProperty("description", description);
         agent.addProperty("model", model);
+        agent.addProperty("defaultLongContext", DEFAULT_LONG_CONTEXT);
+        agent.addProperty("defaultReasoning", DEFAULT_REASONING_EFFORT);
         agent.addProperty("builtIn", true);
         agent.addProperty("createdAt", ts);
         agent.addProperty("updatedAt", ts);

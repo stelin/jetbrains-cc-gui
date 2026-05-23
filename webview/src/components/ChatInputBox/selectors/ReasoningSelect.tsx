@@ -5,6 +5,7 @@ import {
   EFFORT_SUPPORTED_CLAUDE_MODELS,
   MAX_EFFORT_CLAUDE_MODELS,
   XHIGH_EFFORT_CLAUDE_MODELS,
+  strip1MContextSuffix,
   type ReasoningEffort,
 } from '../types';
 
@@ -30,18 +31,26 @@ export const ReasoningSelect = ({ value, onChange, disabled, selectedModel, curr
   const buttonRef = useRef<HTMLButtonElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
+  // Reasoning effort depends on the model family, not the context window
+  // size. Strip the [1m] suffix before consulting the support sets so the
+  // picker keeps working when the 1M toggle is on — otherwise selecting 1M
+  // on Opus 4.7 / Sonnet 4.6 would render `selectedModel` as
+  // `claude-opus-4-7[1m]` etc., miss the set, and the selector would
+  // disappear (the user reported this as "1M opened → reasoning gone").
+  const normalizedModel = selectedModel ? strip1MContextSuffix(selectedModel) : selectedModel;
+
   const isVisible =
     currentProvider !== 'claude' ||
-    !selectedModel ||
-    EFFORT_SUPPORTED_CLAUDE_MODELS.has(selectedModel);
+    !normalizedModel ||
+    EFFORT_SUPPORTED_CLAUDE_MODELS.has(normalizedModel);
 
   const availableLevels = REASONING_LEVELS.filter(level => {
     if (currentProvider !== 'claude') {
       return level.id !== 'max';
     }
-    if (!selectedModel) return true;
-    if (level.id === 'xhigh') return XHIGH_EFFORT_CLAUDE_MODELS.has(selectedModel);
-    if (level.id === 'max') return MAX_EFFORT_CLAUDE_MODELS.has(selectedModel);
+    if (!normalizedModel) return true;
+    if (level.id === 'xhigh') return XHIGH_EFFORT_CLAUDE_MODELS.has(normalizedModel);
+    if (level.id === 'max') return MAX_EFFORT_CLAUDE_MODELS.has(normalizedModel);
     return true;
   });
 

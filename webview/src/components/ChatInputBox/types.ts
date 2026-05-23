@@ -412,30 +412,30 @@ export const AVAILABLE_PROVIDERS: ProviderInfo[] = [
 ];
 
 /**
- * Claude 模型 → 支持自适应思考(effort 参数)的模型集合
+ * Claude 模型 → 支持自适应思考(effort 参数)的模型集合。
+ * 仅列基础 id;callers 必须先 strip1MContextSuffix 再查。
  * 参考: https://code.claude.com/docs/en/model-config#adjust-effort-level
  */
 export const EFFORT_SUPPORTED_CLAUDE_MODELS = new Set([
   'claude-opus-4-7',
   'claude-opus-4-6',
-  'claude-opus-4-6[1m]',
   'claude-sonnet-4-6',
 ]);
 
 /**
- * Claude 模型 → 额外支持 'xhigh' 档位的模型(目前仅 Opus 4.7)
+ * Claude 模型 → 额外支持 'xhigh' 档位的模型(目前仅 Opus 4.7)。
+ * 仅列基础 id。
  */
 export const XHIGH_EFFORT_CLAUDE_MODELS = new Set([
   'claude-opus-4-7',
 ]);
 
 /**
- * Claude 模型 → 支持 'max' 档位的模型
+ * Claude 模型 → 支持 'max' 档位的模型。仅列基础 id。
  */
 export const MAX_EFFORT_CLAUDE_MODELS = new Set([
   'claude-opus-4-7',
   'claude-opus-4-6',
-  'claude-opus-4-6[1m]',
   'claude-sonnet-4-6',
 ]);
 

@@ -29,6 +29,10 @@ export default function SupervisorSection({ onSuccess, onError }: SupervisorSect
   const [defaultId, setDefaultId] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  // v3: global auto-compact threshold (% of context window). Drives the
+  // CLAUDE_AUTOCOMPACT_PCT_OVERRIDE env on the daemon — applies to both the
+  // supervisor and the main AI sharing the same daemon process.
+  const [autoCompactThreshold, setAutoCompactThreshold] = useState(70);
 
   const onSuccessRef = useRef(onSuccess);
   const onErrorRef = useRef(onError);
@@ -47,6 +51,9 @@ export default function SupervisorSection({ onSuccess, onError }: SupervisorSect
         const payload: SupervisorAgentListPayload = JSON.parse(jsonStr);
         setAgents(payload.agents || []);
         setDefaultId(payload.defaultAgentId ?? null);
+        if (typeof payload.autoCompactThreshold === 'number') {
+          setAutoCompactThreshold(payload.autoCompactThreshold);
+        }
         setLoaded(true);
       } catch (e) {
         // ignore malformed payload
@@ -139,6 +146,20 @@ export default function SupervisorSection({ onSuccess, onError }: SupervisorSect
     }
   }, [isCreatingNew, selectedAgent]);
 
+  // v3 threshold control. Debounced send to avoid flooding Java on every
+  // slider tick — we wait for the user to stop dragging for 300ms.
+  const persistThresholdTimer = useRef<number | null>(null);
+  const handleThresholdChange = useCallback((next: number) => {
+    setAutoCompactThreshold(next);
+    if (persistThresholdTimer.current) {
+      window.clearTimeout(persistThresholdTimer.current);
+    }
+    persistThresholdTimer.current = window.setTimeout(() => {
+      sendToJava(`pair_set_auto_compact_threshold:${JSON.stringify({ threshold: next })}`);
+      persistThresholdTimer.current = null;
+    }, 300);
+  }, []);
+
   return (
     <div className={styles.container}>
       <div className={styles.header}>
@@ -151,6 +172,30 @@ export default function SupervisorSection({ onSuccess, onError }: SupervisorSect
             <span className="codicon codicon-add" />
             {t('settings.supervisor.newAgent')}
           </button>
+        </div>
+      </div>
+
+      <div className={styles.globalSettings}>
+        <div className={styles.globalSettingsLabel}>
+          <div className={styles.globalSettingsTitle}>
+            {t('settings.supervisor.autoCompact.title', '对话历史压缩阈值')}
+          </div>
+          <div className={styles.globalSettingsHint}>
+            {t('settings.supervisor.autoCompact.hint',
+               '上下文用量超过该百分比时，Claude Code 会自动压缩对话历史。该设置影响所有 Claude 会话（包括主 AI 与监督者）。')}
+          </div>
+        </div>
+        <div className={styles.globalSettingsControl}>
+          <input
+            type="range"
+            min={50}
+            max={95}
+            step={5}
+            value={autoCompactThreshold}
+            onChange={(e) => handleThresholdChange(Number(e.target.value))}
+            className={styles.globalSettingsRange}
+          />
+          <span className={styles.globalSettingsValue}>{autoCompactThreshold}%</span>
         </div>
       </div>
 

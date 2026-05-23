@@ -1,16 +1,16 @@
 import { useTranslation } from 'react-i18next';
-import SupervisorSubPanel, { type SupervisorLogEntry } from './SupervisorSubPanel';
+import type { ClaudeMessage } from '../../types';
+import SupervisorSubPanel from './SupervisorSubPanel';
 import { usePairContext } from './PairContext';
 import SupervisorChatInput from './SupervisorChatInput';
 import styles from './style.module.less';
 
 interface SupervisorPaneProps {
   /**
-   * Per-supervisor log entries keyed by agentId.
-   * Phase A: caller can pass {} (empty), each panel shows the "waiting" placeholder.
-   * Phase B: populated by EventBus stream → ActionRouter response from Java.
+   * Per-supervisor message stream keyed by agentId. Each list is rendered
+   * through the main-AI MessageList pipeline.
    */
-  entriesByAgentId?: Record<string, SupervisorLogEntry[]>;
+  messagesByAgentId?: Record<string, ClaudeMessage[]>;
   /** Global pair stats shown at the top (e.g. step progress, auto-recover counts). */
   status?: {
     runningStep?: number;
@@ -22,11 +22,11 @@ interface SupervisorPaneProps {
 }
 
 export default function SupervisorPane({
-  entriesByAgentId = {},
+  messagesByAgentId = {},
   status,
 }: SupervisorPaneProps) {
   const { t } = useTranslation();
-  const { selected, setSelected, thinkingByAgentId } = usePairContext();
+  const { selected, setSelected, thinkingByAgentId, streamingByAgentId } = usePairContext();
 
   if (selected.length === 0) return null;
 
@@ -72,8 +72,9 @@ export default function SupervisorPane({
           <SupervisorSubPanel
             key={coordinator.agentId}
             supervisor={coordinator}
-            entries={entriesByAgentId[coordinator.agentId] ?? []}
+            messages={messagesByAgentId[coordinator.agentId] ?? []}
             thinking={thinkingByAgentId[coordinator.agentId] ?? false}
+            streaming={streamingByAgentId[coordinator.agentId] ?? false}
             defaultExpanded
           />
         )}
@@ -81,8 +82,9 @@ export default function SupervisorPane({
           <SupervisorSubPanel
             key={rev.agentId}
             supervisor={rev}
-            entries={entriesByAgentId[rev.agentId] ?? []}
+            messages={messagesByAgentId[rev.agentId] ?? []}
             thinking={thinkingByAgentId[rev.agentId] ?? false}
+            streaming={streamingByAgentId[rev.agentId] ?? false}
             defaultExpanded={reviewers.length <= 2}
           />
         ))}

@@ -29,6 +29,11 @@ public class SupervisorAgentManager {
     public static final int MAX_DESCRIPTION_LENGTH = 100_000;
     public static final String DEFAULT_MODEL = "claude-haiku-4-5-20251001";
 
+    /** Default auto-compact trigger as a % of context window (CLI default ≈ 95). */
+    public static final int DEFAULT_AUTO_COMPACT_THRESHOLD = 70;
+    public static final int MIN_AUTO_COMPACT_THRESHOLD = 50;
+    public static final int MAX_AUTO_COMPACT_THRESHOLD = 95;
+
     private final Gson gson;
     private final ConfigPathManager pathManager;
 
@@ -221,6 +226,41 @@ public class SupervisorAgentManager {
             return config.get("defaultAgentId").getAsString();
         }
         return null;
+    }
+
+    /**
+     * Read the auto-compact threshold for the daemon (a % of the model's
+     * context window — when prompt token count crosses this, the CLI triggers
+     * its built-in autocompact). Returns {@link #DEFAULT_AUTO_COMPACT_THRESHOLD}
+     * when unset or invalid.
+     */
+    public int getAutoCompactThreshold() throws IOException {
+        JsonObject config = readConfig();
+        if (config.has("autoCompactThreshold") && !config.get("autoCompactThreshold").isJsonNull()) {
+            try {
+                int v = config.get("autoCompactThreshold").getAsInt();
+                if (v >= MIN_AUTO_COMPACT_THRESHOLD && v <= MAX_AUTO_COMPACT_THRESHOLD) {
+                    return v;
+                }
+            } catch (Exception ignored) { /* fall through to default */ }
+        }
+        return DEFAULT_AUTO_COMPACT_THRESHOLD;
+    }
+
+    /**
+     * Persist the auto-compact threshold. Out-of-range values throw — caller
+     * is expected to validate at the UI layer.
+     */
+    public void setAutoCompactThreshold(int threshold) throws IOException {
+        if (threshold < MIN_AUTO_COMPACT_THRESHOLD || threshold > MAX_AUTO_COMPACT_THRESHOLD) {
+            throw new IllegalArgumentException(
+                "autoCompactThreshold must be between "
+                + MIN_AUTO_COMPACT_THRESHOLD + " and " + MAX_AUTO_COMPACT_THRESHOLD);
+        }
+        JsonObject config = readConfig();
+        config.addProperty("autoCompactThreshold", threshold);
+        writeConfig(config);
+        LOG.info("[SupervisorAgentManager] Set autoCompactThreshold=" + threshold);
     }
 
     /**

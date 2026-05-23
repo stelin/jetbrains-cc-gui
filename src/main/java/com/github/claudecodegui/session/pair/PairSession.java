@@ -38,6 +38,14 @@ public class PairSession {
     private final String projectSpec;
     private volatile String model;
     private volatile String reasoningEffort;
+    /**
+     * Auto-compact threshold (% of context window) to apply on the daemon when
+     * this Pair starts or restarts. Null means "leave whatever the daemon has".
+     * Stored on the session so {@link EventBus#restartSupervisor()} can replay
+     * it after a daemon recovery — and so the user-facing setting flows in
+     * from {@link com.github.claudecodegui.settings.SupervisorAgentManager}.
+     */
+    private volatile Integer autoCompactThreshold;
 
     private volatile EventBus eventBus;       // wired by PairSessionManager
     private volatile ActionRouter actionRouter;
@@ -117,6 +125,9 @@ public class PairSession {
     public void setReasoningEffort(String effort) {
         this.reasoningEffort = (effort != null && !effort.isEmpty()) ? effort : null;
     }
+
+    public Integer getAutoCompactThreshold() { return autoCompactThreshold; }
+    public void setAutoCompactThreshold(Integer v) { this.autoCompactThreshold = v; }
 
     /**
      * Current Supervisor agent ids (always size 1 in current iteration).

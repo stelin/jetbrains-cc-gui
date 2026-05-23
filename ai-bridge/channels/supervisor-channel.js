@@ -30,6 +30,7 @@ import {
     buildSupervisorMcpServer,
     QUALIFIED_EMIT_ACTION,
     SUPERVISOR_MCP_NAME,
+    EMIT_ACTION_TOOL_NAME,
 } from '../services/supervisor/supervisor-tools.js';
 
 const DEFAULT_MODEL = 'claude-haiku-4-5-20251001';
@@ -63,6 +64,14 @@ class SupervisorRuntime {
          * @type {{action: string, reason: string, payload: object} | null}
          */
         this.lastCapturedAction = null;
+        /**
+         * v4 unified pipeline: turnId assigned at the start of postEvent. Used by
+         * streamSdkMessage so each `[SUPERVISOR_MSG]` line carries the same id
+         * as the wrapper's terminating `[SUPERVISOR_ACTION]`. null between
+         * turns; non-null while a turn is collecting messages.
+         * @type {string | null}
+         */
+        this.currentTurnId = null;
     }
 }
 
@@ -109,10 +118,26 @@ function buildSystemPrompt({ name, description, planContent, specContent }) {
 
     sections.push(
         '',
+        '# 你可用的只读工具（必读）',
+        '除 `emit_action` 外，你拥有 **只读** 文件工具：`Read`、`Glob`、`Grep`。',
+        '- 你**没有**写工具——不能调用 Edit / Write / Bash。修改代码靠 inject_prompt 让主 AI 做。',
+        '- 一个 turn 内可以多次调用文件工具，最后调用 **一次** `emit_action` 收尾。',
+        '',
+        '# 必做：review 协议（强约束）',
+        '收到 turn_end / verify_result / review_result 等"主 AI 已产出"类事件时：',
+        '1) **必须**至少调用一次 `Glob` 或 `Read`（针对 modified_in_plan 文件）——不可跳过；',
+        '2) 怀疑有 TODO / FIXME / 桩函数 / 假数据时，调用 `Grep` 验证；',
+        '3) 完成检查后再调用 `emit_action`。',
+        '**绝不可以只在自然语言里说"我读了 XXX 文件"而不真正发出 tool_use**——',
+        '只信主 AI 自述、跳过文件检查直接 emit_action 视为协议违例，本轮判失败。',
+        '',
+        '收到 user_input / start 等"无产出"事件时，可以直接 emit_action 不调文件工具。',
+        '',
         '# 输出格式（强约束）',
         '每一轮决策必须：',
-        '1) 先输出简短自然语言段：用 💭/✓/⚠️/⚡/→ 等符号描述观察、判断、决策（可省略）。',
-        '2) **必须调用 `emit_action` 工具**结束本轮。一轮只能调用一次；调用成功后立即结束本轮。',
+        '1) （可选）先输出简短自然语言段：用 💭/✓/⚠️/⚡/→ 等符号描述观察。',
+        '2) 按 review 协议调用所需文件工具（review 类事件必做）。',
+        '3) **必须调用 `emit_action` 工具**结束本轮。一轮只能调用一次；调用成功后立即结束本轮。',
         '',
         '`emit_action` 字段说明：',
         '- action: 必填，枚举 inject_prompt / retry_with_hint / approve_and_continue / escalate_to_human / request_amendment / wait',
@@ -125,13 +150,6 @@ function buildSystemPrompt({ name, description, planContent, specContent }) {
         '- wait 无额外字段',
         '',
         '若不确定下一步，调用 `emit_action(action="wait")`——**绝不可以只输出文字不调用工具**。',
-        '',
-        '# 你可用的只读工具',
-        '除 `emit_action` 外，你拥有 **只读** 文件工具：`Read`、`Glob`、`Grep`。',
-        '- review 时**必须**亲自打开本步骤涉及的文件：Glob 找路径 → Read 读关键段 → Grep 检查 TODO / FIXME / 桩函数 / 假数据。',
-        '- 不要只信主 AI 的自述。主 AI 说"我加了错误处理"——你必须 Read 验证。',
-        '- 一个 turn 内可以多次调用文件工具，最后调用 **一次** `emit_action` 收尾。',
-        '- 你**没有**写工具——不能调用 Edit / Write / Bash。修改代码靠 inject_prompt 让主 AI 做。',
         '',
         '# 行为约束',
         '- 方案 plan.md 是标准答案。主 AI 不能擅自偏离；偏离时升级用户（escalate_to_human）或要求修正（inject_prompt）。',
@@ -159,10 +177,25 @@ export async function startSupervisorSession(params) {
         specContent,
         model,
         allowedTools,
+        autoCompactThreshold,
     } = params || {};
 
     if (!pairId || !supervisorId) {
         throw new Error('supervisor.start requires pairId and supervisorId');
+    }
+
+    // Allow the JetBrains side to override the daemon-wide autocompact
+    // threshold per Pair session. The CLI re-reads process.env on every
+    // shouldAutoCompact() call (autoCompact.ts:40), so a late mutation here
+    // takes effect on the *next* turn — both for this supervisor and for
+    // the main AI sharing the same daemon (acknowledged in the design;
+    // see Q1 alignment in the rollout plan).
+    if (typeof autoCompactThreshold === 'number'
+        && autoCompactThreshold >= 50 && autoCompactThreshold <= 95) {
+        process.env.CLAUDE_AUTOCOMPACT_PCT_OVERRIDE = String(autoCompactThreshold);
+        process.stdout.write(
+            `[supervisor] autocompact threshold set to ${autoCompactThreshold}%\n`
+        );
     }
 
     const k = key(pairId, supervisorId);
@@ -281,6 +314,12 @@ export async function postEventToSupervisor(params) {
         // Reset per-turn capture before enqueueing the next user message.
         runtime.lastCapturedAction = null;
 
+        // v4 unified pipeline: assign a turnId so streamed SDK messages and the
+        // closing [SUPERVISOR_ACTION] wrapper can be correlated on the webview
+        // side (entries with the same turnId become one supervisor bubble).
+        const turnId = `t_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        runtime.currentTurnId = turnId;
+
         // Enqueue the summarized event as a user message in the SDK input stream.
         // Schema must match what the Claude Agent SDK expects (see persistent-query-service.js).
         runtime.inputStream.enqueue({
@@ -302,6 +341,14 @@ export async function postEventToSupervisor(params) {
             reasoningText: turn.reasoningText,
             capturedAction: runtime.lastCapturedAction,
         });
+        wrapper.turnId = turnId;
+        // v3 side-channel data: only `usage` remains on the wrapper. tool_use
+        // and compaction blocks now flow live via [SUPERVISOR_MSG] streaming so
+        // the webview can render them as they happen (and so we no longer
+        // double-render them). See collectAssistantTurn / streamSdkMessage.
+        if (turn.usage) {
+            wrapper.usage = { model: runtime.model, ...turn.usage };
+        }
 
         // Emit a single NDJSON event line that the daemon-tagged stdout wraps
         // with the active request id. Java consumers see:
@@ -310,6 +357,7 @@ export async function postEventToSupervisor(params) {
 
         return { ok: true };
     } finally {
+        runtime.currentTurnId = null;
         release();
     }
 }
@@ -371,6 +419,19 @@ export async function stopAllSupervisorSessions() {
 async function collectAssistantTurn(runtime) {
     const textBuf = [];
     const reasoningBuf = [];
+    /** Tool-use blocks (Read/Glob/Grep …) plus their matching tool_result. */
+    const toolEvents = [];
+    /** Pending tool_use entries waiting for their tool_result by tool_use_id. */
+    const pendingTools = new Map();
+    /** Compaction boundary messages emitted by CLI mid-stream. */
+    const compactEvents = [];
+    /** Last usage snapshot we saw — taken from the final assistant or result message. */
+    let lastUsage = null;
+    // Diagnostic ledger for the v3 usage-stream bug investigation. We dump
+    // the shape of each SDK message we see this turn (type, subtype, what
+    // usage fields are present) so when the user reports "0% never moves"
+    // we can post-mortem the daemon log without guessing.
+    const seenTypes = [];
     while (true) {
         if (runtime.disposed) {
             throw new Error('Supervisor runtime disposed mid-turn');
@@ -386,6 +447,22 @@ async function collectAssistantTurn(runtime) {
         const msg = next.value;
         if (!msg) continue;
 
+        // Record this message's shape so we can debug usage extraction later.
+        // Cheap (constant string concat); the dump happens once per turn.
+        seenTypes.push(
+            (msg.type || '?')
+            + (msg.subtype ? `:${msg.subtype}` : '')
+            + (msg.message?.usage ? '[u]' : '')
+            + (msg.usage ? '[U]' : '')
+        );
+
+        // v4 unified pipeline: stream the raw SDK message to the webview the
+        // instant it arrives. The webview converts content blocks into pane
+        // entries on the fly — no need to wait for the turn to end and
+        // reconstruct from a wrapper. result/system meta-frames are streamed
+        // too because the webview may want to surface them (e.g. compaction).
+        streamSdkMessage(runtime, msg);
+
         if (msg.type === 'assistant' && msg.message?.content) {
             for (const block of msg.message.content) {
                 if (!block || typeof block !== 'object') continue;
@@ -399,33 +476,222 @@ async function collectAssistantTurn(runtime) {
                 } else if (block.type === 'redacted_thinking') {
                     // Redacted by Anthropic policy — show a marker so the UI doesn't lie.
                     reasoningBuf.push('[redacted reasoning]');
+                } else if (block.type === 'tool_use') {
+                    // Read/Glob/Grep invocations — we surface these to the UI
+                    // so users can see what the supervisor inspected, matching
+                    // the main AI's tool card rendering. The MCP emit_action
+                    // tool is filtered out — it's an internal protocol detail,
+                    // not user-facing.
+                    const isMcpAction = typeof block.name === 'string'
+                        && block.name.includes(EMIT_ACTION_TOOL_NAME);
+                    if (!isMcpAction) {
+                        const entry = {
+                            id: block.id,
+                            name: block.name,
+                            input: block.input,
+                            result: null,
+                        };
+                        pendingTools.set(block.id, entry);
+                        toolEvents.push(entry);
+                    }
                 }
-                // tool_use blocks are dispatched by the SDK to the tool handler,
-                // which captures the action onto runtime.lastCapturedAction.
             }
+            // Per-message usage rollup, in case the result message doesn't carry one.
+            if (msg.message.usage) lastUsage = msg.message.usage;
+        } else if (msg.type === 'user' && msg.message?.content) {
+            // tool_result blocks come back as user-role messages in the SDK
+            // stream. Match them to the pending tool_use by id and attach
+            // a brief stringified preview (full content can be huge — we
+            // cap it so the IPC line stays sensible).
+            for (const block of msg.message.content) {
+                if (!block || typeof block !== 'object') continue;
+                if (block.type !== 'tool_result') continue;
+                const pending = pendingTools.get(block.tool_use_id);
+                if (!pending) continue;
+                pending.result = summarizeToolResult(block);
+                pendingTools.delete(block.tool_use_id);
+            }
+        } else if (msg.type === 'system' && msg.subtype === 'compact_boundary') {
+            // CLI auto-compaction event — the conversation history was just
+            // summarised down to fit the model's context window. We pass the
+            // before/after token counts to the UI so the user understands
+            // why earlier turns suddenly look terser.
+            compactEvents.push({
+                trigger: msg.compact_metadata?.trigger || 'auto',
+                preTokens: msg.compact_metadata?.pre_tokens ?? null,
+            });
         } else if (msg.type === 'result') {
+            if (msg.usage) lastUsage = msg.usage;
             break;
         }
-        // tool_result / system messages: silently consume.
+    }
+    // One-line per-turn diagnostic. Goes to daemon stderr via console.error
+    // (intercepted by daemon.js and forwarded as a daemon stderr line, NOT
+    // a request-tagged stdout line — so it doesn't pollute the IPC stream).
+    // Read it via the IDE's daemon-stderr log when triaging "0% never moves"
+    // or "no tool cards" complaints.
+    console.error(
+        `[supervisor-diag] turn complete: msgs=[${seenTypes.join(', ')}] `
+        + `tools=${toolEvents.length} compact=${compactEvents.length} `
+        + `usage=${lastUsage ? JSON.stringify(lastUsage) : 'null'}`
+    );
+    if (toolEvents.length > 0) {
+        // List the tool names so we can verify the supervisor is exercising
+        // the protocol ("at least one Read before emit_action"). If this line
+        // is missing from the daemon log, the wrapper.toolEvents was empty
+        // and Java has nothing to dispatch.
+        console.error(
+            `[supervisor-diag] toolEvents=${toolEvents.map(t => t.name).join(',')}`
+        );
+    } else {
+        console.error('[supervisor-diag] toolEvents=(none) — supervisor skipped review tools');
     }
     return {
         assistantText: textBuf.join('').trim(),
         reasoningText: reasoningBuf.join('\n').trim(),
+        toolEvents,
+        compactEvents,
+        usage: lastUsage ? normaliseUsage(lastUsage) : null,
     };
 }
 
 /**
- * Build the wrapper object the Java side (ActionRouter) expects. Falls back
- * to a {action:'wait'} downgrade when the model never called emit_action so
- * the UI still surfaces a card and the dispatcher does not dead-lock.
+ * v4 unified pipeline: forward one raw SDK message to Java/webview as a
+ * `[SUPERVISOR_MSG]` line tagged with pairId / supervisorId / turnId. The
+ * payload is a thin envelope — the SDK message body is passed through
+ * untouched so the webview can use the same content-block shape it already
+ * handles for main-AI messages.
+ *
+ * Lines are written through the daemon's intercepted process.stdout, which
+ * wraps them as `{ id: <reqId>, line: "[SUPERVISOR_MSG] {...}" }` NDJSON.
+ * If JSON.stringify fails (e.g. circular ref in a future SDK shape), we log
+ * and drop — losing a stream message must not break the turn.
+ */
+function streamSdkMessage(runtime, msg) {
+    try {
+        // Tool_result blocks can be huge (a Read on a multi-MB file). Cap the
+        // text content here so the IPC line stays under a few KB — matches the
+        // cap we apply in summarizeToolResult for the old wrapper path.
+        const envelope = {
+            pairId: runtime.pairId,
+            supervisorId: runtime.supervisorId,
+            turnId: runtime.currentTurnId,
+            message: capStreamMessage(msg),
+        };
+        process.stdout.write('[SUPERVISOR_MSG] ' + JSON.stringify(envelope) + '\n');
+    } catch (e) {
+        console.error('[supervisor-stream] failed to stream msg: '
+            + (e?.message || String(e)));
+    }
+}
+
+/**
+ * Safety-valve cap on tool_result text in streamed messages. Set high enough
+ * (200KB) that ordinary Read/Glob/Grep outputs flow through intact, but low
+ * enough to defend against a pathological multi-MB Read blowing past IPC
+ * limits. The UI now uses the full main-AI rendering pipeline (with
+ * CollapsibleTextBlock) so it can handle large outputs gracefully — the cap
+ * here is purely a DoS guard, not a UI affordance.
+ */
+function capStreamMessage(msg) {
+    if (!msg || msg.type !== 'user' || !Array.isArray(msg.message?.content)) {
+        return msg;
+    }
+    const MAX_LEN = 200_000;
+    const cappedContent = msg.message.content.map((block) => {
+        if (!block || block.type !== 'tool_result') return block;
+        let text = '';
+        if (typeof block.content === 'string') {
+            text = block.content;
+        } else if (Array.isArray(block.content)) {
+            text = block.content
+                .filter((c) => c?.type === 'text' && typeof c.text === 'string')
+                .map((c) => c.text)
+                .join('\n');
+        }
+        if (text.length <= MAX_LEN) return block;
+        const truncated = text.slice(0, MAX_LEN) + '\n…(truncated)';
+        return {
+            ...block,
+            content: truncated,
+            _totalLength: text.length,
+        };
+    });
+    return {
+        ...msg,
+        message: { ...msg.message, content: cappedContent },
+    };
+}
+
+/**
+ * Tool-result summary used by the legacy wrapper path (only triggered when
+ * the SDK stream produced no live messages — transport errors / skipped
+ * emit_action). Same 200KB safety valve as capStreamMessage.
+ */
+function summarizeToolResult(block) {
+    const isError = block.is_error === true;
+    let text = '';
+    if (typeof block.content === 'string') {
+        text = block.content;
+    } else if (Array.isArray(block.content)) {
+        text = block.content
+            .filter((c) => c?.type === 'text' && typeof c.text === 'string')
+            .map((c) => c.text)
+            .join('\n');
+    }
+    const MAX_LEN = 200_000;
+    const truncated = text.length > MAX_LEN;
+    return {
+        isError,
+        preview: truncated ? text.slice(0, MAX_LEN) + '\n…(truncated)' : text,
+        totalLength: text.length,
+    };
+}
+
+/**
+ * Normalise the SDK's usage object into a consistent shape and compute a
+ * "total prompt tokens" estimate — the figure the UI percentage is keyed off.
+ * Cache hits + cache writes both count as "in the window" because that's
+ * what the model sees on the next turn.
+ */
+function normaliseUsage(usage) {
+    const input = usage.input_tokens || 0;
+    const cacheCreate = usage.cache_creation_input_tokens || 0;
+    const cacheRead = usage.cache_read_input_tokens || 0;
+    const output = usage.output_tokens || 0;
+    return {
+        inputTokens: input,
+        outputTokens: output,
+        cacheCreationInputTokens: cacheCreate,
+        cacheReadInputTokens: cacheRead,
+        totalPromptTokens: input + cacheCreate + cacheRead,
+    };
+}
+
+/**
+ * Build the wrapper object the Java side (ActionRouter) expects.
+ *
+ * <p>v4 unified pipeline: text and reasoning are NOT carried on the wrapper for
+ * the normal path — they were already streamed live via [SUPERVISOR_MSG]. The
+ * wrapper carries only the {@code action} (emit_action result) plus a turnId
+ * the webview uses to group the streamed entries with the action card into
+ * one bubble. Empty {@code naturalText} / {@code reasoningText} placeholders
+ * are kept for backward compatibility with any consumer reading the JSON; the
+ * webview ignores them when {@code parseError} is null.
+ *
+ * <p>If the model never calls emit_action, we still downgrade to a
+ * {@code wait} action with a non-null {@code parseError} so the UI surfaces
+ * a card and the dispatcher does not dead-lock. {@code rawText} keeps the
+ * model's prose for debugging — it never reaches the bubble (the streamed
+ * text entries already did).
  */
 function buildActionWrapper({ pairId, supervisorId, assistantText, reasoningText, capturedAction }) {
     if (capturedAction) {
         return {
             pairId,
             supervisorId,
-            naturalText: assistantText,
-            reasoningText,
+            naturalText: '',
+            reasoningText: '',
             action: capturedAction,
             parseError: null,
             rawText: JSON.stringify(capturedAction),
@@ -435,8 +701,8 @@ function buildActionWrapper({ pairId, supervisorId, assistantText, reasoningText
     return {
         pairId,
         supervisorId,
-        naturalText: assistantText,
-        reasoningText,
+        naturalText: '',
+        reasoningText: '',
         action: {
             action: 'wait',
             reason: '(downgraded) supervisor did not call emit_action this turn',

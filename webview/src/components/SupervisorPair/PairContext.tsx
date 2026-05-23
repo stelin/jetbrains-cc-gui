@@ -9,16 +9,26 @@ import {
   type ReactNode,
 } from 'react';
 import type { SelectedSupervisor } from '../../types/supervisorAgent';
-import type { SupervisorLogEntry } from './SupervisorSubPanel';
-import type { SupervisorActionType } from './ActionCard';
+import type { ClaudeMessage, ClaudeContentOrResultBlock, ToolResultBlock } from '../../types';
 import type { ReasoningEffort } from '../ChatInputBox/types';
 
 /**
+ * Token usage snapshot for the supervisor's TokenIndicator. Computed by Java
+ * (UsagePushService.broadcast) using the same formula and context-limit table
+ * as the main AI, then forwarded to PairContext via the
+ * {@code cc-gui:supervisor-usage} CustomEvent.
+ */
+export interface SupervisorUsage {
+  model: string;
+  totalPromptTokens: number;
+  maxTokens?: number;
+  percentage?: number;
+}
+
+/**
  * Shape for an escalate request surfaced to the user by ActionRouter.
- * Mirrors {@code escalate_to_human} payload from the supervisor.
  */
 export interface EscalateRequest {
-  /** Set by ActionRouter to ensure each dialog instance is unique even if payload repeats. */
   id: string;
   pairId?: string;
   supervisorId?: string;
@@ -27,14 +37,8 @@ export interface EscalateRequest {
   question?: string;
   choices?: Array<{ id: string; label: string; description?: string }>;
   contextFiles?: string[];
-  /** When non-empty, ActionRouter raised an amendment request rather than a regular escalate. */
   kind?: 'amendment_request';
   proposal?: string;
-  /**
-   * v3: session stats snapshot attached when ActionRouter dispatches a normal
-   * escalate (verification at end-of-plan). Rendered as the summary header in
-   * EscalateDialog so the user can see how the session went at a glance.
-   */
   stats?: {
     auto_recover_count?: number;
     escalate_count?: number;
@@ -43,80 +47,44 @@ export interface EscalateRequest {
     review_reject_count?: number;
     verify_fail_count?: number;
   };
-  /** v3: step-level progress snapshot, paired with `stats`. */
   steps?: Array<{ index?: number; status?: string }>;
 }
 
 interface PairContextValue {
   /** Currently active supervisors on this session. Empty array = Pair disabled. */
   selected: SelectedSupervisor[];
-  /** Replace the active supervisor list. Pass [] to disable Pair mode. */
   setSelected: (next: SelectedSupervisor[]) => void;
-  /** Whether double-pane layout should render. */
   isPairActive: boolean;
-  /** Open the settings → Supervisor tab. Registered by the App-level host. */
   openManager: () => void;
-  /** Register the openManager handler (called once by App.tsx). */
   registerOpenManager: (fn: () => void) => void;
   /**
-   * Log entries keyed by Supervisor agent id, populated from
-   * window.onPairActionEvent stream. Consumed by SupervisorPane.
+   * Messages keyed by Supervisor agent id. Each list mirrors a main-AI chat
+   * stream — same {@link ClaudeMessage} shape, same {@link ClaudeContentBlock}
+   * content blocks — so the right pane reuses the main AI's MessageList /
+   * MessageItem / ContentBlockRenderer pipeline without translation.
    */
-  entriesByAgentId: Record<string, SupervisorLogEntry[]>;
-  /** Backing pair id (populated when Java replies with window.onPairStarted). */
+  messagesByAgentId: Record<string, ClaudeMessage[]>;
   pairId: string | null;
-  /** Optional escalate request to surface as a modal dialog. Null = no dialog. */
   pendingEscalate: EscalateRequest | null;
-  /**
-   * Map of supervisor agentId → "is thinking" boolean. True from the moment
-   * an event is forwarded to the daemon until an ACTION arrives. Drives the
-   * loading spinner in the right pane.
-   */
   thinkingByAgentId: Record<string, boolean>;
   /**
-   * Map of supervisor agentId → runtime model override. Set via the composer
-   * model picker; takes precedence over the agent's persisted default for the
-   * current pair session only (does NOT mutate settings).
-   * Empty/missing entry = use the agent's configured default.
+   * Map of supervisor agentId → true while the current turn's assistant
+   * message is still being streamed. Used by MessageList/MessageItem to drive
+   * the auto-expanded thinking block and streaming cursor.
    */
+  streamingByAgentId: Record<string, boolean>;
   modelOverrideByAgentId: Record<string, string>;
-  /**
-   * Set (or clear, with `null`) the runtime model override for a supervisor in
-   * the current pair. Also notifies Java so the next turn uses the new model.
-   */
   setSupervisorModel: (agentId: string, model: string | null) => void;
-  /**
-   * Map of supervisor agentId → runtime reasoning effort override (low/medium/
-   * high/xhigh/max). Like the model override, this only lives for the duration
-   * of the current pair session — it does not persist back to agent config.
-   */
   reasoningByAgentId: Record<string, ReasoningEffort>;
-  /** Set the runtime reasoning effort for a supervisor in the current pair. */
   setSupervisorReasoning: (agentId: string, effort: ReasoningEffort) => void;
-  /** Send the user's choice for the active escalate dialog. */
+  longContextEnabled: boolean;
+  setLongContextEnabled: (enabled: boolean) => void;
+  usageByAgentId: Record<string, SupervisorUsage>;
   respondToEscalate: (choice: string, note?: string) => void;
-  /** Dismiss the active escalate dialog (no choice sent). */
   dismissEscalate: () => void;
-  /**
-   * Register a handler for {@code onPairInjectPrompt}. Whoever owns the chat
-   * input (App.tsx) sets this once; the supervisor pipeline will call it when
-   * the Supervisor emits an inject_prompt action.
-   */
   registerInjectPromptHandler: (
     fn: (pairId: string, supervisorId: string, prompt: string) => void
   ) => void;
-  /**
-   * Send a free-form text message from the user to the Supervisor (NOT to
-   * the main AI). Used by the right-pane composer to direct/coordinate the
-   * Supervisor — e.g. "the design doc is at docs/plans/foo.md, coordinate
-   * the main AI to implement it".
-   *
-   * {@code attachments} carries the structured local-path references the
-   * composer extracted from `@<path>` tokens in {@code text}. Java translates
-   * each `path` local→remote via {@code PathMapper} and substitutes the same
-   * `@<localPath>` occurrences in the text body before forwarding to the
-   * daemon, so the Supervisor only ever sees remote paths in its context.
-   */
   sendUserInputToSupervisor: (
     text: string,
     attachments?: Array<{ path: string }>
@@ -135,31 +103,66 @@ const sendToJava = (message: string) => {
   }
 };
 
+/** Cap per-agent message history to bound memory on long runs. */
+const MAX_MESSAGES_PER_AGENT = 500;
+
+/**
+ * Stable numeric hash for a string turn id, so messages can carry the
+ * main-AI-compatible `__turnId: number` field. Used by MessageList for
+ * streaming-isolation logic — collisions are not catastrophic (would only
+ * cause two unrelated turns to refuse to merge), and the input space
+ * (timestamp + random suffix) gives effectively zero collision rate in
+ * practice.
+ */
+function hashTurnId(turnId: string): number {
+  let h = 5381;
+  for (let i = 0; i < turnId.length; i += 1) {
+    h = ((h << 5) + h + turnId.charCodeAt(i)) | 0;
+  }
+  return Math.abs(h);
+}
+
+function trimHistory(list: ClaudeMessage[]): ClaudeMessage[] {
+  return list.length > MAX_MESSAGES_PER_AGENT
+    ? list.slice(list.length - MAX_MESSAGES_PER_AGENT)
+    : list;
+}
+
 /**
  * Top-level provider for the Supervisor Pair UI.
- * Also owns the window.onPair* callback subscriptions so any component within
- * the provider can react to lifecycle and action stream events.
  */
 export function PairProvider({ children }: PairProviderProps) {
+  const LONG_CONTEXT_KEY = 'cc-gui.supervisor.longContextEnabled';
   const [selected, setSelectedState] = useState<SelectedSupervisor[]>([]);
-  const [entriesByAgentId, setEntriesByAgentId] = useState<Record<string, SupervisorLogEntry[]>>({});
+  const [messagesByAgentId, setMessagesByAgentId] = useState<Record<string, ClaudeMessage[]>>({});
+  const [streamingByAgentId, setStreamingByAgentId] = useState<Record<string, boolean>>({});
   const [pairId, setPairId] = useState<string | null>(null);
   const [pendingEscalate, setPendingEscalate] = useState<EscalateRequest | null>(null);
   const [thinkingByAgentId, setThinkingByAgentId] = useState<Record<string, boolean>>({});
   const [modelOverrideByAgentId, setModelOverrideByAgentId] = useState<Record<string, string>>({});
+  const [usageByAgentId, setUsageByAgentId] = useState<Record<string, SupervisorUsage>>({});
+  const [longContextEnabled, setLongContextEnabledState] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    try { return window.localStorage.getItem(LONG_CONTEXT_KEY) === '1'; }
+    catch { return false; }
+  });
+  const setLongContextEnabled = useCallback((enabled: boolean) => {
+    setLongContextEnabledState(enabled);
+    try { window.localStorage.setItem(LONG_CONTEXT_KEY, enabled ? '1' : '0'); }
+    catch { /* ignore */ }
+  }, []);
   const [reasoningByAgentId, setReasoningByAgentId] = useState<Record<string, ReasoningEffort>>({});
 
   const openManagerRef = useRef<() => void>(() => { /* not registered yet */ });
   const injectHandlerRef = useRef<((pairId: string, supervisorId: string, prompt: string) => void) | null>(null);
-  // Stable ref for current pairId, used inside callbacks that close over old state.
   const pairIdRef = useRef<string | null>(null);
   useEffect(() => { pairIdRef.current = pairId; }, [pairId]);
 
   const setSelected = useCallback((next: SelectedSupervisor[]) => {
     setSelectedState(next);
     if (next.length === 0) {
-      // User disabled — clear transient state.
-      setEntriesByAgentId({});
+      setMessagesByAgentId({});
+      setStreamingByAgentId({});
       setPairId(null);
       setPendingEscalate(null);
       setThinkingByAgentId({});
@@ -178,8 +181,6 @@ export function PairProvider({ children }: PairProviderProps) {
       }
       return next;
     });
-    // Notify Java so the next turn for this supervisor uses the new model.
-    // `model: ""` signals "fall back to the agent default".
     const pid = pairIdRef.current ?? '';
     sendToJava(
       `pair_set_model:${JSON.stringify({
@@ -217,12 +218,133 @@ export function PairProvider({ children }: PairProviderProps) {
     []
   );
 
-  const appendEntry = useCallback((agentId: string, entry: SupervisorLogEntry) => {
-    setEntriesByAgentId((prev) => {
-      const list = prev[agentId] ? [...prev[agentId], entry] : [entry];
-      // Cap per-agent history at 500 entries to avoid memory blow-up on long runs.
-      const trimmed = list.length > 500 ? list.slice(list.length - 500) : list;
-      return { ...prev, [agentId]: trimmed };
+  /**
+   * Append an entire message (user or assistant) to a supervisor's history.
+   */
+  const appendMessage = useCallback((agentId: string, message: ClaudeMessage) => {
+    setMessagesByAgentId((prev) => {
+      const list = prev[agentId] ? [...prev[agentId], message] : [message];
+      return { ...prev, [agentId]: trimHistory(list) };
+    });
+  }, []);
+
+  /**
+   * Append content blocks to the currently-streaming assistant message for a
+   * supervisor, or create one if no message for this turn exists yet. Tool
+   * results emitted in user messages are appended directly so {@code
+   * findToolResult} can correlate them with the corresponding {@code tool_use}.
+   */
+  const appendAssistantBlocks = useCallback(
+    (
+      agentId: string,
+      turnId: number,
+      blocks: ClaudeContentOrResultBlock[],
+      opts?: { ensureStreaming?: boolean }
+    ) => {
+      if (blocks.length === 0) return;
+      setMessagesByAgentId((prev) => {
+        const list = prev[agentId] ? [...prev[agentId]] : [];
+        let lastAssistant = -1;
+        for (let i = list.length - 1; i >= 0; i -= 1) {
+          if (list[i].type === 'assistant' && list[i].__turnId === turnId) {
+            lastAssistant = i;
+            break;
+          }
+        }
+        if (lastAssistant >= 0) {
+          const target = list[lastAssistant];
+          const rawBase = (typeof target.raw === 'object' && target.raw ? target.raw : {}) as Record<string, unknown>;
+          const existing = (rawBase.content as ClaudeContentOrResultBlock[] | undefined) ?? [];
+          const nextRaw = { ...rawBase, content: [...existing, ...blocks] };
+          list[lastAssistant] = {
+            ...target,
+            raw: nextRaw,
+            isStreaming: opts?.ensureStreaming ?? target.isStreaming,
+          };
+        } else {
+          list.push({
+            type: 'assistant',
+            raw: { content: blocks },
+            isStreaming: opts?.ensureStreaming ?? true,
+            __turnId: turnId,
+            timestamp: new Date().toISOString(),
+          });
+        }
+        return { ...prev, [agentId]: trimHistory(list) };
+      });
+    },
+    []
+  );
+
+  /**
+   * Attach tool_result blocks to whichever assistant message in the history
+   * already contains the matching tool_use. We append the result blocks to
+   * that message's raw.content so the main-AI findToolResult scan locates
+   * them. Falls back to creating a synthetic user message if no matching
+   * tool_use is found (defensive — shouldn't happen during normal flow).
+   */
+  const attachToolResults = useCallback(
+    (agentId: string, turnId: number, results: ToolResultBlock[]) => {
+      if (results.length === 0) return;
+      setMessagesByAgentId((prev) => {
+        const list = prev[agentId] ? [...prev[agentId]] : [];
+        const orphan: ToolResultBlock[] = [];
+        for (const r of results) {
+          let matched = false;
+          for (let i = list.length - 1; i >= 0; i -= 1) {
+            const target = list[i];
+            if (target.type !== 'assistant') continue;
+            const rawObj = typeof target.raw === 'object' && target.raw ? target.raw : null;
+            const content = rawObj?.content;
+            if (!Array.isArray(content)) continue;
+            const hasMatch = content.some(
+              (b) => b && (b as { type?: string }).type === 'tool_use' && (b as { id?: string }).id === r.tool_use_id
+            );
+            if (hasMatch) {
+              list[i] = {
+                ...target,
+                raw: { ...rawObj, content: [...content, r] },
+              };
+              matched = true;
+              break;
+            }
+          }
+          if (!matched) orphan.push(r);
+        }
+        let next = list;
+        if (orphan.length > 0) {
+          next = [...list, {
+            type: 'user',
+            raw: { content: orphan },
+            __turnId: turnId,
+            timestamp: new Date().toISOString(),
+          }];
+        }
+        return { ...prev, [agentId]: trimHistory(next) };
+      });
+    },
+    []
+  );
+
+  /**
+   * Mark whichever assistant messages match the given turnId as no longer
+   * streaming. Called when the turn wraps up (action wrapper arrives or
+   * thinking-off signal fires).
+   */
+  const endStreaming = useCallback((agentId: string, turnId: number) => {
+    setMessagesByAgentId((prev) => {
+      const list = prev[agentId];
+      if (!list) return prev;
+      let changed = false;
+      const next = list.map((m) => {
+        if (m.type === 'assistant' && m.__turnId === turnId && m.isStreaming) {
+          changed = true;
+          return { ...m, isStreaming: false };
+        }
+        return m;
+      });
+      if (!changed) return prev;
+      return { ...prev, [agentId]: next };
     });
   }, []);
 
@@ -250,25 +372,20 @@ export function PairProvider({ children }: PairProviderProps) {
         payload.attachments = attachments;
       }
       sendToJava(`pair_send_user_input:${JSON.stringify(payload)}`);
-      // Optimistically render the message in the right pane so the user sees
-      // it immediately. We show the ORIGINAL local-path text — that's what the
-      // user typed and expects to see; Java does the remote translation on
-      // the way to the daemon only.
+      // Optimistic local render: push a user message into the coordinator's
+      // history so the right pane reflects the input immediately. We use a
+      // pseudo turnId so the assistant streaming logic doesn't try to merge
+      // with it.
       const firstAgentId = selected[0]?.agentId;
       if (firstAgentId) {
-        setEntriesByAgentId((prev) => {
-          const next = prev[firstAgentId] ? [...prev[firstAgentId]] : [];
-          next.push({
-            id: `u_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-            kind: 'user',
-            text: trimmed,
-          });
-          const trimmedList = next.length > 500 ? next.slice(next.length - 500) : next;
-          return { ...prev, [firstAgentId]: trimmedList };
+        appendMessage(firstAgentId, {
+          type: 'user',
+          raw: { content: [{ type: 'text', text: trimmed }] },
+          timestamp: new Date().toISOString(),
         });
       }
     },
-    [selected]
+    [selected, appendMessage]
   );
 
   // Subscribe to Java callbacks for Pair lifecycle and action stream.
@@ -280,6 +397,7 @@ export function PairProvider({ children }: PairProviderProps) {
     const prevEscalate = window.onPairEscalate;
     const prevOpError = window.onPairOperationError;
     const prevThinking = window.onPairThinking;
+    const prevSupervisorMessage = window.onSupervisorMessage;
 
     window.onPairStarted = (json: string) => {
       try {
@@ -290,79 +408,159 @@ export function PairProvider({ children }: PairProviderProps) {
 
     window.onPairStopped = () => {
       setPairId(null);
-      setEntriesByAgentId({});
+      setMessagesByAgentId({});
+      setStreamingByAgentId({});
       setPendingEscalate(null);
       setModelOverrideByAgentId({});
       setReasoningByAgentId({});
+      setUsageByAgentId({});
     };
 
+    /**
+     * v4 unified pipeline: a tool_use envelope arrived from the daemon
+     * carrying the action wrapper (and turn metadata). We render the action
+     * as a synthetic tool_use block on the current turn's assistant message
+     * so the UI sees it through the same ContentBlockRenderer dispatch as
+     * the rest of the stream.
+     *
+     * Decision records ride along the wrapper with kind === 'decision_record';
+     * we synthesise a tool_use block per decision so it gets its own card
+     * inline with the turn.
+     */
     window.onPairActionEvent = (json: string) => {
       try {
         const evt = JSON.parse(json);
         const agentId: string | undefined = evt?.supervisorId;
         if (!agentId) return;
 
-        // v3: a decision_record event carries a single self-decision entry
-        // outside the normal action stream. Each one is rendered as its own
-        // standalone card (not grouped under a supervisor message bubble).
+        const turnStr: string = typeof evt.turnId === 'string' && evt.turnId
+          ? evt.turnId
+          : `m_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        const turnId = hashTurnId(turnStr);
+
+        // Decision record card.
         if (evt?.kind === 'decision_record' && evt.decision && typeof evt.decision === 'object') {
-          appendEntry(agentId, {
-            id: `d_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-            kind: 'decision',
-            decision: evt.decision,
-          });
+          appendAssistantBlocks(agentId, turnId, [{
+            type: 'tool_use',
+            id: `dec_${turnStr}_${evt.decision.step ?? Math.random().toString(36).slice(2, 5)}`,
+            name: 'mcp__supervisor__decision_record',
+            input: evt.decision,
+          }]);
           return;
         }
 
-        const baseId = `m_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-        // Each turn is rendered as ONE supervisor message bubble carrying:
-        //   - reasoning (foldable, when present)
-        //   - natural-language conclusion (the bubble body)
-        //   - one ACTION card (small badge under the bubble)
-        // We emit them as separate entries with the same `groupKey` so the
-        // renderer can collapse them into a single visual message.
-        const reasoningText = typeof evt.reasoningText === 'string' ? evt.reasoningText.trim() : '';
-        const naturalText   = typeof evt.naturalText   === 'string' ? evt.naturalText.trim()   : '';
-        const groupKey = baseId;
-
-        if (reasoningText) {
-          appendEntry(agentId, {
-            id: `${baseId}_r`,
-            kind: 'reasoning',
-            text: reasoningText,
-            groupKey,
-          });
-        }
-        if (naturalText) {
-          appendEntry(agentId, {
-            id: `${baseId}_t`,
-            kind: 'think',
-            text: naturalText,
-            groupKey,
-          });
+        // Fallback text/reasoning surfaced by the daemon when the SDK stream
+        // failed (transport error / model skipped emit_action). These don't
+        // arrive via [SUPERVISOR_MSG] so we splice them here.
+        if (evt?.parseError) {
+          const fallbackBlocks: ClaudeContentOrResultBlock[] = [];
+          const reasoningText = typeof evt.reasoningText === 'string' ? evt.reasoningText.trim() : '';
+          const naturalText = typeof evt.naturalText === 'string' ? evt.naturalText.trim() : '';
+          if (reasoningText) {
+            fallbackBlocks.push({ type: 'thinking', thinking: reasoningText, text: reasoningText });
+          }
+          if (naturalText) {
+            fallbackBlocks.push({ type: 'text', text: naturalText });
+          }
+          if (fallbackBlocks.length > 0) {
+            appendAssistantBlocks(agentId, turnId, fallbackBlocks);
+          }
         }
 
-        // Action card.
-        const actionType: SupervisorActionType | undefined = evt?.action?.action;
+        // Action envelope → synthetic tool_use block (rendered by
+        // SupervisorActionBlock). We carry the FULL payload, not a 60-char
+        // summary — the card is responsible for collapse/expand.
+        const actionType: string | undefined = evt?.action?.action;
         if (actionType) {
           const payload = evt.action.payload ?? {};
           const reason: string = evt.action.reason ?? '';
-          let summary: string | undefined;
-          let detail: string | undefined = reason || undefined;
-          if (actionType === 'inject_prompt' && typeof payload.prompt === 'string') {
-            summary = payload.prompt.length > 60 ? payload.prompt.slice(0, 60) + '…' : payload.prompt;
-          } else if (actionType === 'retry_with_hint') {
-            const w = payload.wait_seconds;
-            summary = typeof w === 'number' ? `wait ${w}s` : 'auto-recover';
-          } else if (actionType === 'escalate_to_human' && typeof payload.question === 'string') {
-            summary = payload.question.length > 60 ? payload.question.slice(0, 60) + '…' : payload.question;
+          appendAssistantBlocks(agentId, turnId, [{
+            type: 'tool_use',
+            id: `act_${turnStr}`,
+            name: 'mcp__supervisor__emit_action',
+            input: { action: actionType, reason, payload },
+          }]);
+        }
+
+        endStreaming(agentId, turnId);
+      } catch { /* ignore malformed */ }
+    };
+
+    /**
+     * v4 unified pipeline: a raw SDK message arrived during a supervisor
+     * turn. We funnel content blocks straight into the messages array — same
+     * shape, same content blocks as the main AI. The emit_action tool_use
+     * is filtered here because its result is delivered by onPairActionEvent
+     * (with reason/payload normalised); rendering both would duplicate.
+     */
+    window.onSupervisorMessage = (json: string) => {
+      try {
+        const evt = JSON.parse(json);
+        const agentId: string | undefined = evt?.supervisorId;
+        const turnStr: string | undefined = typeof evt?.turnId === 'string' ? evt.turnId : undefined;
+        const msg = evt?.message;
+        if (!agentId || !msg || typeof msg !== 'object') return;
+
+        const turnId = hashTurnId(turnStr || `sm_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
+
+        if (msg.type === 'assistant' && Array.isArray(msg.message?.content)) {
+          const blocks: ClaudeContentOrResultBlock[] = [];
+          for (const block of msg.message.content) {
+            if (!block || typeof block !== 'object') continue;
+            // Skip the action protocol envelope — onPairActionEvent renders it
+            // with the normalised payload.
+            if (block.type === 'tool_use' && typeof block.name === 'string'
+                && block.name.includes('emit_action')) continue;
+            blocks.push(block as ClaudeContentOrResultBlock);
           }
-          appendEntry(agentId, {
-            id: `${baseId}_a`,
-            kind: 'action',
-            action: { type: actionType, summary, detail },
-            groupKey,
-          });
+          if (blocks.length > 0) {
+            appendAssistantBlocks(agentId, turnId, blocks, { ensureStreaming: true });
+            setStreamingByAgentId((prev) =>
+              prev[agentId] ? prev : { ...prev, [agentId]: true }
+            );
+          }
+        } else if (msg.type === 'user' && Array.isArray(msg.message?.content)) {
+          const toolResults: ToolResultBlock[] = [];
+          const userBlocks: ClaudeContentOrResultBlock[] = [];
+          for (const block of msg.message.content) {
+            if (!block || typeof block !== 'object') continue;
+            if (block.type === 'tool_result') {
+              toolResults.push(block as ToolResultBlock);
+            } else {
+              userBlocks.push(block as ClaudeContentOrResultBlock);
+            }
+          }
+          if (toolResults.length > 0) {
+            attachToolResults(agentId, turnId, toolResults);
+          }
+          if (userBlocks.length > 0) {
+            // Non-tool-result content in a user message is supervisor input
+            // (the prompt the daemon assembled from main-AI events) — render
+            // it as a user bubble so the operator can see what the supervisor
+            // was given.
+            setMessagesByAgentId((prev) => {
+              const list = prev[agentId] ? [...prev[agentId]] : [];
+              list.push({
+                type: 'user',
+                raw: { content: userBlocks },
+                __turnId: turnId,
+                timestamp: new Date().toISOString(),
+              });
+              return { ...prev, [agentId]: trimHistory(list) };
+            });
+          }
+        } else if (msg.type === 'system' && msg.subtype === 'compact_boundary') {
+          // Render as a synthetic tool_use so it flows through
+          // ContentBlockRenderer alongside everything else.
+          appendAssistantBlocks(agentId, turnId, [{
+            type: 'tool_use',
+            id: `compact_${turnStr ?? Date.now()}`,
+            name: 'mcp__supervisor__compact_boundary',
+            input: {
+              trigger: msg.compact_metadata?.trigger ?? 'auto',
+              preTokens: msg.compact_metadata?.pre_tokens ?? null,
+            },
+          }]);
         }
       } catch { /* ignore malformed */ }
     };
@@ -418,14 +616,41 @@ export function PairProvider({ children }: PairProviderProps) {
       try {
         const o = JSON.parse(json) as { supervisorId?: string; thinking?: boolean };
         if (!o.supervisorId) return;
+        const agentId = o.supervisorId;
         setThinkingByAgentId((prev) => {
-          if ((prev[o.supervisorId!] ?? false) === !!o.thinking) return prev;
-          return { ...prev, [o.supervisorId!]: !!o.thinking };
+          if ((prev[agentId] ?? false) === !!o.thinking) return prev;
+          return { ...prev, [agentId]: !!o.thinking };
         });
+        if (!o.thinking) {
+          // Turn finished — clear the streaming flag and mark any in-flight
+          // assistant messages as no-longer-streaming. We don't know the
+          // exact turnId here (the daemon signals at turn boundary), so we
+          // sweep the whole supervisor history; isStreaming is only ever set
+          // on the latest assistant message anyway.
+          setStreamingByAgentId((prev) => {
+            if (!prev[agentId]) return prev;
+            return { ...prev, [agentId]: false };
+          });
+          setMessagesByAgentId((prev) => {
+            const list = prev[agentId];
+            if (!list) return prev;
+            let changed = false;
+            const next = list.map((m) => {
+              if (m.type === 'assistant' && m.isStreaming) {
+                changed = true;
+                return { ...m, isStreaming: false };
+              }
+              return m;
+            });
+            if (!changed) return prev;
+            return { ...prev, [agentId]: next };
+          });
+        }
       } catch { /* ignore */ }
     };
 
     return () => {
+      window.onSupervisorMessage = prevSupervisorMessage;
       window.onPairStarted = prevStarted;
       window.onPairStopped = prevStopped;
       window.onPairActionEvent = prevAction;
@@ -434,7 +659,36 @@ export function PairProvider({ children }: PairProviderProps) {
       window.onPairOperationError = prevOpError;
       window.onPairThinking = prevThinking;
     };
-  }, [appendEntry]);
+  }, [appendAssistantBlocks, attachToolResults, endStreaming]);
+
+  useEffect(() => {
+    const onSupervisorUsage = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (!detail || typeof detail !== 'object') return;
+      const agentId: string | undefined = detail.supervisorId;
+      if (!agentId) return;
+      const used = typeof detail.usedTokens === 'number'
+        ? detail.usedTokens
+        : (typeof detail.totalTokens === 'number' ? detail.totalTokens : 0);
+      const maxTokens = typeof detail.maxTokens === 'number'
+        ? detail.maxTokens
+        : (typeof detail.limit === 'number' ? detail.limit : 0);
+      const percentage = typeof detail.percentage === 'number'
+        ? Math.max(0, Math.min(100, detail.percentage))
+        : 0;
+      setUsageByAgentId((prev) => ({
+        ...prev,
+        [agentId]: {
+          model: typeof detail.model === 'string' ? detail.model : '',
+          totalPromptTokens: used,
+          maxTokens,
+          percentage,
+        },
+      }));
+    };
+    window.addEventListener('cc-gui:supervisor-usage', onSupervisorUsage);
+    return () => window.removeEventListener('cc-gui:supervisor-usage', onSupervisorUsage);
+  }, []);
 
   const value = useMemo<PairContextValue>(
     () => ({
@@ -443,14 +697,18 @@ export function PairProvider({ children }: PairProviderProps) {
       isPairActive: selected.length > 0,
       openManager,
       registerOpenManager,
-      entriesByAgentId,
+      messagesByAgentId,
       pairId,
       pendingEscalate,
       thinkingByAgentId,
+      streamingByAgentId,
       modelOverrideByAgentId,
       setSupervisorModel,
       reasoningByAgentId,
       setSupervisorReasoning,
+      longContextEnabled,
+      setLongContextEnabled,
+      usageByAgentId,
       respondToEscalate,
       dismissEscalate,
       registerInjectPromptHandler,
@@ -461,14 +719,18 @@ export function PairProvider({ children }: PairProviderProps) {
       setSelected,
       openManager,
       registerOpenManager,
-      entriesByAgentId,
+      messagesByAgentId,
       pairId,
       pendingEscalate,
       thinkingByAgentId,
+      streamingByAgentId,
       modelOverrideByAgentId,
       setSupervisorModel,
       reasoningByAgentId,
       setSupervisorReasoning,
+      longContextEnabled,
+      setLongContextEnabled,
+      usageByAgentId,
       respondToEscalate,
       dismissEscalate,
       registerInjectPromptHandler,
@@ -491,14 +753,18 @@ export function usePairContext(): PairContextValue {
     isPairActive: false,
     openManager: () => { /* no-op */ },
     registerOpenManager: () => { /* no-op */ },
-    entriesByAgentId: {},
+    messagesByAgentId: {},
     pairId: null,
     pendingEscalate: null,
     thinkingByAgentId: {},
+    streamingByAgentId: {},
     modelOverrideByAgentId: {},
     setSupervisorModel: () => { /* no-op */ },
     reasoningByAgentId: {},
     setSupervisorReasoning: () => { /* no-op */ },
+    longContextEnabled: false,
+    setLongContextEnabled: () => { /* no-op */ },
+    usageByAgentId: {},
     respondToEscalate: () => { /* no-op */ },
     dismissEscalate: () => { /* no-op */ },
     registerInjectPromptHandler: () => { /* no-op */ },

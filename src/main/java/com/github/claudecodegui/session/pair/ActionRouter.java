@@ -120,6 +120,13 @@ public class ActionRouter {
         // Any ACTION arrival means thinking ended.
         webview.onThinking(pair.getAgentId(), false);
 
+        // v4 unified pipeline: tool_use cards, compaction notices, and usage
+        // snapshots all flow live via [SUPERVISOR_MSG] (handled by PairHandler)
+        // — no per-wrapper side-channel dispatch needed. Usage in particular
+        // is now broadcast through UsagePushService.broadcast on every raw SDK
+        // message, so the TokenIndicator updates mid-turn rather than only at
+        // the closing [SUPERVISOR_ACTION].
+
         // First, surface the natural-language + action card to the right pane.
         webview.onActionEvent(actionWrapper);
 

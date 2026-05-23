@@ -8,6 +8,9 @@ import {
   EditToolBlock,
   GenericToolBlock,
   TaskExecutionBlock,
+  SupervisorActionBlock,
+  SupervisorDecisionBlock,
+  SupervisorCompactionBlock,
 } from '../toolBlocks';
 import { EDIT_TOOL_NAMES, BASH_TOOL_NAMES, isToolName, isTransientInternalToolName, normalizeToolName } from '../../utils/toolConstants';
 import { TASK_STATUS_COLORS } from '../../utils/messageUtils';
@@ -176,6 +179,40 @@ export function ContentBlockRenderer({
 
     if (!isStreaming && isTransientInternalToolName(block.name)) {
       return null;
+    }
+
+    // Supervisor pseudo-tools — synthesised on the Supervisor message stream
+    // (PairContext) so action/decision/compaction signals flow through the
+    // same dispatch as the rest of the SDK content blocks.
+    if (toolName === 'emit_action') {
+      return (
+        <SupervisorActionBlock
+          name={block.name}
+          input={block.input}
+          result={findToolResult(block.id, messageIndex)}
+          toolId={block.id}
+        />
+      );
+    }
+    if (toolName === 'decision_record') {
+      return (
+        <SupervisorDecisionBlock
+          name={block.name}
+          input={block.input}
+          result={findToolResult(block.id, messageIndex)}
+          toolId={block.id}
+        />
+      );
+    }
+    if (toolName === 'compact_boundary') {
+      return (
+        <SupervisorCompactionBlock
+          name={block.name}
+          input={block.input}
+          result={findToolResult(block.id, messageIndex)}
+          toolId={block.id}
+        />
+      );
     }
 
     if (toolName === 'task' || toolName === 'agent' || toolName === 'spawn_agent') {

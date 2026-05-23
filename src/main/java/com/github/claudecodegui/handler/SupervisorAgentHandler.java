@@ -92,11 +92,20 @@ public class SupervisorAgentHandler extends BaseMessageHandler {
             } else {
                 payload.add("defaultAgentId", null);
             }
+            // v3: expose the global auto-compact threshold so the Settings UI
+            // can render its current value without a second roundtrip.
+            try {
+                int threshold = settingsService.getSupervisorAgentManager().getAutoCompactThreshold();
+                payload.addProperty("autoCompactThreshold", threshold);
+            } catch (Exception ignored) {
+                payload.addProperty("autoCompactThreshold",
+                        com.github.claudecodegui.settings.SupervisorAgentManager.DEFAULT_AUTO_COMPACT_THRESHOLD);
+            }
             pushToWebview("window.updateSupervisorAgents", gson.toJson(payload));
         } catch (Exception e) {
             LOG.error("[SupervisorAgentHandler] Failed to get agents: " + e.getMessage(), e);
             pushToWebview("window.updateSupervisorAgents",
-                    "{\"agents\":[],\"defaultAgentId\":null}");
+                    "{\"agents\":[],\"defaultAgentId\":null,\"autoCompactThreshold\":70}");
         }
     }
 

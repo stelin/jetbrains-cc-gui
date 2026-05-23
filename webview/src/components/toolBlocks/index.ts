@@ -7,4 +7,7 @@ export { default as EditToolGroupBlock } from './EditToolGroupBlock';
 export { default as BashToolBlock } from './BashToolBlock';
 export { default as BashToolGroupBlock } from './BashToolGroupBlock';
 export { default as SearchToolGroupBlock } from './SearchToolGroupBlock';
+export { default as SupervisorActionBlock } from './SupervisorActionBlock';
+export { default as SupervisorDecisionBlock } from './SupervisorDecisionBlock';
+export { default as SupervisorCompactionBlock } from './SupervisorCompactionBlock';
 

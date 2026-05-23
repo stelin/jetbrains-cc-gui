@@ -470,6 +470,10 @@
         "updateSuccess": "Supervisor 已更新",
         "deleteSuccess": "Supervisor 已删除",
         "opFailed": "操作失败"
+      },
+      "autoCompact": {
+        "title": "对话历史压缩阈值",
+        "hint": "上下文用量超过该百分比时，Claude Code 会自动压缩对话历史。该设置影响所有 Claude 会话（包括主 AI 与监督者）。"
       }
     },
     "other": {
@@ -1641,6 +1645,17 @@
       "approve": "通过，进入下一步",
       "escalate": "请用户决策",
       "wait": "等待中"
+    },
+    "tool": {
+      "input": "调用参数",
+      "result": "结果"
+    },
+    "compaction": {
+      "notice": "上下文已自动压缩"
+    },
+    "usage": {
+      "tooltip": "已用 {{used}} / {{max}} tokens",
+      "placeholder": "等待首轮对话后显示用量"
     },
     "decision": {
       "step": "步骤 {{n}}",

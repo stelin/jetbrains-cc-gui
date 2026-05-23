@@ -114,6 +114,19 @@ public final class PairSessionManager implements Disposable {
         ProgressManager progress = new ProgressManager(pairDir);
         progress.initialise(pairId, params.planPath, params.agentId, agentName);
 
+        // Read the auto-compact threshold from the supervisor config (global
+        // setting, same value for every Pair). We pass this on every start so
+        // the daemon can update its env even after a config change without
+        // restarting the IDE.
+        int autoCompactThreshold;
+        try {
+            autoCompactThreshold = settings.getSupervisorAgentManager().getAutoCompactThreshold();
+        } catch (IOException ioe) {
+            LOG.warn("[PairSessionManager] Failed to read autoCompactThreshold; using default: "
+                    + ioe.getMessage());
+            autoCompactThreshold = com.github.claudecodegui.settings.SupervisorAgentManager.DEFAULT_AUTO_COMPACT_THRESHOLD;
+        }
+
         // Build bridge and persistent session shell.
         SupervisorBridge bridge = new SupervisorBridge(sdkBridge, pairId, params.agentId);
         PairSession session = new PairSession(
@@ -130,10 +143,12 @@ public final class PairSessionManager implements Disposable {
                 projectSpec,
                 model
         );
+        session.setAutoCompactThreshold(autoCompactThreshold);
 
         // Start daemon-side supervisor.
         try {
-            bridge.start(agentName, description, planContent, projectSpec, model)
+            bridge.start(agentName, description, planContent, projectSpec, model,
+                            autoCompactThreshold)
                     .get(START_DAEMON_TIMEOUT_SEC, TimeUnit.SECONDS);
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();

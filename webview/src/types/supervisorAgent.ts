@@ -26,6 +26,11 @@ export interface SupervisorAgent {
 export interface SupervisorAgentListPayload {
   agents: SupervisorAgent[];
   defaultAgentId: string | null;
+  /**
+   * v3 global auto-compact threshold (% of context window). Defaults to 70
+   * on the Java side; UI exposes this as a slider/number input.
+   */
+  autoCompactThreshold?: number;
 }
 
 /**

@@ -26,7 +26,7 @@ export default function PairLayout({ children, status }: PairLayoutProps) {
   const { t } = useTranslation();
   const {
     isPairActive,
-    entriesByAgentId,
+    messagesByAgentId,
     pendingEscalate,
     respondToEscalate,
     dismissEscalate,
@@ -157,7 +157,7 @@ export default function PairLayout({ children, status }: PairLayoutProps) {
         <span className={styles.dividerGrip} />
       </div>
       <div className={styles.rightPaneWrapper} style={{ width: `${rightWidthPct}%` }}>
-        <SupervisorPane entriesByAgentId={entriesByAgentId} status={status} />
+        <SupervisorPane messagesByAgentId={messagesByAgentId} status={status} />
       </div>
 
       {pendingEscalate && (

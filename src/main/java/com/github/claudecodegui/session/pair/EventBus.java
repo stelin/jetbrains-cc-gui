@@ -220,7 +220,8 @@ public class EventBus {
                             pair.getAgentDescription(),
                             pair.getPlanContent(),
                             pair.getProjectSpec(),
-                            pair.getModel())
+                            pair.getModel(),
+                            pair.getAutoCompactThreshold())
                     .get(RESTART_TIMEOUT_SEC, TimeUnit.SECONDS);
             return Boolean.TRUE.equals(ok);
         } catch (Exception e) {

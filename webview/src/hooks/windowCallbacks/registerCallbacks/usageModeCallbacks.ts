@@ -38,6 +38,24 @@ export function registerUsageModeCallbacks(options: UseWindowCallbacksOptions): 
   window.onUsageUpdate = (json) => {
     try {
       const data = JSON.parse(json);
+
+      // Supervisor pane shares this callback. Java sets scope="supervisor"
+      // (with supervisorId=<agentId>) when the snapshot is for a supervisor
+      // pair; we forward it via CustomEvent so PairContext can react without
+      // owning its own window.* callback. Main AI payloads have no scope (or
+      // scope="main") and fall through to the original path — zero behavior
+      // change for the main-AI flow.
+      if (data && data.scope === 'supervisor') {
+        try {
+          window.dispatchEvent(
+            new CustomEvent('cc-gui:supervisor-usage', { detail: data }),
+          );
+        } catch (e) {
+          console.error('[Frontend] supervisor usage dispatch failed:', e);
+        }
+        return;
+      }
+
       if (typeof data.percentage === 'number') {
         const used =
           typeof data.usedTokens === 'number'

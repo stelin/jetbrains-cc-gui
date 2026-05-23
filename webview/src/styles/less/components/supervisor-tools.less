@@ -1,0 +1,231 @@
+// Supervisor pseudo-tool styles. These render inside the supervisor's
+// MessageList using the main-AI rendering pipeline; the class names live in
+// the global scope (rather than a CSS module) so ContentBlockRenderer's tool
+// block dispatch can use them without coupling to SupervisorPair.
+
+// ─────────── Action card ───────────
+// Inline card for emit_action calls (inject_prompt / retry_with_hint /
+// escalate_to_human / approve_and_continue / wait). The full payload is
+// reachable via the foldable body — no more 60-char truncation of the
+// prompt the supervisor is sending to the main AI.
+
+.supervisor-action-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  border: 1px solid var(--border-secondary);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-size: 12px;
+  margin: 4px 0;
+}
+
+.supervisor-action-card.supervisor-action-inject {
+  border-color: var(--color-success);
+  background: var(--color-button-success-bg);
+}
+
+.supervisor-action-card.supervisor-action-retry {
+  border-color: var(--color-warning);
+  background: var(--color-notice-warning-bg);
+}
+
+.supervisor-action-card.supervisor-action-escalate {
+  border-color: var(--color-error);
+  background: var(--color-button-danger-hover-bg);
+}
+
+.supervisor-action-card.supervisor-action-approve,
+.supervisor-action-card.supervisor-action-wait {
+  border-color: var(--border-secondary);
+}
+
+.supervisor-action-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+}
+
+.supervisor-action-icon {
+  flex-shrink: 0;
+  font-size: 14px;
+}
+
+.supervisor-action-label {
+  flex-shrink: 0;
+  font-weight: 600;
+}
+
+.supervisor-action-headline {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-size: 11px;
+}
+
+.supervisor-action-chevron {
+  flex-shrink: 0;
+  font-size: 9px;
+  color: var(--text-muted);
+}
+
+.supervisor-action-reason {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.supervisor-action-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border-secondary);
+}
+
+// ─────────── Decision card ───────────
+// Foldable summary row + expanded full record. A `review_flag === true`
+// (category B grey-zone) entry gets a warning border so the human reviewer
+// can spot it later.
+
+.supervisor-decision-card {
+  border: 1px solid var(--border-secondary);
+  background: var(--bg-elevated);
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+  margin: 4px 0;
+}
+
+.supervisor-decision-card.supervisor-decision-flagged {
+  border-color: var(--color-warning);
+  background: var(--color-notice-warning-bg);
+}
+
+.supervisor-decision-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  user-select: none;
+
+  &:hover {
+    background: var(--bg-hover);
+  }
+}
+
+.supervisor-decision-icon {
+  flex-shrink: 0;
+  font-size: 14px;
+}
+
+.supervisor-decision-step {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.supervisor-decision-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 2px;
+  background: var(--accent-primary);
+  color: var(--color-button-text);
+}
+
+.supervisor-decision-badge.supervisor-decision-badge-flag {
+  background: var(--color-warning);
+}
+
+.supervisor-decision-choice {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.supervisor-decision-chevron {
+  flex-shrink: 0;
+  font-size: 9px;
+  color: var(--text-muted);
+}
+
+.supervisor-decision-body {
+  padding: 6px 10px 8px;
+  border-top: 1px dashed var(--border-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.supervisor-decision-row {
+  display: flex;
+  gap: 6px;
+  align-items: flex-start;
+  line-height: 1.5;
+  font-size: 11px;
+}
+
+.supervisor-decision-field-label {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-weight: 500;
+  min-width: 56px;
+}
+
+.supervisor-decision-field-value {
+  flex: 1;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.supervisor-decision-flag-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  padding: 4px 6px;
+  background: var(--color-notice-warning-bg);
+  border: 1px solid var(--color-warning);
+  border-radius: 3px;
+  font-size: 11px;
+  color: var(--color-warning);
+
+  .codicon {
+    font-size: 12px;
+  }
+}
+
+// ─────────── Compaction notice ───────────
+
+.supervisor-compaction-note {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+  background: var(--color-notice-info-bg);
+  border-radius: 3px;
+  margin: 4px 0;
+}
+
+.supervisor-compaction-icon {
+  font-size: 12px;
+}

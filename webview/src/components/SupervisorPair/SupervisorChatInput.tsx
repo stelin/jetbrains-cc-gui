@@ -5,8 +5,10 @@ import type {
   SupervisorAgent,
 } from '../../types/supervisorAgent';
 import type { ModelInfo, ReasoningEffort } from '../ChatInputBox/types';
+import { apply1MContextSuffix, strip1MContextSuffix } from '../ChatInputBox/types';
 import { ModelSelect } from '../ChatInputBox/selectors/ModelSelect';
 import { ReasoningSelect } from '../ChatInputBox/selectors/ReasoningSelect';
+import { TokenIndicator } from '../ChatInputBox/TokenIndicator';
 import { SUPERVISOR_MODELS } from '../settings/SupervisorSection/templates';
 import SupervisorAgentSelect from './SupervisorAgentSelect';
 import { usePairContext } from './PairContext';
@@ -81,9 +83,13 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
     setSupervisorModel,
     reasoningByAgentId,
     setSupervisorReasoning,
+    longContextEnabled,
+    setLongContextEnabled,
+    usageByAgentId,
     setSelected,
     openManager,
   } = usePairContext();
+  const usage = usageByAgentId[supervisor.agentId];
 
   const [draft, setDraft] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -178,19 +184,40 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
     [setSelected]
   );
 
-  const effectiveModel =
+  // The base model id (without the [1m] suffix) is what we render in the
+  // dropdown; we add/remove the suffix transparently based on the 1M toggle.
+  const baseEffectiveModel = strip1MContextSuffix(
     modelOverrideByAgentId[supervisor.agentId] ||
     supervisor.model ||
     SUPERVISOR_MODEL_INFOS[0]?.id ||
-    'claude-haiku-4-5-20251001';
+    'claude-haiku-4-5-20251001'
+  );
+  const effectiveModel = apply1MContextSuffix(baseEffectiveModel, longContextEnabled);
   const effectiveReasoning: ReasoningEffort =
     reasoningByAgentId[supervisor.agentId] ?? 'medium';
 
   const handleModelChange = useCallback(
     (modelId: string) => {
-      setSupervisorModel(supervisor.agentId, modelId === supervisor.model ? null : modelId);
+      // Strip the [1m] suffix if the picker happened to emit it — the toggle
+      // is the source of truth for 1M; we keep the suffix attached via
+      // {@code apply1MContextSuffix} on send instead.
+      const baseId = strip1MContextSuffix(modelId);
+      const effective = apply1MContextSuffix(baseId, longContextEnabled);
+      setSupervisorModel(supervisor.agentId, effective === supervisor.model ? null : effective);
     },
-    [setSupervisorModel, supervisor.agentId, supervisor.model]
+    [setSupervisorModel, supervisor.agentId, supervisor.model, longContextEnabled]
+  );
+
+  const handleLongContextChange = useCallback(
+    (enabled: boolean) => {
+      setLongContextEnabled(enabled);
+      // Propagate the new resolved model (with/without [1m]) so the daemon
+      // picks it up on next supervisor restart. We re-resolve via the *base*
+      // id stripped of any prior suffix to avoid double-appending.
+      const effective = apply1MContextSuffix(baseEffectiveModel, enabled);
+      setSupervisorModel(supervisor.agentId, effective);
+    },
+    [setLongContextEnabled, baseEffectiveModel, setSupervisorModel, supervisor.agentId]
   );
 
   const handleReasoningChange = useCallback(
@@ -207,6 +234,33 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
       onDragOver={handleDragOver}
       onDrop={handleDrop}
     >
+      {/* Context bar above the textarea — mirrors the main AI's ContextBar
+          (TokenIndicator already renders its own percentage label, so we
+          don't add a duplicate span). Left-aligned per the design call —
+          the supervisor pane has no file/agent chips to occupy the left
+          side, so we put the usage indicator there instead of the right
+          where the main AI shows it. Always rendered; 0% placeholder
+          before the first turn completes. */}
+      <div className={styles.contextBar}>
+        <div
+          className={styles.contextUsage}
+          title={usage
+            ? t('pairLayout.usage.tooltip', {
+                used: usage.totalPromptTokens.toLocaleString(),
+                max: (usage.maxTokens ?? 0).toLocaleString(),
+                defaultValue: `${usage.totalPromptTokens.toLocaleString()} / ${(usage.maxTokens ?? 0).toLocaleString()} tokens`,
+              })
+            : t('pairLayout.usage.placeholder', '等待首轮对话后显示用量')
+          }
+        >
+          <TokenIndicator
+            percentage={usage?.percentage ?? 0}
+            usedTokens={usage?.totalPromptTokens ?? 0}
+            maxTokens={usage?.maxTokens ?? 200_000}
+            size={14}
+          />
+        </div>
+      </div>
       <div className="input-editable-wrapper">
         <textarea
           ref={textareaRef}
@@ -234,6 +288,8 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
             onChange={handleModelChange}
             models={SUPERVISOR_MODEL_INFOS}
             currentProvider="claude"
+            longContextEnabled={longContextEnabled}
+            onLongContextChange={handleLongContextChange}
           />
 
           <ReasoningSelect

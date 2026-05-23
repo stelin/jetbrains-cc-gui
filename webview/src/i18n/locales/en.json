@@ -470,6 +470,10 @@
         "updateSuccess": "Supervisor updated",
         "deleteSuccess": "Supervisor deleted",
         "opFailed": "Operation failed"
+      },
+      "autoCompact": {
+        "title": "Conversation auto-compact threshold",
+        "hint": "When prompt-token usage exceeds this %, Claude Code auto-compacts the history. Applies to all Claude sessions in this daemon (main AI and supervisor)."
       }
     },
     "other": {
@@ -1636,6 +1640,17 @@
       "approve": "Approved, moving to next step",
       "escalate": "Awaiting user decision",
       "wait": "Waiting"
+    },
+    "tool": {
+      "input": "Input",
+      "result": "Result"
+    },
+    "compaction": {
+      "notice": "Context auto-compacted"
+    },
+    "usage": {
+      "tooltip": "{{used}} / {{max}} tokens used",
+      "placeholder": "Usage will appear after the first turn"
     },
     "decision": {
       "step": "Step {{n}}",

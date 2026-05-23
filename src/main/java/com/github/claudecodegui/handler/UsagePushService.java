@@ -25,12 +25,81 @@ import java.util.List;
 public class UsagePushService {
 
     private static final Logger LOG = Logger.getInstance(UsagePushService.class);
+    private static final Gson STATIC_GSON = new Gson();
 
     private final HandlerContext context;
     private final Gson gson = new Gson();
 
     public UsagePushService(HandlerContext context) {
         this.context = context;
+    }
+
+    /**
+     * Single entry point for pushing a usage snapshot to the webview, shared by
+     * both the main AI and the supervisor pane. Centralising computation here
+     * means {@link SettingsHandler#getModelContextLimit} and the Claude usage
+     * formula ({@link TokenUsageUtils#extractUsedTokens}) drive both panes from
+     * the same code path — when one changes, the other follows automatically.
+     *
+     * <p>The webview receives a single callback, {@code window.onUsageUpdate},
+     * with a {@code scope} discriminator. Payload schema:
+     * <pre>
+     *   { scope: "main" | "supervisor",
+     *     supervisorId?: string,   // present when scope = "supervisor"
+     *     model: string,
+     *     percentage: int,
+     *     usedTokens: int, totalTokens: int,  // alias, kept for compatibility
+     *     maxTokens:  int, limit:       int   // alias, kept for compatibility
+     *   }
+     * </pre>
+     *
+     * @param rawSdkUsage SDK-shaped usage object (snake_case input_tokens etc.);
+     *                    null is allowed and treated as "0 tokens used"
+     *                    (used by supervisor baseline push at pair_start).
+     * @param model       Model id whose context window we measure against.
+     * @param scope       "main" or "supervisor".
+     * @param supervisorId Agent id when scope=supervisor; ignored otherwise.
+     * @param context     Handler context — provides browser + EDT plumbing.
+     */
+    public static void broadcast(
+            JsonObject rawSdkUsage,
+            String model,
+            String scope,
+            String supervisorId,
+            HandlerContext context
+    ) {
+        if (context == null) return;
+        int usedTokens = rawSdkUsage == null
+                ? 0
+                : TokenUsageUtils.extractUsedTokens(rawSdkUsage, "claude");
+        int maxTokens = SettingsHandler.getModelContextLimit(model);
+        int percentage = Math.min(100, maxTokens > 0 ? (int) ((usedTokens * 100.0) / maxTokens) : 0);
+
+        JsonObject payload = new JsonObject();
+        payload.addProperty("scope", scope);
+        if (supervisorId != null && !supervisorId.isEmpty()) {
+            payload.addProperty("supervisorId", supervisorId);
+        }
+        if (model != null) {
+            payload.addProperty("model", model);
+        }
+        payload.addProperty("percentage", percentage);
+        payload.addProperty("usedTokens", usedTokens);
+        payload.addProperty("totalTokens", usedTokens);
+        payload.addProperty("maxTokens", maxTokens);
+        payload.addProperty("limit", maxTokens);
+
+        String json = STATIC_GSON.toJson(payload);
+        ApplicationManager.getApplication().invokeLater(() -> {
+            if (context.getBrowser() == null || context.isDisposed()) return;
+            String js = "(function() {" +
+                    "  if (typeof window.onUsageUpdate === 'function') {" +
+                    "    window.onUsageUpdate('" + context.escapeJs(json) + "');" +
+                    "  }" +
+                    "})();";
+            context.getBrowser().getCefBrowser().executeJavaScript(
+                    js, context.getBrowser().getCefBrowser().getURL(), 0);
+        });
     }
 
     /**

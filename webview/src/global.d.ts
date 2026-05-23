@@ -489,6 +489,20 @@ interface Window {
   onPairInjectPrompt?: (json: string) => void;
   onPairEscalate?: (json: string) => void;
   onPairThinking?: (json: string) => void;
+  /**
+   * v4 unified pipeline: one raw SDK message streamed by the daemon during a
+   * supervisor turn. Payload: { pairId, supervisorId, turnId, message: <SDK msg> }.
+   * Each call delivers exactly one assistant/user/system/result frame the
+   * supervisor's Claude SDK query produced — same shape as the main AI's
+   * messages, so the webview can map content blocks (text, thinking,
+   * tool_use, tool_result) into pane entries directly.
+   *
+   * <p>Supervisor token-usage snapshots do NOT come through here — they share
+   * the main-AI {@link onUsageUpdate} channel with {@code scope: "supervisor"}
+   * and are re-dispatched as a {@code cc-gui:supervisor-usage} CustomEvent
+   * for PairContext to consume.
+   */
+  onSupervisorMessage?: (json: string) => void;
 
   /**
    * Update prompts list

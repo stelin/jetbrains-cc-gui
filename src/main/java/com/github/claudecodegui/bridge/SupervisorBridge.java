@@ -8,6 +8,7 @@ import com.intellij.openapi.diagnostic.Logger;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 /**
  * Java-side facade for the daemon's {@code supervisor.*} methods.
@@ -21,6 +22,14 @@ public class SupervisorBridge {
     private static final Logger LOG = Logger.getInstance(SupervisorBridge.class);
 
     public static final String ACTION_LINE_PREFIX = "[SUPERVISOR_ACTION]";
+    /**
+     * v4 unified pipeline prefix. Each raw SDK message the daemon yields
+     * during a supervisor turn is written as a line of this form so the
+     * webview can render content blocks live (instead of waiting for the
+     * post-turn wrapper). The line content is a JSON envelope:
+     *   { pairId, supervisorId, turnId, message: <raw SDK msg> }
+     */
+    public static final String MSG_LINE_PREFIX = "[SUPERVISOR_MSG]";
 
     /**
      * Translate the daemon's "Unknown provider: supervisor" / "Unknown supervisor command"
@@ -43,6 +52,12 @@ public class SupervisorBridge {
     private final ClaudeSDKBridge sdkBridge;
     private final String pairId;
     private final String supervisorId;
+    /**
+     * v4 unified pipeline: stream handler for `[SUPERVISOR_MSG]` lines emitted
+     * by the daemon during a supervisor turn. Set once by PairHandler when
+     * the pair is created; null means stream messages are dropped (e.g. tests).
+     */
+    private volatile Consumer<JsonObject> messageHandler;
 
     public SupervisorBridge(ClaudeSDKBridge sdkBridge, String pairId, String supervisorId) {
         this.sdkBridge = sdkBridge;
@@ -54,15 +69,32 @@ public class SupervisorBridge {
     public String getSupervisorId() { return supervisorId; }
 
     /**
+     * Register the consumer for `[SUPERVISOR_MSG]` lines parsed in {@link #postEvent}.
+     * Pass null to clear. Replaces any previously-set handler — the bridge
+     * does not multicast (PairHandler wires exactly one).
+     */
+    public void setMessageHandler(Consumer<JsonObject> handler) {
+        this.messageHandler = handler;
+    }
+
+    /**
      * Start the supervisor session on the daemon. Returns a future that
      * completes once the daemon acks {@code done}.
+     *
+     * <p>{@code autoCompactThreshold} (optional, 50-95) is forwarded to the
+     * daemon and applied as {@code CLAUDE_AUTOCOMPACT_PCT_OVERRIDE} env var —
+     * lowering it from CLI's ~95% default gives the supervisor more headroom
+     * before a single file-heavy review turn blows past the context window.
+     * The setting is daemon-process-wide so it also applies to the main AI
+     * channel sharing the same daemon (acknowledged in the design).
      */
     public CompletableFuture<Boolean> start(
             String agentName,
             String description,
             String planContent,
             String specContent,
-            String model
+            String model,
+            Integer autoCompactThreshold
     ) {
         JsonObject params = new JsonObject();
         params.addProperty("pairId", pairId);
@@ -75,6 +107,9 @@ public class SupervisorBridge {
         }
         if (model != null && !model.isEmpty()) {
             params.addProperty("model", model);
+        }
+        if (autoCompactThreshold != null) {
+            params.addProperty("autoCompactThreshold", autoCompactThreshold.intValue());
         }
         return sdkBridge.sendDaemonCommand("supervisor.start", params, sinkCallback("start"));
     }
@@ -100,11 +135,33 @@ public class SupervisorBridge {
                 new IBridge.DaemonOutputCallback() {
                     @Override
                     public void onLine(String line) {
-                        // Lines come pre-stripped of the NDJSON envelope by the daemon;
-                        // they may include the request id wrapper. We accept either
-                        // "[SUPERVISOR_ACTION] {json}" or a raw JSON object.
+                        // Lines come pre-stripped of the NDJSON envelope by the daemon.
+                        // We recognize two prefixes:
+                        //   [SUPERVISOR_MSG]    — one raw SDK message, streamed live during
+                        //                         the turn; routed to the message handler
+                        //                         so the webview can render content blocks
+                        //                         as they arrive
+                        //   [SUPERVISOR_ACTION] — the post-turn wrapper carrying the
+                        //                         emit_action result; captured for the
+                        //                         CompletableFuture return value
                         if (line == null) return;
                         String trimmed = line.trim();
+
+                        int msgIdx = trimmed.indexOf(MSG_LINE_PREFIX);
+                        if (msgIdx >= 0) {
+                            String jsonText = trimmed.substring(msgIdx + MSG_LINE_PREFIX.length()).trim();
+                            Consumer<JsonObject> handler = messageHandler;
+                            if (handler == null) return;
+                            try {
+                                JsonObject parsed = JsonParser.parseString(jsonText).getAsJsonObject();
+                                handler.accept(parsed);
+                            } catch (Exception e) {
+                                LOG.warn("[SupervisorBridge] Failed to parse MSG line: " + e.getMessage()
+                                        + " | line=" + trimmed);
+                            }
+                            return;
+                        }
+
                         int idx = trimmed.indexOf(ACTION_LINE_PREFIX);
                         if (idx >= 0) {
                             String jsonText = trimmed.substring(idx + ACTION_LINE_PREFIX.length()).trim();

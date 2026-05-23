@@ -221,148 +221,28 @@
   display: none;
 }
 
-// ─────────── Chat-style body (new) ───────────
-
-.chatBody {
+// Wrapper that hosts the main-AI MessageList inside a supervisor subpanel.
+// MessageList expects an outer scrollable container with a bounded height;
+// we provide both via this wrapper so the supervisor pane scrolls
+// independently of the rest of the right pane chrome.
+.supervisorMessageListWrapper {
   display: flex;
   flex-direction: column;
-  padding: 10px 10px 6px;
-  gap: 10px;
   flex: 1;
-  overflow-y: auto;
-  font-size: 12px;
   min-height: 0;
-}
-
-.chatBody.collapsed {
-  display: none;
-}
-
-.chatMessage {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-}
-
-.supervisorMessage {
-  justify-content: flex-start;
-}
-
-.userMessage {
-  justify-content: flex-end;
-}
-
-.avatar {
-  flex-shrink: 0;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  background: var(--bg-elevated);
-  color: var(--text-primary);
-  border: 1px solid var(--border-secondary);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-}
-
-.userMessage .avatar {
-  background: var(--accent-primary);
-  color: var(--color-button-text);
-  border-color: transparent;
-}
-
-.bubbleSupervisorWrapper {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-width: calc(100% - 32px);
-  min-width: 0;
-}
-
-.bubbleSupervisor {
-  background: var(--bg-elevated);
-  color: var(--text-primary);
-  border: 1px solid var(--border-secondary);
-  padding: 7px 10px;
-  border-radius: 4px 12px 12px 12px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.bubbleThinking {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-style: italic;
-  color: var(--text-muted);
-}
-
-.bubbleUser {
-  background: var(--color-user-bubble);
-  color: var(--color-message-user-text);
-  padding: 7px 10px;
-  border-radius: 12px 4px 12px 12px;
-  max-width: calc(100% - 32px);
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-// Foldable "Thinking" header for Supervisor reasoning content — mirrors the
-// main AI message thinking-block visual.
-.thinkingFold {
-  border: 1px dashed var(--color-thinking-border);
-  border-radius: 4px;
-  background: var(--color-tool-bg-secondary);
-  overflow: hidden;
-}
-
-.thinkingFoldHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 4px 8px;
-  font-size: 11px;
-  color: var(--color-thinking-text);
-  cursor: pointer;
-  user-select: none;
-
-  &:hover {
-    background: var(--bg-hover);
-  }
-}
-
-.thinkingFoldTitle {
-  font-weight: 500;
-}
-
-.thinkingFoldChevron {
-  font-size: 9px;
-}
-
-.thinkingFoldBody {
-  padding: 6px 8px 8px;
-  font-size: 11px;
-  color: var(--color-thinking-text);
-  white-space: pre-wrap;
-  word-break: break-word;
-  line-height: 1.5;
-  border-top: 1px dashed var(--color-thinking-border);
-  max-height: 240px;
+  padding: 8px 10px 6px;
   overflow-y: auto;
-}
+  font-size: 12px;
 
-// Standalone status note (ok/warn/error), centered, smaller, no bubble.
-.statusNote {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  font-size: 11px;
-  color: var(--text-muted);
-  padding: 2px 0;
+  // Tighten spacing inside supervisor message bubbles — main-AI defaults are
+  // tuned for the full-width chat column and look airy in the narrow pane.
+  :global(.message) {
+    margin-bottom: 8px;
+  }
+
+  :global(.content-block) {
+    margin-bottom: 4px;
+  }
 }
 
 .placeholderHint {
@@ -373,236 +253,31 @@
   font-style: italic;
 }
 
-.thinkingRow {
+// ─────────── Context bar above supervisor textarea (v3) ───────────
+// Sits between the chat-input-box top edge and the textarea.
+//
+// Layout note: the supervisor has no file/agent chips, so we put the
+// TokenIndicator on the LEFT (justify-content: flex-start) rather than
+// mirroring the main AI's right-aligned position. This keeps the bar from
+// looking lopsided (a single 14px ring on the far right with empty space
+// otherwise) and makes the usage badge the first thing the user reads.
+
+.contextBar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 0;
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.thinkingSpinner {
-  font-size: 14px;
-  color: var(--accent-primary);
-}
-
-.thinkingText {
-  font-style: italic;
-}
-
-// ─────────── Messages inside SubPanel ───────────
-
-.eventRow {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  line-height: 1.5;
-}
-
-.eventIcon {
-  flex-shrink: 0;
-  margin-top: 2px;
-  font-size: 14px;
-}
-
-.eventThink { color: var(--text-muted); }
-.eventOk    { color: var(--color-success); }
-.eventWarn  { color: var(--color-warning); }
-.eventError { color: var(--color-error); }
-.eventUser  { color: var(--accent-primary); }
-
-.userRow {
-  align-items: flex-start;
-}
-
-.userBubble {
-  background: var(--bg-elevated);
-  border-left: 2px solid var(--accent-primary);
-  padding: 6px 8px;
-  border-radius: 4px;
-  color: var(--text-primary);
-}
-
-.eventText {
-  flex: 1;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-// ─────────── Action card ───────────
-
-.actionCard {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 8px 10px;
-  border-radius: 4px;
-  border: 1px solid var(--border-secondary);
-  background: var(--bg-elevated);
-  color: var(--text-primary);
-  font-size: 12px;
-}
-
-.actionCard.inject {
-  border-color: var(--color-success);
-  background: var(--color-button-success-bg);
-}
-
-.actionCard.retry {
-  border-color: var(--color-warning);
-  background: var(--color-notice-warning-bg);
-}
-
-.actionCard.escalate {
-  border-color: var(--color-error);
-  background: var(--color-button-danger-hover-bg);
-}
-
-.actionCard.approve {
-  border-color: var(--border-secondary);
-}
-
-.actionCardIcon {
-  flex-shrink: 0;
-  font-size: 16px;
-}
-
-.actionCardBody {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.actionCardLabel {
-  font-weight: 600;
-}
-
-.actionCardDetail {
-  color: var(--text-muted);
-  font-size: 11px;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-// ─────────── Decision card (v3 self-decision log) ───────────
-// Rendered as its own row in the chat stream. A category-B (grey-zone) entry
-// has `review_flag=true` and gets a warning border so the human reviewer can
-// spot it later when scrubbing the session.
-
-.decisionCard {
-  border: 1px solid var(--border-secondary);
-  background: var(--bg-elevated);
-  border-radius: 4px;
-  font-size: 12px;
-  color: var(--text-primary);
-  overflow: hidden;
-}
-
-.decisionCard.decisionFlagged {
-  border-color: var(--color-warning);
-  background: var(--color-notice-warning-bg);
-}
-
-.decisionHead {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  cursor: pointer;
-  user-select: none;
-
-  &:hover {
-    background: var(--bg-hover);
-  }
-}
-
-.decisionIcon {
-  flex-shrink: 0;
-  font-size: 14px;
-}
-
-.decisionStep {
-  flex-shrink: 0;
-  font-weight: 600;
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
-.decisionBadge {
-  flex-shrink: 0;
-  font-size: 10px;
-  padding: 1px 6px;
-  border-radius: 2px;
-  background: var(--accent-primary);
-  color: var(--color-button-text);
-}
-
-.decisionBadge.decisionBadgeFlag {
-  background: var(--color-warning);
-}
-
-.decisionChoice {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-primary);
-}
-
-.decisionChevron {
-  flex-shrink: 0;
-  font-size: 9px;
-  color: var(--text-muted);
-}
-
-.decisionBody {
-  padding: 6px 10px 8px;
-  border-top: 1px dashed var(--border-secondary);
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.decisionRow {
-  display: flex;
+  justify-content: flex-start;
   gap: 6px;
-  align-items: flex-start;
-  line-height: 1.5;
-  font-size: 11px;
+  padding: 4px 4px 6px;
+  border-bottom: 1px solid var(--border-secondary);
+  margin-bottom: 4px;
 }
 
-.decisionFieldLabel {
-  flex-shrink: 0;
-  color: var(--text-muted);
-  font-weight: 500;
-  min-width: 56px;
-}
-
-.decisionFieldValue {
-  flex: 1;
-  color: var(--text-primary);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.decisionFlagNote {
-  display: flex;
+.contextUsage {
+  display: inline-flex;
   align-items: center;
-  gap: 6px;
-  margin-top: 4px;
-  padding: 4px 6px;
-  background: var(--color-notice-warning-bg);
-  border: 1px solid var(--color-warning);
-  border-radius: 3px;
-  font-size: 11px;
-  color: var(--color-warning);
-
-  .codicon {
-    font-size: 12px;
-  }
+  gap: 4px;
+  cursor: default;
+  color: var(--text-muted);
 }
 
 // ─────────── Escalate dialog ───────────
@@ -836,16 +511,16 @@
 // AI input's contenteditable div): same font-size, line-height, placeholder
 // color, and "no chrome" appearance so the card body matches.
 //
-// Height note: the left column stacks StatusPanel (task / subagent / edit
-// tabs ~40px) + context bar (~32px) + input-editable (4 lines) above its
-// toolbar — none of which exist on the right side. To make both columns
-// visually finish at the same baseline, give the supervisor textarea 8 lines
-// of min-height (≈ the missing 72px on top of the 5-line previous default).
-// The wrapper's max-height (240px) still caps growth.
+// Height note: target total card height ≈ main AI's input column. Main AI
+// stacks StatusPanel (~40px) + ContextBar (~32px) + Input (4 lines ≈ 84px)
+// + ButtonArea (~36px) ≈ 192px. Supervisor stacks ContextBar (~28px) +
+// Textarea (this) + ButtonArea (~36px). At 5 lines (~105px), total ≈ 169px
+// — close to main AI without over-shooting. Earlier we had 8 lines, which
+// stacked too tall once the ContextBar was added.
 .supervisorTextarea {
   display: block;
   width: 100%;
-  min-height: calc(1.5em * 8);
+  min-height: calc(1.5em * 5);
   padding: 0;
   margin: 0;
   border: none;

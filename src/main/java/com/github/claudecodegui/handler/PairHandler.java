@@ -44,7 +44,9 @@ public class PairHandler extends BaseMessageHandler {
             "pair_human_response",
             "pair_send_user_input",
             "pair_set_model",
-            "pair_set_reasoning"
+            "pair_set_reasoning",
+            "pair_set_long_context",
+            "pair_set_auto_compact_threshold"
     };
 
     private final Gson gson;
@@ -80,6 +82,12 @@ public class PairHandler extends BaseMessageHandler {
             case "pair_set_reasoning":
                 handleSetReasoning(content);
                 return true;
+            case "pair_set_long_context":
+                handleSetLongContext(content);
+                return true;
+            case "pair_set_auto_compact_threshold":
+                handleSetAutoCompactThreshold(content);
+                return true;
             default:
                 return false;
         }
@@ -111,12 +119,52 @@ public class PairHandler extends BaseMessageHandler {
             // Bind webview bridge so ActionRouter can drive UI.
             session.getActionRouter().setWebviewBridge(new WebviewBridgeImpl());
 
+            // v4 unified pipeline: forward each raw SDK message streamed by the
+            // daemon during a supervisor turn to the webview. The webview maps
+            // content blocks (text, thinking, tool_use, tool_result) into pane
+            // entries the same way it does for main-AI messages — no
+            // wrapper-side reconstruction needed.
+            //
+            // We also intercept the assistant/result usage field here and route
+            // it through UsagePushService.broadcast — the same entry point the
+            // main AI uses — so the TokenIndicator updates mid-turn with the
+            // same percentage formula and model-context-limit table. Without
+            // this intercept the indicator stays at the baseline while the
+            // supervisor is still thinking.
+            final PairSession sessionRef = session;
+            session.getSupervisorBridge().setMessageHandler(rawMsg -> {
+                JsonObject sdkUsage = extractSdkUsage(rawMsg);
+                if (sdkUsage != null) {
+                    UsagePushService.broadcast(
+                            sdkUsage,
+                            sessionRef.getModel(),
+                            "supervisor",
+                            sessionRef.getAgentId(),
+                            context
+                    );
+                }
+                pushToWebview("window.onSupervisorMessage", gson.toJson(rawMsg));
+            });
+
             JsonObject result = new JsonObject();
             result.addProperty("pairId", session.getPairId());
             result.addProperty("agentId", session.getAgentId());
             result.addProperty("agentName", session.getAgentName());
             result.addProperty("mainSessionId", session.getMainSessionId() == null ? "" : session.getMainSessionId());
             pushToWebview("window.onPairStarted", gson.toJson(result));
+
+            // Seed the TokenIndicator with a 0-tokens snapshot so the right-pane
+            // composer shows the correct context limit (e.g. 1M) immediately,
+            // instead of the fallback "0 / 200k" until the first SDK message
+            // arrives with usage. Passes null rawUsage so broadcast treats it
+            // as "0 tokens used" while still resolving maxTokens from the model.
+            UsagePushService.broadcast(
+                    null,
+                    session.getModel(),
+                    "supervisor",
+                    session.getAgentId(),
+                    context
+            );
 
             // NOTE: We intentionally do NOT auto-publish a `start` event anymore.
             // The Supervisor session is ready and waiting silently. It will only
@@ -229,6 +277,60 @@ public class PairHandler extends BaseMessageHandler {
             LOG.warn("[PairHandler] pair_set_reasoning failed: "
                     + (e.getMessage() != null ? e.getMessage() : e.getClass().getName()), e);
             sendError("pair_set_reasoning",
+                    e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
+        }
+    }
+
+    /**
+     * Right-pane composer 1M-context toggle. The webview ships
+     * {@code claude-opus-4-7[1m]}-style IDs as the model string (the suffix
+     * is applied by {@code apply1MContextSuffix} in ChatInputBox/types.ts),
+     * so this handler just forwards to {@link #handleSetModel} with the
+     * suffixed value. We keep the message type separate for analytics —
+     * users toggling 1M is different from picking a new model family.
+     */
+    private void handleSetLongContext(String content) {
+        // Reuse the model-set flow; the webview always sends the resolved
+        // model id (already with/without [1m] suffix) on the same payload.
+        handleSetModel(content);
+    }
+
+    /**
+     * Settings page → daemon: update the autocompact trigger threshold.
+     * Persists to supervisor-agents.json (so it survives IDE restart) and
+     * pushes through to every active pair so the next supervisor turn sees
+     * the new value. The daemon also re-reads {@code process.env} on every
+     * shouldAutoCompact() call, so latency is at most one extra turn.
+     */
+    private void handleSetAutoCompactThreshold(String content) {
+        try {
+            JsonObject data = gson.fromJson(content, JsonObject.class);
+            int threshold = data.has("threshold") && !data.get("threshold").isJsonNull()
+                    ? data.get("threshold").getAsInt() : -1;
+            if (threshold < com.github.claudecodegui.settings.SupervisorAgentManager.MIN_AUTO_COMPACT_THRESHOLD
+                || threshold > com.github.claudecodegui.settings.SupervisorAgentManager.MAX_AUTO_COMPACT_THRESHOLD) {
+                sendError("pair_set_auto_compact_threshold",
+                        "threshold out of range (50-95): " + threshold);
+                return;
+            }
+
+            // 1) Persist.
+            new com.github.claudecodegui.settings.CodemossSettingsService()
+                    .getSupervisorAgentManager().setAutoCompactThreshold(threshold);
+
+            // 2) Propagate to live pairs so the next turn picks up the new
+            //    daemon env. We restart supervisor on next-turn lazy path
+            //    (EventBus.restartSupervisor) — no immediate stop/start to
+            //    avoid breaking the in-flight conversation.
+            PairSessionManager mgr = PairSessionManager.getInstance(context.getProject());
+            for (PairSession session : mgr.getActivePairs()) {
+                session.setAutoCompactThreshold(threshold);
+            }
+            LOG.info("[PairHandler] autoCompactThreshold updated to " + threshold);
+        } catch (Exception e) {
+            LOG.warn("[PairHandler] pair_set_auto_compact_threshold failed: "
+                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getName()), e);
+            sendError("pair_set_auto_compact_threshold",
                     e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName());
         }
     }
@@ -369,6 +471,30 @@ public class PairHandler extends BaseMessageHandler {
     }
 
     // ====================== helpers ======================
+
+    /**
+     * Pull the SDK usage object out of a [SUPERVISOR_MSG] envelope. Two paths
+     * the Claude Agent SDK uses:
+     *   - assistant messages: envelope.message.message.usage
+     *   - result messages:    envelope.message.usage
+     * Returns null if neither path resolves to a JSON object.
+     */
+    private static JsonObject extractSdkUsage(JsonObject envelope) {
+        if (envelope == null || !envelope.has("message") || !envelope.get("message").isJsonObject()) {
+            return null;
+        }
+        JsonObject sdkMsg = envelope.getAsJsonObject("message");
+        if (sdkMsg.has("message") && sdkMsg.get("message").isJsonObject()) {
+            JsonObject inner = sdkMsg.getAsJsonObject("message");
+            if (inner.has("usage") && inner.get("usage").isJsonObject()) {
+                return inner.getAsJsonObject("usage");
+            }
+        }
+        if (sdkMsg.has("usage") && sdkMsg.get("usage").isJsonObject()) {
+            return sdkMsg.getAsJsonObject("usage");
+        }
+        return null;
+    }
 
     private void pushToWebview(String fn, String jsonPayload) {
         ApplicationManager.getApplication().invokeLater(() ->

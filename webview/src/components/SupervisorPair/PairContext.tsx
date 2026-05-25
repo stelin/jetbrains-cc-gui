@@ -62,6 +62,19 @@ export interface PairStatusSnapshot {
 }
 
 /**
+ * One entry in the PeriodicNoticeStrip — a non-actionable system notice
+ * (currently only supervisor monitor health-check heartbeats). Kept out of
+ * the supervisor chat history so receiving one does NOT interrupt the
+ * supervisor's in-flight thinking.
+ */
+export interface PairNotice {
+  ts: number;
+  kind: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+/**
  * Shape for an escalate request surfaced to the user by ActionRouter.
  */
 export interface EscalateRequest {
@@ -137,6 +150,11 @@ interface PairContextValue {
    * compaction surfaces sooner).
    */
   pairStatus: PairStatusSnapshot | null;
+  /**
+   * Periodic system notices (health-check heartbeats etc.) rendered on the
+   * PeriodicNoticeStrip. Capped at MAX_NOTICES in-memory; not persisted.
+   */
+  notices: PairNotice[];
   respondToEscalate: (choice: string, note?: string) => void;
   dismissEscalate: () => void;
   registerInjectPromptHandler: (
@@ -167,6 +185,9 @@ const sendToJava = (message: string) => {
 
 /** Cap per-agent message history to bound memory on long runs. */
 const MAX_MESSAGES_PER_AGENT = 500;
+
+/** Cap the periodic-notice strip's in-memory history. Notices are not persisted. */
+const MAX_NOTICES = 200;
 
 /**
  * Stable numeric hash for a string turn id, so messages can carry the
@@ -247,6 +268,9 @@ export function PairProvider({ children }: PairProviderProps) {
   const [reasoningByAgentId, setReasoningByAgentId] = useState<Record<string, ReasoningEffort>>({});
   // Phase 2: latest status snapshot from Java PairStatusPusher.
   const [pairStatus, setPairStatus] = useState<PairStatusSnapshot | null>(null);
+  // Periodic-event strip history (e.g. health-check heartbeats). Cleared on
+  // pair stop; capped at MAX_NOTICES.
+  const [notices, setNotices] = useState<PairNotice[]>([]);
   // Phase 5 (2026-05-24): optimistic autonomy mode (canonical comes from
   // pairStatus.autonomyMode each push). Default "mixed" matches Java's default.
   const [autonomyMode, setAutonomyModeState] = useState<'strict' | 'mixed' | 'full' | undefined>(undefined);
@@ -583,6 +607,7 @@ export function PairProvider({ children }: PairProviderProps) {
     const prevPairResume = window.onPairResume;
     // Protocol v2 (2026-05-24): non-blocking alert from record_alert.
     const prevAlert = window.onPairAlert;
+    const prevNotice = window.onPairNotice;
     window.onPairAlert = (json: string) => {
       // Phase 3 stub — Phase 5 will replace with a real toast/banner UI.
       // For now, log to console so devs can verify the daemon→Java→webview
@@ -592,6 +617,22 @@ export function PairProvider({ children }: PairProviderProps) {
         console.info('[Pair] record_alert',
           o.severity || 'warn', o.category || '?',
           o.fallback_choice || o.reason || '(no fallback)');
+      } catch { /* ignore malformed */ }
+    };
+
+    window.onPairNotice = (json: string) => {
+      try {
+        const o = JSON.parse(json) as PairNotice;
+        if (!o || typeof o !== 'object'
+            || typeof o.ts !== 'number'
+            || typeof o.kind !== 'string'
+            || typeof o.message !== 'string') {
+          return;
+        }
+        setNotices((curr) => {
+          if (curr.length < MAX_NOTICES) return [...curr, o];
+          return [...curr.slice(curr.length - MAX_NOTICES + 1), o];
+        });
       } catch { /* ignore malformed */ }
     };
 
@@ -611,6 +652,7 @@ export function PairProvider({ children }: PairProviderProps) {
       setReasoningByAgentId({});
       setUsageByAgentId({});
       setPairStatus(null);
+      setNotices([]);
     };
 
     /**
@@ -964,6 +1006,7 @@ export function PairProvider({ children }: PairProviderProps) {
       window.onPairStatusUpdate = prevPairStatus;
       window.onPairResume = prevPairResume;
       window.onPairAlert = prevAlert;
+      window.onPairNotice = prevNotice;
     };
   }, [appendAssistantBlocks, attachToolResults, endStreaming]);
 
@@ -1017,6 +1060,7 @@ export function PairProvider({ children }: PairProviderProps) {
       setLongContextEnabled,
       usageByAgentId,
       pairStatus,
+      notices,
       respondToEscalate,
       dismissEscalate,
       registerInjectPromptHandler,
@@ -1043,6 +1087,7 @@ export function PairProvider({ children }: PairProviderProps) {
       setLongContextEnabled,
       usageByAgentId,
       pairStatus,
+      notices,
       respondToEscalate,
       dismissEscalate,
       registerInjectPromptHandler,
@@ -1081,6 +1126,7 @@ export function usePairContext(): PairContextValue {
     setLongContextEnabled: () => { /* no-op */ },
     usageByAgentId: {},
     pairStatus: null,
+    notices: [],
     respondToEscalate: () => { /* no-op */ },
     dismissEscalate: () => { /* no-op */ },
     registerInjectPromptHandler: () => { /* no-op */ },

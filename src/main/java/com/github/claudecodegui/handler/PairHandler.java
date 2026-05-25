@@ -17,6 +17,7 @@ import com.google.gson.JsonObject;
 import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.project.Project;
+import com.intellij.util.concurrency.AppExecutorUtil;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -243,6 +244,17 @@ public class PairHandler extends BaseMessageHandler {
     }
 
     private void handleStart(String content) {
+        // 2026-05-25: offload to background pool. The JCEF message callback that
+        // ends up here runs on (or piggy-backs) the EDT on macOS, and the
+        // internal startPair() does a 20s synchronous .get() on a daemon RPC
+        // (PairSessionManager.java:311-322) — which froze the IDE entirely
+        // (file ops, typing, indexing) until handshake completed. All webview
+        // callbacks below (pushToWebview / sendError) are already invokeLater,
+        // and the method returns void, so async dispatch is drop-in safe.
+        AppExecutorUtil.getAppExecutorService().submit(() -> handleStartImpl(content));
+    }
+
+    private void handleStartImpl(String content) {
         try {
             JsonObject data = gson.fromJson(content, JsonObject.class);
             String sessionId = data.has("sessionId") && !data.get("sessionId").isJsonNull()
@@ -598,6 +610,22 @@ public class PairHandler extends BaseMessageHandler {
     }
 
     private void handleUserInput(String content) {
+        // 2026-05-25: offload to background pool. On macOS the JBCefJSQuery
+        // onQuery callback runs on AppKit Thread, and EventBus.publish's
+        // .thenCompose(this::forward) can race-completion into synchronous
+        // execution of tryPostEvent -> future.get() on the caller thread.
+        // That parked AppKit for 10-30s, which in turn parked EDT on any
+        // operation needing Cocoa (Balloon dispose, JCEF window setVisible).
+        // Thread dump 2026-05-25 18:27:28 confirmed: AppKit blocked in
+        // EventBus.tryPostEvent:454 on Unsafe.park, EDT blocked 14sec
+        // downstream in AWTThreading.executeWaitToolkit. Async dispatch
+        // moves the entire publish chain to a pooled thread and frees
+        // AppKit immediately. Webview callbacks below (sendError) are
+        // already invokeLater, so this is drop-in safe.
+        AppExecutorUtil.getAppExecutorService().submit(() -> handleUserInputImpl(content));
+    }
+
+    private void handleUserInputImpl(String content) {
         try {
             JsonObject data = gson.fromJson(content, JsonObject.class);
             String pairId = data.has("pairId") && !data.get("pairId").isJsonNull()
@@ -869,6 +897,10 @@ public class PairHandler extends BaseMessageHandler {
             // Protocol v2 (2026-05-24): record_alert webview surface — toast
             // notification, non-blocking. Webview handler should NOT open a modal.
             pushToWebview("window.onPairAlert", gson.toJson(payload));
+        }
+        @Override
+        public void onPairNotice(JsonObject payload) {
+            pushToWebview("window.onPairNotice", gson.toJson(payload));
         }
         @Override
         public void onEscalate(JsonObject payload) {

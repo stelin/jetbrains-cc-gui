@@ -347,6 +347,20 @@ public class SupervisorMonitor {
                 refreshContextUsage();
             }
 
+            // Idle health-check tick (no events, no drops, no pending banner):
+            // skip forwardComposite entirely. Previously this path forced the
+            // supervisor to consume a synthetic "必须 emit_action(wait)" user
+            // message that interrupted in-flight thinking. Now it just pushes
+            // a notice to the right-pane strip so the heartbeat is visible
+            // without disturbing the supervisor.
+            if (isHealthCheck
+                    && batch.events.isEmpty()
+                    && batch.droppedSincePrevious == 0
+                    && pendingGenerationBanner.get() == null) {
+                pushHealthCheckNotice(tickNumber, startMs, endMs);
+                return;
+            }
+
             String banner = pendingGenerationBanner.getAndSet(null);
             JsonObject composite = CompositeSummaryBuilder.build(
                     batch, startMs, endMs, tickNumber, isHealthCheck, banner);
@@ -416,6 +430,29 @@ public class SupervisorMonitor {
             }
         } catch (Exception e) {
             LOG.warn("[Monitor] trigger eval failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Build + push a one-line periodic-event notice for the right-pane strip.
+     * Called only on idle health-check ticks (no events, no drops, no banner).
+     * Does NOT touch the supervisor input stream.
+     */
+    private void pushHealthCheckNotice(long tickNumber, long startMs, long endMs) {
+        ActionRouter ar = pair.getActionRouter();
+        if (ar == null) return;
+        JsonObject notice = new JsonObject();
+        notice.addProperty("ts", endMs);
+        notice.addProperty("kind", "health_check");
+        notice.addProperty("message", "健康检查 · 无事件");
+        JsonObject details = new JsonObject();
+        details.addProperty("tick", tickNumber);
+        details.addProperty("windowMs", Math.max(0L, endMs - startMs));
+        notice.add("details", details);
+        try {
+            ar.pushNotice(notice);
+        } catch (Exception e) {
+            LOG.debug("[Monitor] pushHealthCheckNotice failed: " + e.getMessage());
         }
     }
 

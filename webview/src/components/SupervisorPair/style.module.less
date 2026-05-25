@@ -665,6 +665,105 @@
   }
 }
 
+// ─────────── PeriodicNoticeStrip ───────────
+// Sits between AutonomyToggle and DecisionTimeline. Shows non-actionable
+// system notices (supervisor monitor health-check heartbeats etc.) that used
+// to be pushed as forced no-op user messages into the supervisor chat. Empty
+// state self-hides (component returns null).
+
+.noticeStrip {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--border-secondary);
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.noticeToggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-tertiary);
+  border: none;
+  color: var(--text-primary);
+  cursor: pointer;
+  padding: 4px 12px;
+  font-size: 11px;
+  font-family: inherit;
+  text-align: left;
+  width: 100%;
+
+  &:hover { background: var(--bg-hover); }
+}
+
+.noticeChevron {
+  flex-shrink: 0;
+  width: 10px;
+  color: var(--text-muted);
+}
+
+.noticeStripLabel {
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.noticeLatest {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.noticeList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--bg-secondary);
+}
+
+.noticeItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 12px;
+  border-top: 1px solid var(--border-secondary);
+  border-left: 2px solid transparent;
+
+  &[data-kind="health_check"] { border-left-color: #4caf50; }
+}
+
+.noticeItemTs {
+  color: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.noticeItemKind {
+  font-size: 9px;
+  padding: 0 4px;
+  border-radius: 2px;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+.noticeItemMessage {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 // ─────────── Phase 5: DecisionTimeline ───────────
 // Collapsible list below the autonomy toggle. Renders supervisor
 // decisions filtered by severity / category.

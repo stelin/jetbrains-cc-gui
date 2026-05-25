@@ -76,6 +76,15 @@ public class ActionRouter {
          * a toast/notification the user can review asynchronously.
          */
         default void onPairAlert(JsonObject payload) { /* optional */ }
+
+        /**
+         * Periodic system notice (e.g. supervisor health-check heartbeat) that
+         * should NOT enter the supervisor chat or interrupt in-flight thinking.
+         * Rendered on the right pane's PeriodicNoticeStrip — a separate history
+         * row that sits between the autonomy controls and the decision timeline.
+         * Payload: {@code { ts, kind, message, details? }}.
+         */
+        default void onPairNotice(JsonObject payload) { /* optional */ }
     }
 
     @SuppressWarnings("unused") // reserved for future Project-scoped effects (notifications, file watchers)
@@ -113,6 +122,21 @@ public class ActionRouter {
      */
     public void signalThinking(boolean thinking) {
         webview.onThinking(pair.getAgentId(), thinking);
+    }
+
+    /**
+     * Push a periodic-event notice to the right-pane strip without touching
+     * the supervisor pipeline. Used by {@link SupervisorMonitor} on idle
+     * health-check ticks so the user sees a heartbeat without the supervisor
+     * being forced to produce a no-op turn.
+     */
+    public void pushNotice(JsonObject notice) {
+        if (notice == null) return;
+        try {
+            webview.onPairNotice(notice);
+        } catch (Exception e) {
+            LOG.warn("[ActionRouter] onPairNotice failed: " + e.getMessage());
+        }
     }
 
     /**

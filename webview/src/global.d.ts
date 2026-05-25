@@ -505,6 +505,14 @@ interface Window {
    */
   onPairStatusUpdate?: (json: string) => void;
   /**
+   * Periodic-event notice (e.g. supervisor monitor health-check heartbeat).
+   * Non-actionable and intentionally OUT-of-band of the supervisor chat —
+   * routed to the PeriodicNoticeStrip so the user can see "monitor is alive,
+   * no new events" without interrupting in-flight supervisor thinking.
+   * Payload: { ts, kind, message, details? }.
+   */
+  onPairNotice?: (json: string) => void;
+  /**
    * v4 unified pipeline: one raw SDK message streamed by the daemon during a
    * supervisor turn. Payload: { pairId, supervisorId, turnId, message: <SDK msg> }.
    * Each call delivers exactly one assistant/user/system/result frame the

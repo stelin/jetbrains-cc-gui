@@ -91,6 +91,8 @@
   border-left: 1px solid var(--border-secondary);
   background: var(--bg-secondary);
   overflow: hidden;
+  // Anchor for AlertNotifier's absolute-positioned toast stack (Phase 5).
+  position: relative;
 }
 
 // ─────────── Header ───────────
@@ -142,8 +144,16 @@
   padding: 3px;
   border-radius: 3px;
 
-  &:hover {
+  &:hover:not(:disabled) {
     background: var(--bg-hover);
+  }
+
+  // 2026-05-25 (FUNDAMENTAL FIX): visual feedback for the Stop button when no
+  // supervisor turn is in flight. Half-opacity + default cursor signals
+  // "nothing to interrupt right now" without removing the affordance.
+  &:disabled {
+    opacity: 0.4;
+    cursor: default;
   }
 }
 
@@ -555,4 +565,457 @@
   font-size: 11px;
   color: var(--text-muted);
   flex-shrink: 0;
+}
+
+// ─────────── Phase 2 (2026-05-24): PairStatusBar ───────────
+// Below paneToolbar; shows monitor state / health / SDK context ratio /
+// compactions / pending events / last alert. One short row.
+
+.pairStatusBar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border-secondary);
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  background: var(--bg-secondary, transparent);
+  font-family: var(--font-mono, monospace);
+}
+
+.statusDotIdle      { background: var(--text-muted); }
+.statusDotTick      { background: #4caf50; }
+.statusDotMain      { background: #2196f3; }
+.statusDotRotating  { background: #ff9800; animation: pulse 1s infinite; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+
+.pairStateLabel {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+}
+
+.pairHealthLabel { font-weight: 600; }
+.healthOk   { color: #4caf50; }
+.healthWarn { color: #ff9800; }
+.healthBad  { color: #f44336; }
+
+.pairCtxRatio,
+.pairCompactCount,
+.pairPending,
+.pairDropped,
+.pairTickCount {
+  color: var(--text-muted);
+}
+
+.pairDropped { color: #ff9800; }
+
+.pairLastAlert {
+  margin-left: auto;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.alertInfo  { color: var(--text-muted); }
+.alertWarn  { color: #ff9800; }
+.alertError { color: #f44336; }
+
+// ─────────── Phase 5 (2026-05-24): Autonomy controls ───────────
+// Sits between PairStatusBar and the subpanel list. One-row select.
+
+.autonomyControls {
+  display: flex;
+  align-items: center;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border-secondary);
+  flex-shrink: 0;
+}
+
+.autonomyToggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-muted);
+
+  label {
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  select {
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+    border: 1px solid var(--border-secondary);
+    border-radius: 3px;
+    padding: 2px 6px;
+    font-size: 11px;
+    font-family: inherit;
+    cursor: pointer;
+
+    &:hover { border-color: var(--accent-primary); }
+    &:focus { outline: 1px solid var(--accent-primary); outline-offset: 0; }
+  }
+}
+
+// ─────────── Phase 5: DecisionTimeline ───────────
+// Collapsible list below the autonomy toggle. Renders supervisor
+// decisions filtered by severity / category.
+
+.decisionTimeline {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--border-secondary);
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.timelineToggle {
+  background: var(--bg-tertiary);
+  border: none;
+  color: var(--text-primary);
+  cursor: pointer;
+  padding: 4px 12px;
+  font-size: 11px;
+  font-family: inherit;
+  text-align: left;
+  font-weight: 600;
+
+  &:hover { background: var(--bg-hover); }
+}
+
+.timelineFilters {
+  display: flex;
+  gap: 6px;
+  padding: 4px 12px;
+  background: var(--bg-secondary);
+
+  select {
+    background: var(--bg-elevated);
+    color: var(--text-primary);
+    border: 1px solid var(--border-secondary);
+    border-radius: 3px;
+    padding: 1px 4px;
+    font-size: 10px;
+    font-family: inherit;
+  }
+}
+
+.timelineList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.timelineItem {
+  padding: 4px 12px;
+  border-top: 1px solid var(--border-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+
+  &[data-severity="warn"]  { border-left: 2px solid #ff9800; }
+  &[data-severity="alert"] { border-left: 2px solid #f44336; }
+  &[data-severity="info"]  { border-left: 2px solid transparent; }
+}
+
+.itemHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.itemTs {
+  color: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+  font-size: 10px;
+}
+
+.itemAction {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.itemCategory,
+.itemConfidence,
+.itemStep,
+.itemUserMark {
+  font-size: 9px;
+  padding: 0 4px;
+  border-radius: 2px;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.itemUserMark {
+  background: var(--accent-primary);
+  color: var(--color-button-text);
+}
+
+.itemReason {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.itemChosen {
+  font-size: 10px;
+  color: var(--text-primary);
+  font-style: italic;
+}
+
+// ─────────── 2026-05-24 (Q3): SupervisorStatusPanel ───────────
+// Tabbed status panel modeled on main-AI StatusPanel. Hosts two tabs:
+// 任务 (inject_prompt directives) and 子代理 (Task subagents). Sits between
+// the autonomy controls and the chat subpanel.
+
+.supervisorStatusPanel {
+  flex-shrink: 0;
+  // The .status-panel global rules already paint the chrome; this scope only
+  // tightens spacing for the narrow right pane and overrides the main-AI's
+  // 20px horizontal margin which is way too generous here.
+  &:global(.status-panel) {
+    margin: 0 8px 6px 8px;
+  }
+  :global(.status-panel-tabs) {
+    padding: 4px 8px;
+  }
+  :global(.status-panel-popover) {
+    max-height: 240px;
+    overflow-y: auto;
+  }
+}
+
+.statusEmpty {
+  padding: 12px;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+  font-style: italic;
+}
+
+// Per-task row inside the 任务 popover. Status badge + objective text.
+.supervisorTaskList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.supervisorTaskItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-top: 1px solid var(--border-secondary);
+  font-size: 11px;
+
+  &[data-status="pending"] { border-left: 2px solid #2196f3; }
+  &[data-status="applied"] { border-left: 2px solid #4caf50; }
+  &[data-status="lost"]    { border-left: 2px solid #f44336; }
+  &[data-status="unknown"] { border-left: 2px solid transparent; }
+}
+
+.supervisorTaskStatus {
+  font-size: 9px;
+  padding: 0 4px;
+  border-radius: 2px;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
+
+.supervisorTaskObjective {
+  flex: 1;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.supervisorTaskBadgeLost {
+  font-size: 9px;
+  padding: 0 4px;
+  border-radius: 2px;
+  background: #f44336;
+  color: white;
+  font-weight: 700;
+}
+
+// ─────────── Phase 5: SubagentPanel ───────────
+// Collapsible per-supervisor list of Task subagents extracted from
+// the message stream. Lives inside .subPanelList after the coordinator
+// subpanel.
+
+.subagentPanel {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--border-secondary);
+  font-size: 11px;
+}
+
+.subagentToggle {
+  background: var(--bg-tertiary);
+  border: none;
+  color: var(--text-primary);
+  cursor: pointer;
+  padding: 4px 12px;
+  font-size: 11px;
+  font-family: inherit;
+  text-align: left;
+  font-weight: 600;
+
+  &:hover { background: var(--bg-hover); }
+}
+
+.subagentList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.subagentItem {
+  padding: 4px 12px;
+  border-top: 1px solid var(--border-secondary);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+
+  &[data-status="running"] { border-left: 2px solid #2196f3; }
+  &[data-status="done"]    { border-left: 2px solid #4caf50; }
+  &[data-status="error"]   { border-left: 2px solid #f44336; }
+}
+
+.subagentHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.subagentStatus {
+  font-size: 9px;
+  padding: 0 4px;
+  border-radius: 2px;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.subagentSubject {
+  flex: 1;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.subagentDuration {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-mono, monospace);
+}
+
+.subagentResult {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+  max-height: 3.6em;
+  overflow: hidden;
+}
+
+// ─────────── Phase 5: AlertNotifier ───────────
+// Floating toast stack in bottom-right of the pane. Up to 5 stacked,
+// each auto-dismisses after 5s. Click anywhere on a toast to dismiss.
+
+.alertNotifier {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  z-index: 1050;
+  pointer-events: none;
+  max-width: 320px;
+}
+
+.alertToast {
+  pointer-events: auto;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-secondary);
+  border-left: 4px solid #ff9800;
+  border-radius: 4px;
+  padding: 8px 10px;
+  box-shadow: var(--shadow-lg, 0 4px 12px rgba(0, 0, 0, 0.3));
+  font-size: 11px;
+  color: var(--text-primary);
+  cursor: pointer;
+  animation: alertSlideIn 0.18s ease-out;
+
+  &[data-severity="alert"] { border-left-color: #f44336; }
+  &[data-severity="error"] { border-left-color: #f44336; }
+  &[data-severity="warn"]  { border-left-color: #ff9800; }
+
+  &:hover { background: var(--bg-hover); }
+}
+
+@keyframes alertSlideIn {
+  from { transform: translateX(8px); opacity: 0; }
+  to   { transform: translateX(0);   opacity: 1; }
+}
+
+.alertHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+}
+
+.alertSeverity {
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: #ff9800;
+
+  .alertToast[data-severity="alert"] &,
+  .alertToast[data-severity="error"] & { color: #f44336; }
+}
+
+.alertCategory {
+  font-size: 9px;
+  padding: 0 4px;
+  border-radius: 2px;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.alertBody {
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+.alertFallback {
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--text-muted);
+  font-style: italic;
 }

@@ -225,10 +225,27 @@ public class SessionSendService {
         Boolean streaming = readStreamingEnabled();
         final String runtimeSessionEpoch = state.getRuntimeSessionEpoch();
         final String currentModel = state.getModel();
+        // Phase 6c (2026-05-24): consume the one-shot rotation handoff staged
+        // by ClaudeSession.swapInnerSession. Take-and-clear semantics ensure
+        // the handoff is delivered exactly once even if the send is retried
+        // by an upper layer (retry would re-enter this method with append=null).
+        String systemPromptAppend = state.consumePendingSystemPromptAppend();
+
+        // Protocol v2 (2026-05-24): if this session is attached to a Pair, inject
+        // a pair-context marker at the START of systemPromptAppend so the daemon
+        // can extract it without us having to add a new field through 5 layers
+        // of IPC. Daemon's buildRequestContext peels off the marker, sets
+        // requestContext.pairContext, and passes the cleaned remainder as the
+        // actual system prompt append. Marker format:
+        //   <!--pair-context:{"pairId":"p1","activeDirectiveId":"d_..."}-->
+        // followed by the original append. No marker = legacy non-Pair flow.
+        systemPromptAppend = prependPairContextMarker(systemPromptAppend);
+
         LOG.info("[Lifecycle] sendToClaude sessionId=" + (state.getSessionId() != null ? state.getSessionId() : "(new)")
                 + ", epoch=" + runtimeSessionEpoch
                 + ", cwd=" + state.getCwd()
-                + ", model=" + currentModel);
+                + ", model=" + currentModel
+                + ", appendBytes=" + (systemPromptAppend == null ? 0 : systemPromptAppend.length()));
 
         return claudeSDKBridge.sendMessage(
                         channelId,
@@ -244,8 +261,58 @@ public class SessionSendService {
                         streaming,
                         false,
                         state.getReasoningEffort(),
+                        systemPromptAppend,
                         handler
                 ).thenApply(result -> null);
+    }
+
+    /**
+     * Protocol v2 (2026-05-24): If this session is attached to a Pair, prepend
+     * a {@code <!--pair-context:{...}-->} marker to {@code systemPromptAppend}
+     * so the daemon side can extract {@code pairContext} without us adding a
+     * new field through every layer of IPC. The daemon's
+     * {@code buildRequestContext} peels off the marker, sets
+     * {@code requestContext.pairContext}, and uses the cleaned remainder as
+     * the actual append. Idempotent — if no pair is attached, returns the
+     * input unchanged. If a marker is already present (would only happen via
+     * a buggy upper layer), returns input unchanged to avoid duplication.
+     */
+    private String prependPairContextMarker(String currentAppend) {
+        try {
+            if (project == null) return currentAppend;
+            String sessionId = state.getSessionId();
+            // Find attached pair: by main session id first, fall back to
+            // most-recently-started active pair (covers the "pair started
+            // before first response" window).
+            com.github.claudecodegui.session.pair.PairSessionManager mgr =
+                    com.github.claudecodegui.session.pair.PairSessionManager.getInstance(project);
+            com.github.claudecodegui.session.pair.PairSession pair = null;
+            if (sessionId != null && !sessionId.isEmpty()) {
+                pair = mgr.findByMainSession(sessionId);
+            }
+            if (pair == null) {
+                pair = mgr.getActivePairs().stream()
+                        .filter(p -> !p.isDisposed())
+                        .reduce((a, b) -> a.getStartedAt() > b.getStartedAt() ? a : b)
+                        .orElse(null);
+            }
+            if (pair == null) return currentAppend;
+            String existing = currentAppend == null ? "" : currentAppend;
+            if (existing.startsWith("<!--pair-context:")) return currentAppend;
+
+            JsonObject pc = new JsonObject();
+            pc.addProperty("pairId", pair.getPairId());
+            // activeDirectiveId: most-recent inject_prompt the supervisor sent.
+            // We don't have a clean read for this on PairSession today; null is
+            // safe — daemon mcp__main tool emits TURN_REPORT with directiveId=null
+            // when not set, and Java side falls back to "no directive correlation"
+            // (turn still gets recorded, just not tied to a specific directive).
+            // Future: track latest directiveId on PairSession.
+            String marker = "<!--pair-context:" + gson.toJson(pc) + "-->\n";
+            return marker + existing;
+        } catch (Throwable ignored) {
+            return currentAppend;
+        }
     }
 
     private boolean readAutoOpenFileEnabled() {

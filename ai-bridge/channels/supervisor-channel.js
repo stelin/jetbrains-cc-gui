@@ -41,15 +41,77 @@ const DEFAULT_MODEL = 'claude-haiku-4-5-20251001';
 // — supervisors decide, the main AI edits.
 const SUPERVISOR_READ_TOOLS = ['Read', 'Glob', 'Grep'];
 
+// 2026-05-25 (FUNDAMENTAL FIX): wall-clock caps on the active path were
+// CONFLATING "stuck" with "slow but progressing". See ai-bridge-server's
+// supervisor-channel.js for the full design rationale. Summary:
+//   - active path now has NO wall-clock cap by default
+//   - liveness comes from SDK-internal timeouts, user-driven supervisor.interrupt,
+//     and daemon-process-death detection via Java's IPC layer
+//   - env knobs below are kept as emergency rollback (set to a positive ms
+//     value to re-enable wall-clock cap on that stage; default unset → no cap)
+const QUERY_NEXT_TIMEOUT_MS = readEnvMsOrZero('SUPERVISOR_QUERY_TIMEOUT_MS');
+const QUERY_NEXT_TIMEOUT_AFTER_TOOL_USE_MS = readEnvMsOrZero('SUPERVISOR_QUERY_TIMEOUT_AFTER_TOOL_USE_MS');
+const QUERY_NEXT_TIMEOUT_AFTER_COMPACT_MS = readEnvMsOrZero('SUPERVISOR_QUERY_TIMEOUT_AFTER_COMPACT_MS');
+
+function readEnvMsOrZero(name) {
+    const raw = process.env[name];
+    const n = raw ? Number(raw) : NaN;
+    return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/**
+ * Wait for the SDK's next iterator result. {@code timeoutMs <= 0} (default)
+ * means unbounded await. Positive values are env-opted-in rollback caps.
+ */
+async function nextWithOptionalTimeout(query, timeoutMs, stage = 'default') {
+    if (!(timeoutMs > 0)) {
+        return await query.next();
+    }
+    let timer;
+    try {
+        return await Promise.race([
+            query.next(),
+            new Promise((_, reject) => {
+                timer = setTimeout(
+                    () => reject(new Error(
+                        `SUPERVISOR_QUERY_TIMEOUT after ${timeoutMs}ms (stage=${stage})`
+                    )),
+                    timeoutMs
+                );
+            }),
+        ]);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+}
+
+// 2026-05-24: mirrors persistent-query-service.js. Supervisor used to ignore
+// the reasoning tier set on the Java PairSession — the field was captured
+// but never reached the SDK. Now it lands in {@code options.effort} just
+// like the main-AI channel, so "max effort" actually changes the thinking
+// budget on supervisor turns.
+const SUPPORTED_EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+
+function normalizeReasoningEffort(value) {
+    const e = typeof value === 'string' ? value.trim() : '';
+    if (!e) return null;
+    if (SUPPORTED_EFFORT_LEVELS.has(e)) return e;
+    process.stdout.write(
+        `[supervisor] ⚠️ unsupported reasoningEffort value: ${JSON.stringify(value)} — falling back to SDK default\n`
+    );
+    return null;
+}
+
 /** @type {Map<string, SupervisorRuntime>} */
 const runtimes = new Map();
 
 class SupervisorRuntime {
-    constructor({ pairId, supervisorId, name, model, systemPrompt, allowedTools }) {
+    constructor({ pairId, supervisorId, name, model, reasoningEffort, systemPrompt, allowedTools }) {
         this.pairId = pairId;
         this.supervisorId = supervisorId;
         this.name = name || supervisorId;
         this.model = model || DEFAULT_MODEL;
+        this.reasoningEffort = reasoningEffort || null;
         this.systemPrompt = systemPrompt;
         this.allowedTools = Array.isArray(allowedTools) ? allowedTools : [];
         this.inputStream = new AsyncStream();
@@ -178,6 +240,7 @@ export async function startSupervisorSession(params) {
         model,
         allowedTools,
         autoCompactThreshold,
+        reasoningEffort,
     } = params || {};
 
     if (!pairId || !supervisorId) {
@@ -218,6 +281,7 @@ export async function startSupervisorSession(params) {
         supervisorId,
         name,
         model,
+        reasoningEffort: normalizeReasoningEffort(reasoningEffort),
         systemPrompt,
         allowedTools,
     });
@@ -250,6 +314,12 @@ export async function startSupervisorSession(params) {
             // claude_code preset is NOT activated — Supervisor must obey OUR persona,
             // not Claude Code's default agent instructions.
             systemPrompt: runtime.systemPrompt,
+            // 2026-05-24: forward the reasoning tier resolved by Java
+            // (PairSession.reasoningEffort or agent's defaultReasoning) as
+            // {@code options.effort}. The SDK applies the same low/medium/
+            // high/xhigh/max scale it uses for the main AI. Omitted (effort
+            // = null) leaves whatever SDK default is in play.
+            ...(runtime.reasoningEffort && { effort: runtime.reasoningEffort }),
             mcpServers: { [SUPERVISOR_MCP_NAME]: supervisorMcpServer },
             allowedTools: allowedToolList,
             // Defensive allowlist: pre-approve emit_action, deny everything else
@@ -273,7 +343,9 @@ export async function startSupervisorSession(params) {
     });
 
     runtimes.set(k, runtime);
-    process.stdout.write(`[supervisor] started: ${k} (model=${runtime.model})\n`);
+    process.stdout.write(
+        `[supervisor] started: ${k} (model=${runtime.model}, effort=${runtime.reasoningEffort || 'sdk-default'})\n`
+    );
     return { started: true, key: k };
 }
 
@@ -355,6 +427,18 @@ export async function postEventToSupervisor(params) {
         //   { "id": "<reqId>", "line": "[SUPERVISOR_ACTION] {...}" }
         process.stdout.write('[SUPERVISOR_ACTION] ' + JSON.stringify(wrapper) + '\n');
 
+        // 2026-05-24 (Q4 trace): mirrors ai-bridge-server. Verifies IPC write
+        // landed; pair with Java's `[INJECT_TRACE] ActionRouter.handleInjectPrompt`.
+        const actionType = wrapper.action && wrapper.action.action;
+        if (actionType === 'inject_prompt' || actionType === 'retry_with_hint') {
+            const p = (wrapper.action && wrapper.action.payload) || {};
+            console.error(
+                `[INJECT_TRACE] daemon wrote [SUPERVISOR_ACTION] `
+                + `action=${actionType} directiveId=${p.directiveId || '(none)'} `
+                + `turnId=${wrapper.turnId || '?'} parseError=${wrapper.parseError || 'null'}`
+            );
+        }
+
         return { ok: true };
     } finally {
         runtime.currentTurnId = null;
@@ -432,16 +516,48 @@ async function collectAssistantTurn(runtime) {
     // usage fields are present) so when the user reports "0% never moves"
     // we can post-mortem the daemon log without guessing.
     const seenTypes = [];
+    // 2026-05-25 (FUNDAMENTAL FIX): per-frame timing kept only for diagnostic
+    // logging. The active path waits as long as the SDK takes.
+    const turnStartMs = Date.now();
+    let lastFrameMs = turnStartMs;
+    let prevFrameKind = 'init';
+    let lastToolUseName = null;
     while (true) {
         if (runtime.disposed) {
             throw new Error('Supervisor runtime disposed mid-turn');
         }
         let next;
+        const stage = prevFrameKind === 'compact' ? 'after_compact'
+            : prevFrameKind === 'tool_use' ? 'after_tool_use'
+            : 'default';
+        const frameTimeoutMs = stage === 'after_compact' ? QUERY_NEXT_TIMEOUT_AFTER_COMPACT_MS
+            : stage === 'after_tool_use' ? QUERY_NEXT_TIMEOUT_AFTER_TOOL_USE_MS
+            : QUERY_NEXT_TIMEOUT_MS;
         try {
-            next = await runtime.query.next();
+            next = await nextWithOptionalTimeout(runtime.query, frameTimeoutMs, stage);
         } catch (err) {
-            throw new Error('Supervisor SDK iteration failed: ' + (err?.message ?? String(err)));
+            const errMsg = err?.message ?? String(err);
+            if (errMsg.startsWith('SUPERVISOR_QUERY_TIMEOUT')) {
+                // Env-opted-in rollback cap actually fired. Surface diagnostic.
+                const elapsedMs = Date.now() - turnStartMs;
+                const sinceLastFrameMs = Date.now() - lastFrameMs;
+                console.error(
+                    `[supervisor-diag] ENV_TIMEOUT stage=${stage} frame_cap=${frameTimeoutMs}ms `
+                    + `prev_frame=${prevFrameKind}${lastToolUseName ? `(${lastToolUseName})` : ''} `
+                    + `since_last_frame=${sinceLastFrameMs}ms turn_elapsed=${elapsedMs}ms `
+                    + `pair=${runtime.pairId} supervisor=${runtime.supervisorId} `
+                    + `seen=[${seenTypes.slice(-10).join(', ')}]`
+                );
+                try { if (typeof runtime.query?.return === 'function') runtime.query.return(); }
+                catch { /* ignore */ }
+                const e = new Error('SUPERVISOR_QUERY_TIMEOUT: ' + errMsg);
+                e.code = 'SUPERVISOR_QUERY_TIMEOUT';
+                throw e;
+            }
+            // Real SDK-layer error — bubble; no synthetic timeout error.
+            throw new Error('Supervisor SDK iteration failed: ' + errMsg);
         }
+        lastFrameMs = Date.now();
         if (next?.done) break;
 
         const msg = next.value;
@@ -464,6 +580,7 @@ async function collectAssistantTurn(runtime) {
         streamSdkMessage(runtime, msg);
 
         if (msg.type === 'assistant' && msg.message?.content) {
+            let sawToolUse = false;
             for (const block of msg.message.content) {
                 if (!block || typeof block !== 'object') continue;
                 if (block.type === 'text' && typeof block.text === 'string') {
@@ -494,10 +611,13 @@ async function collectAssistantTurn(runtime) {
                         pendingTools.set(block.id, entry);
                         toolEvents.push(entry);
                     }
+                    sawToolUse = true;
+                    if (typeof block.name === 'string') lastToolUseName = block.name;
                 }
             }
             // Per-message usage rollup, in case the result message doesn't carry one.
             if (msg.message.usage) lastUsage = msg.message.usage;
+            prevFrameKind = sawToolUse ? 'tool_use' : 'text';
         } else if (msg.type === 'user' && msg.message?.content) {
             // tool_result blocks come back as user-role messages in the SDK
             // stream. Match them to the pending tool_use by id and attach
@@ -511,6 +631,7 @@ async function collectAssistantTurn(runtime) {
                 pending.result = summarizeToolResult(block);
                 pendingTools.delete(block.tool_use_id);
             }
+            prevFrameKind = 'tool_result';
         } else if (msg.type === 'system' && msg.subtype === 'compact_boundary') {
             // CLI auto-compaction event — the conversation history was just
             // summarised down to fit the model's context window. We pass the
@@ -520,9 +641,12 @@ async function collectAssistantTurn(runtime) {
                 trigger: msg.compact_metadata?.trigger || 'auto',
                 preTokens: msg.compact_metadata?.pre_tokens ?? null,
             });
+            prevFrameKind = 'compact';
         } else if (msg.type === 'result') {
             if (msg.usage) lastUsage = msg.usage;
             break;
+        } else {
+            prevFrameKind = 'other';
         }
     }
     // One-line per-turn diagnostic. Goes to daemon stderr via console.error
@@ -530,9 +654,11 @@ async function collectAssistantTurn(runtime) {
     // a request-tagged stdout line — so it doesn't pollute the IPC stream).
     // Read it via the IDE's daemon-stderr log when triaging "0% never moves"
     // or "no tool cards" complaints.
+    const turnDurMs = Date.now() - turnStartMs;
     console.error(
-        `[supervisor-diag] turn complete: msgs=[${seenTypes.join(', ')}] `
+        `[supervisor-diag] turn complete: dur=${turnDurMs}ms msgs=[${seenTypes.join(', ')}] `
         + `tools=${toolEvents.length} compact=${compactEvents.length} `
+        + `captured_action=${runtime.lastCapturedAction ? runtime.lastCapturedAction.action : 'null'} `
         + `usage=${lastUsage ? JSON.stringify(lastUsage) : 'null'}`
     );
     if (toolEvents.length > 0) {
@@ -586,18 +712,19 @@ function streamSdkMessage(runtime, msg) {
 }
 
 /**
- * Safety-valve cap on tool_result text in streamed messages. Set high enough
- * (200KB) that ordinary Read/Glob/Grep outputs flow through intact, but low
- * enough to defend against a pathological multi-MB Read blowing past IPC
- * limits. The UI now uses the full main-AI rendering pipeline (with
- * CollapsibleTextBlock) so it can handle large outputs gracefully — the cap
- * here is purely a DoS guard, not a UI affordance.
+ * Safety-valve cap on tool_result text in streamed messages. Originally 200KB;
+ * lowered to 50KB after the remote-mode supervisor IPC investigation
+ * (2026-05-24). On remote mode multiple Read tool_results land in a single
+ * SSE burst, and 200KB × N per tick saturated the JCEF/EDT pipeline, which
+ * tripped WebviewWatchdog and wiped the supervisor pane. 50KB still passes
+ * typical Read/Glob/Grep output intact; larger payloads get a truncation
+ * marker the UI's CollapsibleTextBlock surfaces gracefully.
  */
 function capStreamMessage(msg) {
     if (!msg || msg.type !== 'user' || !Array.isArray(msg.message?.content)) {
         return msg;
     }
-    const MAX_LEN = 200_000;
+    const MAX_LEN = 50_000;
     const cappedContent = msg.message.content.map((block) => {
         if (!block || block.type !== 'tool_result') return block;
         let text = '';
@@ -626,7 +753,8 @@ function capStreamMessage(msg) {
 /**
  * Tool-result summary used by the legacy wrapper path (only triggered when
  * the SDK stream produced no live messages — transport errors / skipped
- * emit_action). Same 200KB safety valve as capStreamMessage.
+ * emit_action). Same 50KB safety valve as capStreamMessage (lowered from
+ * 200KB to match the remote-mode IPC-pressure fix).
  */
 function summarizeToolResult(block) {
     const isError = block.is_error === true;
@@ -639,7 +767,7 @@ function summarizeToolResult(block) {
             .map((c) => c.text)
             .join('\n');
     }
-    const MAX_LEN = 200_000;
+    const MAX_LEN = 50_000;
     const truncated = text.length > MAX_LEN;
     return {
         isError,

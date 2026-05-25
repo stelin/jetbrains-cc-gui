@@ -53,9 +53,82 @@ export function summarizeEvent(event) {
       return formatUserInput(p, elapsed);
     case 'start':
       return formatStart(p, elapsed);
+    case 'composite_summary':
+      return formatComposite(p, elapsed);
     default:
       return `## EVENT [${elapsed} | ${type}]\n${safeJson(p)}`;
   }
+}
+
+function formatComposite(p, elapsed) {
+  const events = Array.isArray(p.events) ? p.events : [];
+  const dropped = Number.isFinite(p.droppedSincePrevious) ? p.droppedSincePrevious : 0;
+  const tick = Number.isFinite(p.tick) ? p.tick : '?';
+  const urgent = Number.isFinite(p.urgentCount) ? p.urgentCount : 0;
+  const windowSec = (p.batchStartMs && p.batchEndMs)
+    ? Math.max(0, Math.round((p.batchEndMs - p.batchStartMs) / 1000))
+    : null;
+  const isHealthCheck = p.healthCheck === true;
+  const generationBanner = typeof p.generationBanner === 'string' && p.generationBanner.length > 0
+    ? p.generationBanner : null;
+
+  const headerParts = [`## BATCH [${elapsed} | tick #${tick}]`];
+  if (windowSec != null) headerParts.push(`window=${windowSec}s`);
+  headerParts.push(`events=${events.length}`);
+  if (urgent > 0) headerParts.push(`urgent=${urgent}`);
+  if (dropped > 0) headerParts.push(`⚠ dropped=${dropped}`);
+  if (isHealthCheck) headerParts.push('health_check');
+  const header = headerParts.join(' | ');
+
+  if (events.length === 0) {
+    const lines = [header, ''];
+    if (generationBanner) {
+      lines.push('## [NEW_GENERATION_BANNER]', generationBanner, '');
+    }
+    if (dropped > 0) {
+      lines.push(
+        `本批次没有新事件,但有 ${dropped} 个事件在等待期间被丢弃 (ring overflow)。`,
+        '如果担心遗漏,可调用 Read/Grep 复查仍在推进的文件状态。否则请调用 emit_action(action="wait")。',
+      );
+    } else {
+      lines.push(
+        '本批次没有新事件 (健康检查 tick)。',
+        '**必须**调用 `emit_action(action="wait", reason="健康检查无事件")` 结束本轮 — 仅输出思考文本会触发 SUPERVISOR_POST_EVENT_TIMEOUT。',
+      );
+    }
+    return lines.join('\n');
+  }
+
+  const sections = [header, ''];
+  if (generationBanner) {
+    sections.push(
+      '## [NEW_GENERATION_BANNER]',
+      generationBanner,
+      '你刚接管这个 pair。在你的 handoff 文档产生到现在的这段时间里, 主 AI 又跑了下面 ' + events.length + ' 个事件,',
+      '其中部分可能在你的认知之前发生但你不知道。请先按 handoff 文档里的 anchoredFacts 校对, 再做决策。',
+      '',
+    );
+  }
+  if (dropped > 0) {
+    sections.push(`> ⚠️ 注意:有 ${dropped} 个较早事件在缓冲区溢出时被丢弃。`,
+                  '> 下面是仍保留在缓冲区里的最新事件,按时间顺序。', '');
+  }
+  for (let i = 0; i < events.length; i++) {
+    const child = events[i];
+    sections.push(`---  child #${i + 1}  ---`);
+    sections.push(summarizeEvent(child));
+    sections.push('');
+  }
+  sections.push(
+    '',
+    '## 批处理决策提示',
+    '以上是过去 ~' + (windowSec ?? '?') + 's 内主 AI 的事件流。你可以:',
+    '- 对最关键的事件做出单一 action (inject_prompt / escalate / approve_and_continue / wait)',
+    '- 如果多个事件互相关联,综合后给一条 action,不要 emit 多次',
+    '- 仍需遵守 review 协议:涉及 modified_in_plan 文件必须 Read 验证后再决策',
+    '- **必须**以 emit_action 工具调用结束本轮,只输出文字会触发 120s 超时'
+  );
+  return sections.join('\n');
 }
 
 function formatUserInput(p, elapsed) {

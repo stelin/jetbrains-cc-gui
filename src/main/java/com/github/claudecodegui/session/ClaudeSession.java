@@ -679,6 +679,54 @@ public class ClaudeSession {
         return epoch;
     }
 
+    // ─── Phase 6b (2026-05-24): main-AI rotation support ────────────────
+
+    /**
+     * Phase 6b: atomically prepare a main-AI session swap. Caller (typically
+     * {@code MainAIRotationCoordinator}) supplies the rendered handoff +
+     * successor prompt; this method:
+     * <ol>
+     *   <li>Captures the old SDK session id (returned).</li>
+     *   <li>Clears the session id locally so the daemon's next response is
+     *       treated as a fresh session.</li>
+     *   <li>Rotates the runtime session epoch so the daemon disposes the
+     *       old runtime and creates a fresh one on the next send.</li>
+     *   <li>Stages {@code systemPromptAppend} on {@link SessionState} so the
+     *       next send's {@code claude.send} params carry it. Phase 6c wires
+     *       the consumer in {@code SessionSendService.sendToClaude}.</li>
+     * </ol>
+     *
+     * @param systemPromptAppend rendered successor prompt to inject; may be null
+     * @return the old sessionId (may be null if the session was never bound yet)
+     */
+    public synchronized String swapInnerSession(String systemPromptAppend) {
+        String oldSid = state.getSessionId();
+        // Clear so the next [SESSION_ID] from the daemon is treated as new
+        // (ClaudeMessageHandler.handleSessionId will publish the new id).
+        state.setSessionId(null);
+        String newEpoch = state.rotateRuntimeSessionEpoch();
+        state.setPendingSystemPromptAppend(systemPromptAppend);
+        LOG.info("[Phase6b] swap session: oldSid=" + oldSid
+                + " newEpoch=" + newEpoch
+                + " appendBytes=" + (systemPromptAppend == null ? 0 : systemPromptAppend.length()));
+        return oldSid;
+    }
+
+    /** Phase 6b: peek (without clearing) the pending system-prompt append. */
+    public String getPendingSystemPromptAppend() {
+        return state.getPendingSystemPromptAppend();
+    }
+
+    /**
+     * Phase 6b: consume and clear the pending system-prompt append. Delegates
+     * to {@link SessionState#consumePendingSystemPromptAppend}. The send path
+     * uses the state-level method directly; this wrapper exists for symmetry
+     * with the rotation-coordinator API surface.
+     */
+    public String consumePendingSystemPromptAppend() {
+        return state.consumePendingSystemPromptAppend();
+    }
+
     /**
      * Set the reasoning effort level.
      */

@@ -334,7 +334,7 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
             List<ClaudeSession.Attachment> attachments,
             MessageCallback callback
     ) {
-        return sendMessage(channelId, message, sessionId, null, cwd, attachments, null, null, null, null, null, false, null, callback);
+        return sendMessage(channelId, message, sessionId, null, cwd, attachments, null, null, null, null, null, false, null, null, callback);
     }
 
     /**
@@ -352,7 +352,7 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
             String agentPrompt,
             MessageCallback callback
     ) {
-        return sendMessage(channelId, message, sessionId, null, cwd, attachments, permissionMode, model, openedFiles, agentPrompt, null, false, null, callback);
+        return sendMessage(channelId, message, sessionId, null, cwd, attachments, permissionMode, model, openedFiles, agentPrompt, null, false, null, null, callback);
     }
 
     /**
@@ -371,7 +371,7 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
             Boolean streaming,
             MessageCallback callback
     ) {
-        return sendMessage(channelId, message, sessionId, null, cwd, attachments, permissionMode, model, openedFiles, agentPrompt, streaming, false, null, callback);
+        return sendMessage(channelId, message, sessionId, null, cwd, attachments, permissionMode, model, openedFiles, agentPrompt, streaming, false, null, null, callback);
     }
 
     /**
@@ -392,11 +392,16 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
             MessageCallback callback
     ) {
         return sendMessage(channelId, message, sessionId, null, cwd, attachments, permissionMode,
-                model, openedFiles, agentPrompt, streaming, disableThinking, null, callback);
+                model, openedFiles, agentPrompt, streaming, disableThinking, null, null, callback);
     }
 
     /**
      * Send message in existing channel (streaming response, with all options including streaming flag, disableThinking and reasoningEffort).
+     *
+     * <p>Phase 6c (2026-05-24): {@code systemPromptAppend} carries a one-shot
+     * handoff prompt staged by {@code ClaudeSession.swapInnerSession}. Most
+     * callers pass {@code null}; only {@code SessionSendService.sendToClaude}
+     * threads a non-null value after consuming it from {@link SessionState}.
      */
     public CompletableFuture<SDKResult> sendMessage(
             String channelId,
@@ -412,6 +417,7 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
             Boolean streaming,
             Boolean disableThinking,
             String reasoningEffort,
+            String systemPromptAppend,
             MessageCallback callback
     ) {
         // Try daemon mode first (avoids per-request Node.js process spawning)
@@ -419,7 +425,7 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
         if (db != null) {
             return sendMessageViaDaemon(db, channelId, message, sessionId, runtimeSessionEpoch, cwd,
                     attachments, permissionMode, model, openedFiles, agentPrompt,
-                    streaming, disableThinking, reasoningEffort, callback);
+                    streaming, disableThinking, reasoningEffort, systemPromptAppend, callback);
         }
 
         // In remote mode the per-process fallback would silently spawn a local
@@ -459,6 +465,7 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
                 streaming,
                 disableThinking,
                 reasoningEffort,
+                systemPromptAppend,
                 callback
         );
     }
@@ -532,6 +539,7 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
             Boolean streaming,
             Boolean disableThinking,
             String reasoningEffort,
+            String systemPromptAppend,
             MessageCallback callback
     ) {
         return daemonRequestExecutor.sendMessageViaDaemon(
@@ -549,6 +557,7 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
                 streaming,
                 disableThinking,
                 reasoningEffort,
+                systemPromptAppend,
                 callback
         );
     }

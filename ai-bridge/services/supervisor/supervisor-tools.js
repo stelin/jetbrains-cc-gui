@@ -206,6 +206,19 @@ export function buildSupervisorMcpServer(sdk, zod, onCapture) {
                     }],
                 };
             }
+            // 2026-05-24 (Q4 trace): mirrors ai-bridge-server. Local daemon does
+            // not yet generate directiveIds, so the field will be "(none)" — but
+            // the prompt preview still verifies the MCP capture succeeded.
+            if (result.action && (result.action.action === 'inject_prompt'
+                || result.action.action === 'retry_with_hint')) {
+                const p = result.action.payload || {};
+                const promptPreview = (p.prompt || '').slice(0, 80).replace(/\n/g, ' ');
+                console.error(
+                    `[INJECT_TRACE] daemon emit_action captured `
+                    + `action=${result.action.action} directiveId=${p.directiveId || '(none)'} `
+                    + `promptPreview="${promptPreview}"`
+                );
+            }
             try { onCapture(result.action); } catch { /* best-effort capture */ }
             return {
                 content: [{ type: 'text', text: 'ACTION recorded. Turn complete.' }],

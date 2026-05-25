@@ -280,6 +280,60 @@ public class SupervisorAgentManager {
     }
 
     /**
+     * Read the rotation-trigger thresholds shared by supervisor and main-AI
+     * rotation paths. Returns defaults when the file lacks a {@code rotationConfig}
+     * object or any field is out of range / inconsistent.
+     */
+    public RotationConfig getRotationConfig() throws IOException {
+        JsonObject config = readConfig();
+        if (!config.has("rotationConfig") || !config.get("rotationConfig").isJsonObject()) {
+            return RotationConfig.defaults();
+        }
+        JsonObject obj = config.getAsJsonObject("rotationConfig");
+        double softR = readDouble(obj, "softRatio", RotationConfig.DEFAULT_SOFT_RATIO);
+        double hardR = readDouble(obj, "hardRatio", RotationConfig.DEFAULT_HARD_RATIO);
+        int softC = readInt(obj, "softCompact", RotationConfig.DEFAULT_SOFT_COMPACT);
+        int hardC = readInt(obj, "hardCompact", RotationConfig.DEFAULT_HARD_COMPACT);
+        RotationConfig candidate = new RotationConfig(softR, hardR, softC, hardC);
+        if (candidate.validate() != null) {
+            LOG.warn("[SupervisorAgentManager] Invalid persisted rotationConfig — using defaults");
+            return RotationConfig.defaults();
+        }
+        return candidate;
+    }
+
+    public void setRotationConfig(RotationConfig next) throws IOException {
+        if (next == null) {
+            throw new IllegalArgumentException("rotationConfig must not be null");
+        }
+        String err = next.validate();
+        if (err != null) {
+            throw new IllegalArgumentException("rotationConfig invalid: " + err);
+        }
+        JsonObject config = readConfig();
+        JsonObject obj = new JsonObject();
+        obj.addProperty("softRatio", next.softRatio);
+        obj.addProperty("hardRatio", next.hardRatio);
+        obj.addProperty("softCompact", next.softCompact);
+        obj.addProperty("hardCompact", next.hardCompact);
+        config.add("rotationConfig", obj);
+        writeConfig(config);
+        LOG.info("[SupervisorAgentManager] Set " + next);
+    }
+
+    private static double readDouble(JsonObject obj, String key, double fallback) {
+        if (!obj.has(key) || obj.get(key).isJsonNull()) return fallback;
+        try { return obj.get(key).getAsDouble(); }
+        catch (Exception ignored) { return fallback; }
+    }
+
+    private static int readInt(JsonObject obj, String key, int fallback) {
+        if (!obj.has(key) || obj.get(key).isJsonNull()) return fallback;
+        try { return obj.get(key).getAsInt(); }
+        catch (Exception ignored) { return fallback; }
+    }
+
+    /**
      * Set the default supervisor agent ID. Pass null/empty to clear.
      */
     public void setDefaultAgentId(String agentId) throws IOException {

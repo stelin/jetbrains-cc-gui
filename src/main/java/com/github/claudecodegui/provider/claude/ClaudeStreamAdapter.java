@@ -142,6 +142,18 @@ class ClaudeStreamAdapter {
             if (m.find()) {
                 callback.onMessage("reasoning_effort_applied", m.group(1));
             }
+            return;
+        }
+
+        // Protocol v2 (2026-05-24): main-AI side Pair-mode lines emitted by
+        // daemon-side mcp__main + SubagentStop hook. Routed to ClaudeMessageHandler
+        // which forwards to the attached Pair's EventBus.
+        if (line.startsWith("[TURN_REPORT]")) {
+            callback.onMessage("turn_report", line.substring("[TURN_REPORT]".length()).trim());
+            return;
+        }
+        if (line.startsWith("[SUBAGENT_STOP]")) {
+            callback.onMessage("subagent_stop", line.substring("[SUBAGENT_STOP]".length()).trim());
         }
     }
 

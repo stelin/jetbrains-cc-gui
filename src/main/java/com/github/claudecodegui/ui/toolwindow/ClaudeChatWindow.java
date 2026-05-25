@@ -14,6 +14,7 @@ import com.github.claudecodegui.session.SessionCallbackAdapter;
 import com.github.claudecodegui.session.SessionLifecycleManager;
 import com.github.claudecodegui.session.SessionLoadService;
 import com.github.claudecodegui.session.StreamMessageCoalescer;
+import com.github.claudecodegui.session.pair.PairSessionManager;
 import com.github.claudecodegui.settings.CodemossSettingsService;
 import com.github.claudecodegui.settings.TabStateService;
 import com.github.claudecodegui.ui.ChatWindowDelegate;
@@ -54,6 +55,16 @@ public class ClaudeChatWindow {
     private Content parentContent;
     private String originalTabName;
     private volatile String sessionId = null;
+
+    /**
+     * Per-tab stable identifier. Generated once at construction; used by
+     * {@link PairSessionManager} to scope Supervisor Pairs to the tab that
+     * created them so a different tab cannot inherit them via
+     * {@code replayActivePairs} or send input to them via the project-shared
+     * lookup map. Disposed pairs are reaped from the manager via
+     * {@code stopPairsOwnedBy(windowId)} in {@link #dispose()}.
+     */
+    private final String windowId = java.util.UUID.randomUUID().toString();
 
     private JBCefBrowser browser;
     private ClaudeSession session;
@@ -120,7 +131,13 @@ public class ClaudeChatWindow {
                 htmlLoader,
                 () -> webviewInitializer.recreateWebview("watchdog_recreate"),
                 () -> disposed,
+                // Streaming-grace condition: main-AI streaming OR any supervisor
+                // turn in flight. Without the latter, a supervisor IPC burst
+                // (large Read tool_results, multi-message tick) saturates the
+                // EDT, the heartbeat/RAF age trips the 45s timeout, and the
+                // watchdog reloads the webview — wiping the supervisor pane.
                 () -> streamCoalescer.isStreamActive()
+                        || PairSessionManager.getInstance(project).hasActiveSupervisorTurn()
         );
 
         this.session = new ClaudeSession(project, claudeSDKBridge, codexSDKBridge);
@@ -638,6 +655,18 @@ public class ClaudeChatWindow {
             LOG.warn("Failed to clean up session: " + e.getMessage());
         }
 
+        // Stop every Pair this tab created BEFORE killing the daemon. The pairs'
+        // SupervisorBridge captured this tab's ClaudeSDKBridge, so leaving them
+        // alive after the daemon shutdown would leave dangling references in the
+        // project-scoped PairSessionManager that no other tab can drive.
+        try {
+            if (project != null && !project.isDisposed()) {
+                PairSessionManager.getInstance(project).stopPairsOwnedBy(windowId);
+            }
+        } catch (Exception e) {
+            LOG.warn("Failed to stop owned pairs on tab dispose: " + e.getMessage());
+        }
+
         try {
             if (claudeSDKBridge != null) {
                 int activeCount = claudeSDKBridge.getActiveProcessCount();
@@ -749,6 +778,11 @@ public class ClaudeChatWindow {
             @Override
             public Project getProject() {
                 return project;
+            }
+
+            @Override
+            public String getWindowId() {
+                return windowId;
             }
 
             @Override

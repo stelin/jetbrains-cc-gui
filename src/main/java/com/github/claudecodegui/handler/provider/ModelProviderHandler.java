@@ -282,4 +282,38 @@ public class ModelProviderHandler {
 
         return MODEL_CONTEXT_LIMITS.getOrDefault(model, 200_000);
     }
+
+    // Mirrors the webview's apply1MContextSuffix / strip1MContextSuffix /
+    // modelSupports1MContext (ChatInputBox/types.ts). Java needed equivalents
+    // once PairSessionManager grew the responsibility of resolving the
+    // supervisor's effective model at startup — previously the suffix lived
+    // exclusively in the webview, so the daemon SDK was always born at 200k
+    // even when the user had selected 1M (see [2026-05-24 supervisor 1M bug]).
+
+    private static final java.util.regex.Pattern LONG_CONTEXT_SUFFIX_PATTERN =
+            java.util.regex.Pattern.compile("(?i)\\[1m\\]$");
+
+    public static String stripLongContextSuffix(String modelId) {
+        if (modelId == null) return null;
+        return LONG_CONTEXT_SUFFIX_PATTERN.matcher(modelId).replaceAll("");
+    }
+
+    public static boolean hasLongContextSuffix(String modelId) {
+        if (modelId == null) return false;
+        return LONG_CONTEXT_SUFFIX_PATTERN.matcher(modelId).find();
+    }
+
+    public static boolean modelSupports1MContext(String modelId) {
+        if (modelId == null || modelId.isEmpty()) return false;
+        return !stripLongContextSuffix(modelId).toLowerCase().contains("haiku");
+    }
+
+    public static String applyLongContextSuffix(String modelId, boolean enabled) {
+        if (modelId == null) return null;
+        String base = stripLongContextSuffix(modelId);
+        if (!enabled || !modelSupports1MContext(base)) {
+            return base;
+        }
+        return base + "[1m]";
+    }
 }

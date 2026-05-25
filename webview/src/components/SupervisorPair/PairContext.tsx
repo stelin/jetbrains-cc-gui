@@ -8,9 +8,10 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import type { SelectedSupervisor } from '../../types/supervisorAgent';
+import type { SelectedSupervisor, SupervisorAgent } from '../../types/supervisorAgent';
 import type { ClaudeMessage, ClaudeContentOrResultBlock, ToolResultBlock } from '../../types';
 import type { ReasoningEffort } from '../ChatInputBox/types';
+import { apply1MContextSuffix, strip1MContextSuffix } from '../ChatInputBox/types';
 
 /**
  * Token usage snapshot for the supervisor's TokenIndicator. Computed by Java
@@ -23,6 +24,41 @@ export interface SupervisorUsage {
   totalPromptTokens: number;
   maxTokens?: number;
   percentage?: number;
+}
+
+/**
+ * Phase 2 (2026-05-24): structured status snapshot pushed by the Java
+ * PairStatusPusher. Fields match {@code PairStatusSnapshot.toJson()} on the
+ * Java side — keep schema-aligned.
+ *
+ * <p>Two distinct channels feed the right-pane indicators:
+ * <ul>
+ *   <li>{@link SupervisorUsage} — coarse token-rollup (input + output) computed
+ *       from each SDK message, drives the existing TokenIndicator.</li>
+ *   <li>{@link PairStatusSnapshot} — SDK's real {@code getContextUsage} ratio +
+ *       monitor state + alerts, drives the new PairStatusBar.</li>
+ * </ul>
+ */
+export interface PairStatusSnapshot {
+  pairId: string;
+  generation: number;
+  state?: 'IDLE' | 'MAIN_TURN' | 'TICK' | 'ROTATING';
+  health?: 'HEALTHY' | 'DEGRADED' | 'UNHEALTHY';
+  supervisorContextRatio?: number;  // 0..1
+  supervisorUsedTokens?: number;
+  supervisorContextLimit?: number;
+  compactCount: number;
+  lastActivityAgoMs?: number;
+  pendingEvents: number;
+  totalDroppedEvents: number;
+  tickCount: number;
+  lastTickStartMs: number;
+  lastTickEndMs: number;
+  recentAlerts: Array<{
+    ts: number;
+    severity: 'INFO' | 'WARN' | 'ERROR';
+    message: string;
+  }>;
 }
 
 /**
@@ -54,6 +90,20 @@ interface PairContextValue {
   /** Currently active supervisors on this session. Empty array = Pair disabled. */
   selected: SelectedSupervisor[];
   setSelected: (next: SelectedSupervisor[]) => void;
+  /**
+   * Canonical entry point for activating a supervisor. Combines:
+   *   1. {@link setSelected} (seeds the per-agent 1M / reasoning defaults)
+   *   2. resolution of the current right-pane composer state (effective
+   *      model with [1m] suffix when applicable, effort tier from
+   *      per-agent map or agent.defaultReasoning)
+   *   3. a single {@code pair_start} IPC carrying all three resolved
+   *      values, so Java's PairSessionManager hands the daemon the right
+   *      model + effort on the very first {@code bridge.startWithHandoff()}.
+   * Without this helper, callers used to send only {@code agentId} and the
+   * daemon SDK was born at 200k / SDK-default effort — see the 2026-05-24
+   * 1M-context bug report.
+   */
+  startSupervisorPair: (agent: SupervisorAgent) => void;
   isPairActive: boolean;
   openManager: () => void;
   registerOpenManager: (fn: () => void) => void;
@@ -80,15 +130,27 @@ interface PairContextValue {
   longContextEnabled: boolean;
   setLongContextEnabled: (enabled: boolean) => void;
   usageByAgentId: Record<string, SupervisorUsage>;
+  /**
+   * Phase 2: latest status snapshot pushed from Java PairStatusPusher.
+   * Null until the first push (typically after the monitor's first
+   * health-check tick, ~2.5min after pair start unless an urgent event /
+   * compaction surfaces sooner).
+   */
+  pairStatus: PairStatusSnapshot | null;
   respondToEscalate: (choice: string, note?: string) => void;
   dismissEscalate: () => void;
   registerInjectPromptHandler: (
-    fn: (pairId: string, supervisorId: string, prompt: string) => void
+    fn: (pairId: string, supervisorId: string, prompt: string, directiveId?: string) => void
   ) => void;
   sendUserInputToSupervisor: (
     text: string,
     attachments?: Array<{ path: string }>
   ) => void;
+  // Phase 5 (2026-05-24): autonomy-mode toggle. Read from pairStatus when
+  // present; locally cached so the AutonomyToggle has an optimistic value
+  // before the next status push round-trip.
+  autonomyMode: 'strict' | 'mixed' | 'full' | undefined;
+  setAutonomyMode: (mode: 'strict' | 'mixed' | 'full') => void;
 }
 
 const PairContext = createContext<PairContextValue | null>(null);
@@ -183,9 +245,27 @@ export function PairProvider({ children }: PairProviderProps) {
     catch { /* ignore */ }
   }, []);
   const [reasoningByAgentId, setReasoningByAgentId] = useState<Record<string, ReasoningEffort>>({});
+  // Phase 2: latest status snapshot from Java PairStatusPusher.
+  const [pairStatus, setPairStatus] = useState<PairStatusSnapshot | null>(null);
+  // Phase 5 (2026-05-24): optimistic autonomy mode (canonical comes from
+  // pairStatus.autonomyMode each push). Default "mixed" matches Java's default.
+  const [autonomyMode, setAutonomyModeState] = useState<'strict' | 'mixed' | 'full' | undefined>(undefined);
+  const setAutonomyMode = useCallback((mode: 'strict' | 'mixed' | 'full') => {
+    setAutonomyModeState(mode);
+  }, []);
+  // Sync from server when a fresh status arrives.
+  useEffect(() => {
+    const serverMode = (pairStatus as unknown as { autonomyMode?: string } | null)?.autonomyMode;
+    if (serverMode === 'strict' || serverMode === 'mixed' || serverMode === 'full') {
+      setAutonomyModeState(serverMode);
+    }
+  }, [pairStatus]);
 
   const openManagerRef = useRef<() => void>(() => { /* not registered yet */ });
-  const injectHandlerRef = useRef<((pairId: string, supervisorId: string, prompt: string) => void) | null>(null);
+  // Protocol v2 (2026-05-24): added optional directiveId so the callback can
+  // ack back via pair_directive_ack. Legacy registrants that ignore the 4th
+  // arg keep working — TypeScript parameter widening is safe here.
+  const injectHandlerRef = useRef<((pairId: string, supervisorId: string, prompt: string, directiveId?: string) => void) | null>(null);
   const pairIdRef = useRef<string | null>(null);
   useEffect(() => { pairIdRef.current = pairId; }, [pairId]);
 
@@ -260,6 +340,56 @@ export function PairProvider({ children }: PairProviderProps) {
     );
   }, []);
 
+  // Canonical pair-launch entry point. Resolves the current right-pane
+  // composer state (1M toggle + reasoning tier + model override) before
+  // shipping a single pair_start payload to Java, so the daemon SDK is
+  // born with the user's chosen config on the first
+  // bridge.startWithHandoff() — no "must re-toggle 1M after start" round
+  // trip. See the 2026-05-24 supervisor-1M bug for the failure mode.
+  const startSupervisorPair = useCallback((agent: SupervisorAgent) => {
+    const next: SelectedSupervisor[] = [{
+      agentId: agent.id,
+      name: agent.name,
+      role: 'coordinator',
+      model: agent.model,
+      defaultLongContext: agent.defaultLongContext,
+      defaultReasoning: agent.defaultReasoning,
+    }];
+    setSelected(next);
+
+    // Resolve 1M flag: explicit user toggle (localStorage written) wins;
+    // otherwise fall back to the agent's defaultLongContext. Mirrors the
+    // seeding logic in setSelected so first activation lines up with what
+    // the composer will show after this turn.
+    let resolvedLongContext: boolean;
+    try {
+      const stored = window.localStorage.getItem(LONG_CONTEXT_KEY);
+      resolvedLongContext = stored === null
+        ? (agent.defaultLongContext ?? false)
+        : stored === '1';
+    } catch {
+      resolvedLongContext = agent.defaultLongContext ?? false;
+    }
+
+    const baseModel = strip1MContextSuffix(agent.model || '');
+    const effectiveModel = baseModel
+      ? apply1MContextSuffix(baseModel, resolvedLongContext)
+      : '';
+
+    const effectiveReasoning: ReasoningEffort =
+      reasoningByAgentId[agent.id] ??
+      ((agent.defaultReasoning as ReasoningEffort | undefined) ?? 'medium');
+
+    const payload: Record<string, unknown> = { agentId: agent.id };
+    if (effectiveModel) payload.model = effectiveModel;
+    payload.longContextEnabled = resolvedLongContext;
+    payload.reasoningEffort = effectiveReasoning;
+
+    try {
+      sendToJava(`pair_start:${JSON.stringify(payload)}`);
+    } catch { /* ignore — handler is best-effort */ }
+  }, [setSelected, reasoningByAgentId]);
+
   const openManager = useCallback(() => {
     openManagerRef.current();
   }, []);
@@ -269,7 +399,7 @@ export function PairProvider({ children }: PairProviderProps) {
   }, []);
 
   const registerInjectPromptHandler = useCallback(
-    (fn: (pairId: string, supervisorId: string, prompt: string) => void) => {
+    (fn: (pairId: string, supervisorId: string, prompt: string, directiveId?: string) => void) => {
       injectHandlerRef.current = fn;
     },
     []
@@ -448,6 +578,22 @@ export function PairProvider({ children }: PairProviderProps) {
     const prevOpError = window.onPairOperationError;
     const prevThinking = window.onPairThinking;
     const prevSupervisorMessage = window.onSupervisorMessage;
+    const prevSupervisorMessageBatch = window.onSupervisorMessageBatch;
+    const prevPairStatus = window.onPairStatusUpdate;
+    const prevPairResume = window.onPairResume;
+    // Protocol v2 (2026-05-24): non-blocking alert from record_alert.
+    const prevAlert = window.onPairAlert;
+    window.onPairAlert = (json: string) => {
+      // Phase 3 stub — Phase 5 will replace with a real toast/banner UI.
+      // For now, log to console so devs can verify the daemon→Java→webview
+      // path is wired; production users would not see anything from this.
+      try {
+        const o = JSON.parse(json);
+        console.info('[Pair] record_alert',
+          o.severity || 'warn', o.category || '?',
+          o.fallback_choice || o.reason || '(no fallback)');
+      } catch { /* ignore malformed */ }
+    };
 
     window.onPairStarted = (json: string) => {
       try {
@@ -464,6 +610,7 @@ export function PairProvider({ children }: PairProviderProps) {
       setModelOverrideByAgentId({});
       setReasoningByAgentId({});
       setUsageByAgentId({});
+      setPairStatus(null);
     };
 
     /**
@@ -542,86 +689,179 @@ export function PairProvider({ children }: PairProviderProps) {
      * shape, same content blocks as the main AI. The emit_action tool_use
      * is filtered here because its result is delivered by onPairActionEvent
      * (with reason/payload normalised); rendering both would duplicate.
+     *
+     * 2026-05-24: Java's SupervisorMessageBatcher delivers an array of
+     * envelopes via {@code window.onSupervisorMessageBatch}; both single and
+     * batched paths funnel through {@code processSupervisorEnvelope} so the
+     * rendering logic lives in one place.
      */
-    window.onSupervisorMessage = (json: string) => {
-      try {
-        const evt = JSON.parse(json);
-        const agentId: string | undefined = evt?.supervisorId;
-        const turnStr: string | undefined = typeof evt?.turnId === 'string' ? evt.turnId : undefined;
-        const msg = evt?.message;
-        if (!agentId || !msg || typeof msg !== 'object') return;
+    const processSupervisorEnvelope = (evt: unknown) => {
+      if (!evt || typeof evt !== 'object') return;
+      const env = evt as {
+        supervisorId?: string;
+        turnId?: string;
+        message?: {
+          type?: string;
+          subtype?: string;
+          message?: { content?: unknown };
+          compact_metadata?: { trigger?: string; pre_tokens?: number };
+          parent_tool_use_id?: string | null;
+        };
+      };
+      const agentId = env.supervisorId;
+      const turnStr = typeof env.turnId === 'string' ? env.turnId : undefined;
+      const msg = env.message;
+      if (!agentId || !msg || typeof msg !== 'object') return;
 
-        const turnId = hashTurnId(turnStr || `sm_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
+      // 2026-05-24 (Q2 fix): SDK Task subagents deliver their internal messages
+      // through the parent query's stream with `parent_tool_use_id` set to the
+      // Task tool_use id. Previously these were rendered as supervisor's own
+      // bubbles — the prompt text the subagent received showed up as a blue
+      // right-aligned "user" bubble, and the subagent's Read/Glob calls were
+      // attributed to the supervisor. That was wrong on both counts: the
+      // supervisor pane should show only the supervisor's own work + the
+      // parent Task tool_use card (whose tool_result already carries the
+      // subagent's final answer). Skip subagent-internal frames entirely.
+      if (msg.parent_tool_use_id) {
+        return;
+      }
 
-        if (msg.type === 'assistant' && Array.isArray(msg.message?.content)) {
-          const blocks: ClaudeContentOrResultBlock[] = [];
-          for (const block of msg.message.content) {
-            if (!block || typeof block !== 'object') continue;
-            // Skip the action protocol envelope — onPairActionEvent renders it
-            // with the normalised payload.
-            if (block.type === 'tool_use' && typeof block.name === 'string'
-                && block.name.includes('emit_action')) continue;
-            blocks.push(block as ClaudeContentOrResultBlock);
-          }
-          if (blocks.length > 0) {
-            appendAssistantBlocks(agentId, turnId, blocks, { ensureStreaming: true });
-            setStreamingByAgentId((prev) =>
-              prev[agentId] ? prev : { ...prev, [agentId]: true }
-            );
-          }
-        } else if (msg.type === 'user' && Array.isArray(msg.message?.content)) {
-          const toolResults: ToolResultBlock[] = [];
-          const userBlocks: ClaudeContentOrResultBlock[] = [];
-          for (const block of msg.message.content) {
-            if (!block || typeof block !== 'object') continue;
-            if (block.type === 'tool_result') {
-              toolResults.push(block as ToolResultBlock);
-            } else if (isRenderableUserBlock(block)) {
-              userBlocks.push(block as ClaudeContentOrResultBlock);
-            }
-          }
-          if (toolResults.length > 0) {
-            attachToolResults(agentId, toolResults);
-          }
-          if (userBlocks.length > 0) {
-            // Non-tool-result content in a user message is supervisor input
-            // (the prompt the daemon assembled from main-AI events) — render
-            // it as a user bubble so the operator can see what the supervisor
-            // was given. Blocks that ContentBlockRenderer cannot display
-            // (empty text, SDK internal markers) are filtered above so they
-            // do not surface as an empty blue bubble in the pane.
-            setMessagesByAgentId((prev) => {
-              const list = prev[agentId] ? [...prev[agentId]] : [];
-              list.push({
-                type: 'user',
-                raw: { content: userBlocks },
-                __turnId: turnId,
-                timestamp: new Date().toISOString(),
-              });
-              return { ...prev, [agentId]: trimHistory(list) };
-            });
-          }
-        } else if (msg.type === 'system' && msg.subtype === 'compact_boundary') {
-          // Render as a synthetic tool_use so it flows through
-          // ContentBlockRenderer alongside everything else.
-          appendAssistantBlocks(agentId, turnId, [{
-            type: 'tool_use',
-            id: `compact_${turnStr ?? Date.now()}`,
-            name: 'mcp__supervisor__compact_boundary',
-            input: {
-              trigger: msg.compact_metadata?.trigger ?? 'auto',
-              preTokens: msg.compact_metadata?.pre_tokens ?? null,
-            },
-          }]);
+      const turnId = hashTurnId(turnStr || `sm_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
+
+      if (msg.type === 'assistant' && Array.isArray(msg.message?.content)) {
+        const blocks: ClaudeContentOrResultBlock[] = [];
+        for (const block of msg.message.content) {
+          if (!block || typeof block !== 'object') continue;
+          const b = block as { type?: string; name?: string };
+          // Skip the action protocol envelope — onPairActionEvent renders it
+          // with the normalised payload.
+          if (b.type === 'tool_use' && typeof b.name === 'string'
+              && b.name.includes('emit_action')) continue;
+          blocks.push(block as ClaudeContentOrResultBlock);
         }
+        if (blocks.length > 0) {
+          appendAssistantBlocks(agentId, turnId, blocks, { ensureStreaming: true });
+          setStreamingByAgentId((prev) =>
+            prev[agentId] ? prev : { ...prev, [agentId]: true }
+          );
+        }
+      } else if (msg.type === 'user' && Array.isArray(msg.message?.content)) {
+        const toolResults: ToolResultBlock[] = [];
+        const userBlocks: ClaudeContentOrResultBlock[] = [];
+        for (const block of msg.message.content) {
+          if (!block || typeof block !== 'object') continue;
+          const b = block as { type?: string };
+          if (b.type === 'tool_result') {
+            toolResults.push(block as ToolResultBlock);
+          } else if (isRenderableUserBlock(block)) {
+            userBlocks.push(block as ClaudeContentOrResultBlock);
+          }
+        }
+        if (toolResults.length > 0) {
+          attachToolResults(agentId, toolResults);
+        }
+        if (userBlocks.length > 0) {
+          // Non-tool-result content in a user message is supervisor input
+          // (the prompt the daemon assembled from main-AI events) — render
+          // it as a user bubble so the operator can see what the supervisor
+          // was given. Blocks that ContentBlockRenderer cannot display
+          // (empty text, SDK internal markers) are filtered above so they
+          // do not surface as an empty blue bubble in the pane.
+          setMessagesByAgentId((prev) => {
+            const list = prev[agentId] ? [...prev[agentId]] : [];
+            list.push({
+              type: 'user',
+              raw: { content: userBlocks },
+              __turnId: turnId,
+              timestamp: new Date().toISOString(),
+            });
+            return { ...prev, [agentId]: trimHistory(list) };
+          });
+        }
+      } else if (msg.type === 'system' && msg.subtype === 'compact_boundary') {
+        // Render as a synthetic tool_use so it flows through
+        // ContentBlockRenderer alongside everything else.
+        appendAssistantBlocks(agentId, turnId, [{
+          type: 'tool_use',
+          id: `compact_${turnStr ?? Date.now()}`,
+          name: 'mcp__supervisor__compact_boundary',
+          input: {
+            trigger: msg.compact_metadata?.trigger ?? 'auto',
+            preTokens: msg.compact_metadata?.pre_tokens ?? null,
+          },
+        }]);
+      }
+    };
+
+    window.onSupervisorMessage = (json: string) => {
+      try { processSupervisorEnvelope(JSON.parse(json)); }
+      catch { /* ignore malformed */ }
+    };
+
+    window.onSupervisorMessageBatch = (json: string) => {
+      try {
+        const arr = JSON.parse(json);
+        if (!Array.isArray(arr)) return;
+        for (const evt of arr) processSupervisorEnvelope(evt);
+      } catch { /* ignore malformed */ }
+    };
+
+    /**
+     * Re-emitted by Java on frontend_ready (post webview reload) for every
+     * still-active pair. Restore `selected` + `pairId` so the supervisor pane
+     * re-appears without forcing the user to re-pick the agent. The
+     * underlying Java PairSession and daemon supervisor session are still
+     * alive — only the React state was lost.
+     *
+     * Uses setSelectedState (the raw setter) rather than the public
+     * setSelected callback, because the latter clears messages/streaming on
+     * the next.length === 0 branch and re-seeds long-context/reasoning
+     * defaults — neither is appropriate when we're rehydrating mid-session.
+     */
+    window.onPairResume = (json: string) => {
+      try {
+        const o = JSON.parse(json) as {
+          pairId?: string;
+          agentId?: string;
+          name?: string;
+          model?: string;
+          defaultLongContext?: boolean;
+          defaultReasoning?: string;
+        };
+        if (!o || !o.agentId) return;
+        setSelectedState([{
+          agentId: o.agentId,
+          name: o.name ?? o.agentId,
+          role: 'coordinator',
+          model: o.model,
+          defaultLongContext: o.defaultLongContext,
+          defaultReasoning: o.defaultReasoning,
+        }]);
+        if (o.pairId) setPairId(o.pairId);
       } catch { /* ignore malformed */ }
     };
 
     window.onPairInjectPrompt = (json: string) => {
       try {
-        const o = JSON.parse(json) as { pairId: string; supervisorId: string; prompt: string };
-        injectHandlerRef.current?.(o.pairId, o.supervisorId, o.prompt);
-      } catch { /* ignore */ }
+        // Protocol v2 (2026-05-24): directiveId is present when the supervisor
+        // emitted an inject_prompt that needs ack tracking. Legacy daemons
+        // (or non-Pair-mode injections) omit it — handler treats it as optional.
+        const o = JSON.parse(json) as {
+          pairId: string;
+          supervisorId: string;
+          prompt: string;
+          directiveId?: string;
+        };
+        // 2026-05-24 (Q4 trace): IPC receipt point. If you see Java's
+        // `[INJECT_TRACE] PairHandler.onInjectPromptV2` but not this line,
+        // the JBCef bridge dropped the call.
+        console.info('[INJECT_TRACE] webview onPairInjectPrompt',
+          { pairId: o.pairId, directiveId: o.directiveId, promptLen: o.prompt?.length ?? 0,
+            handlerAttached: Boolean(injectHandlerRef.current) });
+        injectHandlerRef.current?.(o.pairId, o.supervisorId, o.prompt, o.directiveId);
+      } catch (err) {
+        console.warn('[INJECT_TRACE] webview onPairInjectPrompt parse failed', err);
+      }
     };
 
     window.onPairEscalate = (json: string) => {
@@ -664,6 +904,16 @@ export function PairProvider({ children }: PairProviderProps) {
       } catch { /* ignore */ }
     };
 
+    // Phase 2: PairStatusPusher snapshot. Pre-throttled on the Java side, so
+    // we can setState directly without further coalescing.
+    window.onPairStatusUpdate = (json: string) => {
+      try {
+        const o = JSON.parse(json) as PairStatusSnapshot;
+        if (!o || typeof o !== 'object' || !o.pairId) return;
+        setPairStatus(o);
+      } catch { /* ignore malformed push */ }
+    };
+
     window.onPairThinking = (json: string) => {
       try {
         const o = JSON.parse(json) as { supervisorId?: string; thinking?: boolean };
@@ -703,6 +953,7 @@ export function PairProvider({ children }: PairProviderProps) {
 
     return () => {
       window.onSupervisorMessage = prevSupervisorMessage;
+      window.onSupervisorMessageBatch = prevSupervisorMessageBatch;
       window.onPairStarted = prevStarted;
       window.onPairStopped = prevStopped;
       window.onPairActionEvent = prevAction;
@@ -710,6 +961,9 @@ export function PairProvider({ children }: PairProviderProps) {
       window.onPairEscalate = prevEscalate;
       window.onPairOperationError = prevOpError;
       window.onPairThinking = prevThinking;
+      window.onPairStatusUpdate = prevPairStatus;
+      window.onPairResume = prevPairResume;
+      window.onPairAlert = prevAlert;
     };
   }, [appendAssistantBlocks, attachToolResults, endStreaming]);
 
@@ -746,6 +1000,7 @@ export function PairProvider({ children }: PairProviderProps) {
     () => ({
       selected,
       setSelected,
+      startSupervisorPair,
       isPairActive: selected.length > 0,
       openManager,
       registerOpenManager,
@@ -761,14 +1016,18 @@ export function PairProvider({ children }: PairProviderProps) {
       longContextEnabled,
       setLongContextEnabled,
       usageByAgentId,
+      pairStatus,
       respondToEscalate,
       dismissEscalate,
       registerInjectPromptHandler,
       sendUserInputToSupervisor,
+      autonomyMode,
+      setAutonomyMode,
     }),
     [
       selected,
       setSelected,
+      startSupervisorPair,
       openManager,
       registerOpenManager,
       messagesByAgentId,
@@ -783,10 +1042,13 @@ export function PairProvider({ children }: PairProviderProps) {
       longContextEnabled,
       setLongContextEnabled,
       usageByAgentId,
+      pairStatus,
       respondToEscalate,
       dismissEscalate,
       registerInjectPromptHandler,
       sendUserInputToSupervisor,
+      autonomyMode,
+      setAutonomyMode,
     ]
   );
 
@@ -802,6 +1064,7 @@ export function usePairContext(): PairContextValue {
   return {
     selected: [],
     setSelected: () => { /* no-op */ },
+    startSupervisorPair: () => { /* no-op */ },
     isPairActive: false,
     openManager: () => { /* no-op */ },
     registerOpenManager: () => { /* no-op */ },
@@ -817,6 +1080,7 @@ export function usePairContext(): PairContextValue {
     longContextEnabled: false,
     setLongContextEnabled: () => { /* no-op */ },
     usageByAgentId: {},
+    pairStatus: null,
     respondToEscalate: () => { /* no-op */ },
     dismissEscalate: () => { /* no-op */ },
     registerInjectPromptHandler: () => { /* no-op */ },
@@ -824,5 +1088,9 @@ export function usePairContext(): PairContextValue {
       _text: string,
       _attachments?: Array<{ path: string }>
     ) => { /* no-op */ },
+    // Phase 5 (2026-05-24): autonomy defaults — fall back to "mixed" so the
+    // UI doesn't show a confusing "unset" state outside a Provider.
+    autonomyMode: undefined,
+    setAutonomyMode: () => { /* no-op */ },
   };
 }

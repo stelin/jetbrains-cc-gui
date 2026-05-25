@@ -26,7 +26,8 @@ public class SupervisorAgentHandler extends BaseMessageHandler {
             "update_supervisor_agent",
             "delete_supervisor_agent",
             "get_default_supervisor_agent",
-            "set_default_supervisor_agent"
+            "set_default_supervisor_agent",
+            "set_rotation_config"
     };
 
     private final CodemossSettingsService settingsService;
@@ -67,6 +68,9 @@ public class SupervisorAgentHandler extends BaseMessageHandler {
             case "set_default_supervisor_agent":
                 handleSetDefault(content);
                 return true;
+            case "set_rotation_config":
+                handleSetRotationConfig(content);
+                return true;
             default:
                 return false;
         }
@@ -100,6 +104,28 @@ public class SupervisorAgentHandler extends BaseMessageHandler {
             } catch (Exception ignored) {
                 payload.addProperty("autoCompactThreshold",
                         com.github.claudecodegui.settings.SupervisorAgentManager.DEFAULT_AUTO_COMPACT_THRESHOLD);
+            }
+            // 2026-05-24: expose rotation-trigger thresholds (supervisor +
+            // main-AI share these). UI renders four inputs; persistence goes
+            // through set_rotation_config.
+            try {
+                com.github.claudecodegui.settings.RotationConfig rc =
+                        settingsService.getSupervisorAgentManager().getRotationConfig();
+                JsonObject rcObj = new JsonObject();
+                rcObj.addProperty("softRatio", rc.softRatio);
+                rcObj.addProperty("hardRatio", rc.hardRatio);
+                rcObj.addProperty("softCompact", rc.softCompact);
+                rcObj.addProperty("hardCompact", rc.hardCompact);
+                payload.add("rotationConfig", rcObj);
+            } catch (Exception ignored) {
+                com.github.claudecodegui.settings.RotationConfig rc =
+                        com.github.claudecodegui.settings.RotationConfig.defaults();
+                JsonObject rcObj = new JsonObject();
+                rcObj.addProperty("softRatio", rc.softRatio);
+                rcObj.addProperty("hardRatio", rc.hardRatio);
+                rcObj.addProperty("softCompact", rc.softCompact);
+                rcObj.addProperty("hardCompact", rc.hardCompact);
+                payload.add("rotationConfig", rcObj);
             }
             pushToWebview("window.updateSupervisorAgents", gson.toJson(payload));
         } catch (Exception e) {
@@ -220,6 +246,49 @@ public class SupervisorAgentHandler extends BaseMessageHandler {
             result.addProperty("success", false);
             result.addProperty("error", e.getMessage());
             pushToWebview("window.onDefaultSupervisorAgentChanged", gson.toJson(result));
+        }
+    }
+
+    /**
+     * Settings page → daemon: update the rotation-trigger thresholds. Persists
+     * to supervisor-agents.json. New values take effect on the next
+     * health-check tick (no restart required — {@code SupervisorMonitor}
+     * re-loads via {@code RotationConfig.loadOrDefault} each tick).
+     */
+    private void handleSetRotationConfig(String content) {
+        try {
+            JsonObject data = gson.fromJson(content, JsonObject.class);
+            if (data == null) throw new IllegalArgumentException("empty payload");
+            double softRatio = data.has("softRatio") && !data.get("softRatio").isJsonNull()
+                    ? data.get("softRatio").getAsDouble()
+                    : com.github.claudecodegui.settings.RotationConfig.DEFAULT_SOFT_RATIO;
+            double hardRatio = data.has("hardRatio") && !data.get("hardRatio").isJsonNull()
+                    ? data.get("hardRatio").getAsDouble()
+                    : com.github.claudecodegui.settings.RotationConfig.DEFAULT_HARD_RATIO;
+            int softCompact = data.has("softCompact") && !data.get("softCompact").isJsonNull()
+                    ? data.get("softCompact").getAsInt()
+                    : com.github.claudecodegui.settings.RotationConfig.DEFAULT_SOFT_COMPACT;
+            int hardCompact = data.has("hardCompact") && !data.get("hardCompact").isJsonNull()
+                    ? data.get("hardCompact").getAsInt()
+                    : com.github.claudecodegui.settings.RotationConfig.DEFAULT_HARD_COMPACT;
+
+            com.github.claudecodegui.settings.RotationConfig next =
+                    new com.github.claudecodegui.settings.RotationConfig(
+                            softRatio, hardRatio, softCompact, hardCompact);
+            String err = next.validate();
+            if (err != null) {
+                sendOperationError("set_rotation_config", err);
+                return;
+            }
+            settingsService.getSupervisorAgentManager().setRotationConfig(next);
+            ApplicationManager.getApplication().invokeLater(() -> {
+                handleGetAgents();
+                pushToWebview("window.supervisorAgentOperationResult",
+                        "{\"success\":true,\"operation\":\"update\"}");
+            });
+        } catch (Exception e) {
+            LOG.warn("[SupervisorAgentHandler] set_rotation_config failed: " + e.getMessage());
+            sendOperationError("set_rotation_config", e.getMessage());
         }
     }
 

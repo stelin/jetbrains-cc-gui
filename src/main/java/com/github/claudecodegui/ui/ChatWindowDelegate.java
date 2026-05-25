@@ -72,6 +72,11 @@ public class ChatWindowDelegate {
 
     public interface DelegateHost {
         Project getProject();
+        /**
+         * Per-tab stable id (UUID) used to scope Supervisor Pairs. Generated
+         * once at {@code ClaudeChatWindow} construction.
+         */
+        String getWindowId();
         ClaudeSDKBridge getClaudeSDKBridge();
         CodexSDKBridge getCodexSDKBridge();
         ClaudeSession getSession();
@@ -106,6 +111,13 @@ public class ChatWindowDelegate {
     private ScheduledFuture<?> statusResetTask;
     private volatile String pendingQuickFixPrompt = null;
     private volatile MessageCallback pendingQuickFixCallback = null;
+    /**
+     * Kept so {@link #handleFrontendReady()} can re-emit {@code onPairResume}
+     * for any active pair after a webview reload. Without this, a watchdog
+     * reload wipes the supervisor pane even though the Java/daemon side is
+     * still live. Set during {@link #initializeHandlers()}.
+     */
+    private PairHandler pairHandler;
 
     public ChatWindowDelegate(DelegateHost host) {
         this.host = host;
@@ -255,7 +267,8 @@ public class ChatWindowDelegate {
             }
         };
 
-        HandlerContext handlerContext = new HandlerContext(project, claudeSDKBridge, codexSDKBridge, settingsService, jsCallback);
+        HandlerContext handlerContext = new HandlerContext(
+                project, host.getWindowId(), claudeSDKBridge, codexSDKBridge, settingsService, jsCallback);
         handlerContext.setSession(host.getSession());
         host.setHandlerContext(handlerContext);
 
@@ -274,7 +287,8 @@ public class ChatWindowDelegate {
         messageDispatcher.registerHandler(new PromptEnhancerHandler(handlerContext));
         messageDispatcher.registerHandler(new AgentHandler(handlerContext));
         messageDispatcher.registerHandler(new SupervisorAgentHandler(handlerContext));
-        messageDispatcher.registerHandler(new PairHandler(handlerContext));
+        this.pairHandler = new PairHandler(handlerContext);
+        messageDispatcher.registerHandler(this.pairHandler);
         messageDispatcher.registerHandler(new PromptHandler(handlerContext));
         messageDispatcher.registerHandler(new TabHandler(handlerContext));
         messageDispatcher.registerHandler(new RewindHandler(handlerContext));
@@ -471,6 +485,14 @@ public class ChatWindowDelegate {
 
         host.getSessionLifecycleManager().sendCurrentPermissionMode();
         replayCurrentSessionStateToFrontend();
+        // 2026-05-24: re-bind supervisor pane to any still-alive pair after a
+        // webview reload (WebviewWatchdog or manual). The Java PairSession +
+        // daemon supervisor are still running; React state was lost so the
+        // pane needs the SelectedSupervisor restored.
+        if (pairHandler != null) {
+            try { pairHandler.replayActivePairs(); }
+            catch (Exception e) { LOG.warn("[ChatWindowDelegate] replayActivePairs failed: " + e.getMessage()); }
+        }
         host.persistTabSessionState();
 
         if (pendingQuickFixPrompt != null && pendingQuickFixCallback != null) {

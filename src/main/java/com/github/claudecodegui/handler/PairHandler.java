@@ -1,5 +1,6 @@
 package com.github.claudecodegui.handler;
 
+import com.github.claudecodegui.bridge.SupervisorMessageBatcher;
 import com.github.claudecodegui.handler.core.BaseMessageHandler;
 import com.github.claudecodegui.handler.core.HandlerContext;
 import com.github.claudecodegui.path.PathMapper;
@@ -7,6 +8,8 @@ import com.github.claudecodegui.path.PathMapperHolder;
 import com.github.claudecodegui.session.pair.ActionRouter;
 import com.github.claudecodegui.session.pair.PairSession;
 import com.github.claudecodegui.session.pair.PairSessionManager;
+import com.github.claudecodegui.session.pair.PairStatusPusher;
+import com.github.claudecodegui.settings.CodemossSettingsService;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
@@ -46,7 +49,17 @@ public class PairHandler extends BaseMessageHandler {
             "pair_set_model",
             "pair_set_reasoning",
             "pair_set_long_context",
-            "pair_set_auto_compact_threshold"
+            "pair_set_auto_compact_threshold",
+            // Protocol v2 (2026-05-24): autonomy-mode IPC
+            "pair_directive_ack",
+            // Phase 5 (2026-05-24): autonomy-mode toggle from webview
+            "pair_set_autonomy_mode",
+            // Phase 6 (2026-05-24): manual resume after budget-triggered pause
+            "pair_resume",
+            // 2026-05-25 (FUNDAMENTAL FIX): manual user-initiated cancel of the
+            // supervisor's current turn. Replaces the wall-clock auto-interrupt
+            // that previously fired on monitor-tick timeout.
+            "pair_supervisor_interrupt"
     };
 
     private final Gson gson;
@@ -88,8 +101,144 @@ public class PairHandler extends BaseMessageHandler {
             case "pair_set_auto_compact_threshold":
                 handleSetAutoCompactThreshold(content);
                 return true;
+            case "pair_directive_ack":
+                handleDirectiveAck(content);
+                return true;
+            case "pair_set_autonomy_mode":
+                handleSetAutonomyMode(content);
+                return true;
+            case "pair_resume":
+                handleResume(content);
+                return true;
+            case "pair_supervisor_interrupt":
+                handleSupervisorInterrupt(content);
+                return true;
             default:
                 return false;
+        }
+    }
+
+    /**
+     * 2026-05-25 (FUNDAMENTAL FIX): user clicked the Stop button in the
+     * supervisor pane. Payload: {@code { pairId }}. Calls the existing
+     * {@code supervisor.interrupt} daemon RPC via SupervisorBridge — which
+     * invokes the SDK's {@code query.interrupt()} so the in-flight
+     * {@code query.next()} settles cleanly without us having had to set a
+     * wall-clock cap. Fire-and-forget: the daemon emits a
+     * {@code [SUPERVISOR_INTERRUPT_RESULT]} line for telemetry, but the
+     * webview already knows it asked for the cancel.
+     */
+    private void handleSupervisorInterrupt(String content) {
+        try {
+            JsonObject data = gson.fromJson(content, JsonObject.class);
+            String pairId = data.has("pairId") && !data.get("pairId").isJsonNull()
+                    ? data.get("pairId").getAsString() : "";
+            PairSession session = resolvePair(pairId);
+            if (session == null) {
+                LOG.info("[PairHandler] pair_supervisor_interrupt ignored — no active pair for id=" + pairId);
+                return;
+            }
+            LOG.info("[PairHandler] pair " + session.getPairId() + " supervisor interrupt requested by user");
+            session.getSupervisorBridge().interrupt(); // fire-and-forget
+        } catch (Exception e) {
+            LOG.warn("[PairHandler] pair_supervisor_interrupt failed: "
+                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getName()));
+        }
+    }
+
+    /**
+     * Phase 6 (2026-05-24): manual resume after the pair was paused (typically
+     * by budget exceeded). Payload: { pairId, extendBudgetSubagents?, extendBudgetTokens?, ... }.
+     * The optional extension hints are not yet enforced server-side — left for
+     * a follow-up if the cumulative counters re-trip the pause immediately.
+     * For now we just flip the paused flag; if the budget is still exceeded
+     * the monitor will pause again on the next tick (which the user can read
+     * as "this won't fit, raise the limits explicitly").
+     */
+    private void handleResume(String content) {
+        try {
+            JsonObject data = gson.fromJson(content, JsonObject.class);
+            String pairId = data.has("pairId") && !data.get("pairId").isJsonNull()
+                    ? data.get("pairId").getAsString() : "";
+            PairSession session = resolvePair(pairId);
+            if (session == null) {
+                LOG.info("[PairHandler] pair_resume ignored — no active pair for id=" + pairId);
+                return;
+            }
+            boolean transitioned = session.resume();
+            // Also clear the F2 directive-failure counter so a stale streak
+            // from before the pause doesn't immediately fire step_blocked.
+            session.resetDirectiveFailures();
+            LOG.info("[PairHandler] pair " + session.getPairId() + " resume transitioned=" + transitioned);
+            try {
+                PairStatusPusher sp = session.getStatusPusher();
+                if (sp != null) sp.pushSoft();
+            } catch (Exception ignored) { /* best-effort */ }
+        } catch (Exception e) {
+            LOG.warn("[PairHandler] pair_resume failed: "
+                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getName()));
+        }
+    }
+
+    /**
+     * Phase 5 (2026-05-24): webview toggled autonomy level for a pair.
+     * Payload: { pairId, mode: "strict" | "mixed" | "full" }.
+     * Invalid modes are coerced to "mixed" by PairSession.setAutonomyMode.
+     */
+    private void handleSetAutonomyMode(String content) {
+        try {
+            JsonObject data = gson.fromJson(content, JsonObject.class);
+            String pairId = data.has("pairId") && !data.get("pairId").isJsonNull()
+                    ? data.get("pairId").getAsString() : "";
+            String mode = data.has("mode") && !data.get("mode").isJsonNull()
+                    ? data.get("mode").getAsString() : "mixed";
+            PairSession session = resolvePair(pairId);
+            if (session == null) {
+                LOG.info("[PairHandler] pair_set_autonomy_mode ignored — no active pair for id=" + pairId);
+                return;
+            }
+            session.setAutonomyMode(mode);
+            LOG.info("[PairHandler] pair " + session.getPairId() + " autonomyMode -> " + session.getAutonomyMode());
+            // Trigger a status push so the webview's AutonomyToggle reflects
+            // the resolved value (in case the input was coerced).
+            try {
+                PairStatusPusher sp = session.getStatusPusher();
+                if (sp != null) sp.pushSoft();
+            } catch (Exception ignored) { /* best-effort */ }
+        } catch (Exception e) {
+            LOG.warn("[PairHandler] pair_set_autonomy_mode failed: "
+                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getName()));
+        }
+    }
+
+    /**
+     * Protocol v2 (2026-05-24): webview ack for a previously-injected directive.
+     * Payload: { pairId, directiveId, status: "received"|"applied"|"failed" }.
+     * Forwarded to ActionRouter.markDirectiveAcked which cancels the
+     * DirectiveTracker timeout.
+     */
+    private void handleDirectiveAck(String content) {
+        try {
+            JsonObject data = gson.fromJson(content, JsonObject.class);
+            String pairId = data.has("pairId") && !data.get("pairId").isJsonNull()
+                    ? data.get("pairId").getAsString() : "";
+            String directiveId = data.has("directiveId") && !data.get("directiveId").isJsonNull()
+                    ? data.get("directiveId").getAsString() : "";
+            String status = data.has("status") && !data.get("status").isJsonNull()
+                    ? data.get("status").getAsString() : "applied";
+            if (directiveId.isEmpty()) {
+                LOG.warn("[PairHandler] pair_directive_ack missing directiveId, ignoring");
+                return;
+            }
+            PairSession session = resolvePair(pairId);
+            if (session == null || session.getActionRouter() == null) {
+                LOG.debug("[PairHandler] pair_directive_ack for unknown/disposed pair " + pairId);
+                return;
+            }
+            session.getActionRouter().markDirectiveAcked(directiveId, status);
+        } catch (Exception e) {
+            LOG.warn("[PairHandler] pair_directive_ack failed: "
+                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getName()));
         }
     }
 
@@ -102,6 +251,38 @@ public class PairHandler extends BaseMessageHandler {
             String planPath = data.has("planPath") && !data.get("planPath").isJsonNull()
                     ? data.get("planPath").getAsString() : null;
 
+            // 2026-05-24: webview may ship the resolved effective model (with
+            // [1m] suffix already applied), the 1M-toggle state, and the
+            // reasoning tier so the daemon SDK is born with the right config.
+            // All three are optional; null means "fall back to the agent's
+            // defaults from supervisor-agents.json" (kept for back-compat with
+            // older webview builds + future direct-API callers).
+            String modelOverride = data.has("model") && !data.get("model").isJsonNull()
+                    ? data.get("model").getAsString() : null;
+            Boolean longContextOverride = (data.has("longContextEnabled")
+                    && !data.get("longContextEnabled").isJsonNull())
+                    ? data.get("longContextEnabled").getAsBoolean() : null;
+            String reasoningOverride = data.has("reasoningEffort") && !data.get("reasoningEffort").isJsonNull()
+                    ? data.get("reasoningEffort").getAsString() : null;
+
+            // Protocol v2 (2026-05-24): optional budget caps. null means "no
+            // limits" — the tracker is still created so other autonomy-mode
+            // surfaces (status panel, completion report) can read counters,
+            // they just never trip the warn / pause thresholds.
+            com.github.claudecodegui.session.pair.protocol.PairBudget budget =
+                    new com.github.claudecodegui.session.pair.protocol.PairBudget();
+            if (data.has("budget") && data.get("budget").isJsonObject()) {
+                JsonObject b = data.getAsJsonObject("budget");
+                if (b.has("maxTokens") && !b.get("maxTokens").isJsonNull())
+                    budget.maxTokens = b.get("maxTokens").getAsLong();
+                if (b.has("maxDurationMs") && !b.get("maxDurationMs").isJsonNull())
+                    budget.maxDurationMs = b.get("maxDurationMs").getAsLong();
+                if (b.has("maxSteps") && !b.get("maxSteps").isJsonNull())
+                    budget.maxSteps = b.get("maxSteps").getAsInt();
+                if (b.has("maxSubagentCalls") && !b.get("maxSubagentCalls").isJsonNull())
+                    budget.maxSubagentCalls = b.get("maxSubagentCalls").getAsInt();
+            }
+
             if (agentId == null) throw new IllegalArgumentException("pair_start requires agentId");
             if (context.getProject() == null) throw new IllegalStateException("no project context");
             if (context.getClaudeSDKBridge() == null) {
@@ -112,12 +293,55 @@ public class PairHandler extends BaseMessageHandler {
 
             PairSessionManager mgr = PairSessionManager.getInstance(context.getProject());
             PairSession session = mgr.startPair(
-                    new PairSessionManager.StartPairParams(sessionId, agentId, planPath),
+                    new PairSessionManager.StartPairParams(
+                            sessionId, agentId, planPath,
+                            modelOverride, longContextOverride, reasoningOverride,
+                            context.getWindowId()),
                     context.getClaudeSDKBridge()
             );
 
+            // 2026-05-24: bind the live ClaudeSession to the pair so the
+            // rotation decider can resolve it on auto-trigger without a
+            // separate session registry. Nullable in headless tests.
+            if (context.getSession() != null) {
+                session.setClaudeSession(context.getSession());
+            }
+
             // Bind webview bridge so ActionRouter can drive UI.
             session.getActionRouter().setWebviewBridge(new WebviewBridgeImpl());
+
+            // Protocol v2 (2026-05-24): wire autonomy-mode trackers. Both are
+            // always created — budget without limits is a no-op cost-wise but
+            // still tracks counters for the UI / completion report. Directive
+            // tracker callback routes timeouts to EventBus.publishDirectiveLost
+            // so the supervisor can choose to retry or skip the step.
+            com.github.claudecodegui.session.pair.DirectiveTracker dt =
+                    new com.github.claudecodegui.session.pair.DirectiveTracker(session.getPairId());
+            final PairSession dtSessionRef = session;
+            dt.setOnTimeout((directiveId, payload) -> {
+                if (dtSessionRef.isDisposed() || dtSessionRef.getEventBus() == null) return;
+                String lastObjective = (payload != null && payload.has("objective")
+                        && !payload.get("objective").isJsonNull())
+                        ? payload.get("objective").getAsString() : null;
+                dtSessionRef.getEventBus().publishDirectiveLost(
+                        directiveId, lastObjective,
+                        com.github.claudecodegui.session.pair.DirectiveTracker.DEFAULT_ACK_TIMEOUT_MS);
+                // Phase 6 (2026-05-24): F2 retry cap. Count consecutive timeouts;
+                // ActionRouter resets the counter when a step advances cleanly
+                // (approve_and_continue). At 3 in a row, hint the supervisor to
+                // skip the current step so we don't burn budget hammering a
+                // stuck main-AI runtime.
+                int fails = dtSessionRef.incrementDirectiveFailure();
+                if (fails >= 3) {
+                    dtSessionRef.getEventBus().publishStepBlocked(fails, lastObjective);
+                    dtSessionRef.resetDirectiveFailures();
+                }
+            });
+            session.setDirectiveTracker(dt);
+
+            com.github.claudecodegui.session.pair.PairBudgetTracker bt =
+                    new com.github.claudecodegui.session.pair.PairBudgetTracker(session.getPairId(), budget);
+            session.setBudgetTracker(bt);
 
             // v4 unified pipeline: forward each raw SDK message streamed by the
             // daemon during a supervisor turn to the webview. The webview maps
@@ -131,7 +355,19 @@ public class PairHandler extends BaseMessageHandler {
             // same percentage formula and model-context-limit table. Without
             // this intercept the indicator stays at the baseline while the
             // supervisor is still thinking.
+            //
+            // 2026-05-24: feed envelopes through a SupervisorMessageBatcher
+            // instead of doing one invokeLater(callJavaScript) per message.
+            // A 30s tick can emit dozens of envelopes (each Read tool_result
+            // up to ~50KB), and on remote mode SSE delivers them in bursts —
+            // unthrottled they saturate the EDT and trigger WebviewWatchdog
+            // reload, which wipes the supervisor pane.
             final PairSession sessionRef = session;
+            SupervisorMessageBatcher batcher = new SupervisorMessageBatcher(
+                    gson,
+                    arrJson -> pushToWebview("window.onSupervisorMessageBatch", arrJson)
+            );
+            session.setMessageBatcher(batcher);
             session.getSupervisorBridge().setMessageHandler(rawMsg -> {
                 JsonObject sdkUsage = extractSdkUsage(rawMsg);
                 if (sdkUsage != null) {
@@ -143,7 +379,7 @@ public class PairHandler extends BaseMessageHandler {
                             context
                     );
                 }
-                pushToWebview("window.onSupervisorMessage", gson.toJson(rawMsg));
+                batcher.enqueue(rawMsg);
             });
 
             JsonObject result = new JsonObject();
@@ -190,12 +426,14 @@ public class PairHandler extends BaseMessageHandler {
             String pairId = data.has("pairId") && !data.get("pairId").isJsonNull()
                     ? data.get("pairId").getAsString() : "";
             PairSessionManager mgr = PairSessionManager.getInstance(context.getProject());
+            String ownerWindowId = context.getWindowId();
 
-            // Webview rarely tracks pairId; fall back to the last started pair
-            // for this project. If multiple pairs are active in future, prefer
-            // explicit pairId.
+            // Webview rarely tracks pairId; fall back to the most-recently-started
+            // pair OWNED BY THIS TAB. Falling back to any project-wide pair would
+            // let one tab silently stop another tab's supervisor (cross-tab
+            // routing bug, 2026-05-24).
             if (pairId.isEmpty()) {
-                PairSession latest = mgr.getActivePairs().stream()
+                PairSession latest = mgr.getActivePairsOwnedBy(ownerWindowId).stream()
                         .reduce((a, b) -> a.getStartedAt() > b.getStartedAt() ? a : b)
                         .orElse(null);
                 if (latest == null) {
@@ -203,6 +441,12 @@ public class PairHandler extends BaseMessageHandler {
                     return;
                 }
                 pairId = latest.getPairId();
+            } else if (mgr.getOwnedBy(pairId, ownerWindowId) == null) {
+                // Explicit pairId from a different tab — refuse rather than stop.
+                LOG.info("[PairHandler] pair_stop ignored: pair " + pairId
+                        + " not owned by window " + ownerWindowId);
+                pushToWebview("window.onPairStopped", "{\"pairId\":\"\"}");
+                return;
             }
             mgr.stopPair(pairId);
 
@@ -337,16 +581,20 @@ public class PairHandler extends BaseMessageHandler {
 
     /**
      * Look up an active pair by id, falling back to the most-recently-started
-     * pair when the webview didn't track the id (mirrors handleStop / handleUserInput).
+     * pair OWNED BY THIS TAB when the webview didn't track the id (mirrors
+     * handleStop / handleUserInput). Filtering by ownerWindowId avoids
+     * cross-tab corruption — a tab without its own pair returns null instead
+     * of silently steering another tab's pair.
      */
     private PairSession resolvePair(String pairId) {
         PairSessionManager mgr = PairSessionManager.getInstance(context.getProject());
+        String ownerWindowId = context.getWindowId();
         if (pairId == null || pairId.isEmpty()) {
-            return mgr.getActivePairs().stream()
+            return mgr.getActivePairsOwnedBy(ownerWindowId).stream()
                     .reduce((a, b) -> a.getStartedAt() > b.getStartedAt() ? a : b)
                     .orElse(null);
         }
-        return mgr.get(pairId);
+        return mgr.getOwnedBy(pairId, ownerWindowId);
     }
 
     private void handleUserInput(String content) {
@@ -370,11 +618,16 @@ public class PairHandler extends BaseMessageHandler {
             text = translateUserInputPaths(text, attachments);
 
             PairSessionManager mgr = PairSessionManager.getInstance(context.getProject());
+            String ownerWindowId = context.getWindowId();
+            // Scope lookup to this tab. Without this, a webview that adopted
+            // another tab's pair via onPairResume would post user input to that
+            // tab's daemon, and the response would route back to that tab's
+            // webview only — current tab silently sees nothing.
             PairSession session = pairId.isEmpty()
-                    ? mgr.getActivePairs().stream()
+                    ? mgr.getActivePairsOwnedBy(ownerWindowId).stream()
                         .reduce((a, b) -> a.getStartedAt() > b.getStartedAt() ? a : b)
                         .orElse(null)
-                    : mgr.get(pairId);
+                    : mgr.getOwnedBy(pairId, ownerWindowId);
             if (session == null) {
                 sendError("pair_send_user_input", "no active pair to receive user input");
                 return;
@@ -456,7 +709,8 @@ public class PairHandler extends BaseMessageHandler {
             String note = data.has("note") && !data.get("note").isJsonNull()
                     ? data.get("note").getAsString() : null;
 
-            PairSession session = PairSessionManager.getInstance(context.getProject()).get(pairId);
+            PairSession session = PairSessionManager.getInstance(context.getProject())
+                    .getOwnedBy(pairId, context.getWindowId());
             if (session == null) {
                 sendError("pair_human_response", "pair not found: " + pairId);
                 return;
@@ -467,6 +721,73 @@ public class PairHandler extends BaseMessageHandler {
         } catch (Exception e) {
             LOG.warn("[PairHandler] pair_human_response failed: " + e.getMessage());
             sendError("pair_human_response", e.getMessage());
+        }
+    }
+
+    /**
+     * Re-emit {@code window.onPairResume} for every still-active pair after
+     * the webview reloads. Called from {@code ChatWindowDelegate.handleFrontendReady}.
+     *
+     * <p>Without this hook the user's only recourse after a {@link
+     * com.github.claudecodegui.ui.WebviewWatchdog} reload is to re-toggle the
+     * supervisor, which stops + restarts the daemon-side session and loses
+     * the in-flight context. The Java {@code PairSession} and daemon
+     * supervisor are still alive; only React state was wiped.
+     *
+     * <p>Payload mirrors {@code SelectedSupervisor} so PairContext can restore
+     * {@code selected} + {@code pairId} in one shot. The
+     * {@code defaultLongContext} / {@code defaultReasoning} fields are
+     * resolved from the supervisor-agents config so the restored entry looks
+     * identical to one freshly picked from the picker.
+     */
+    public void replayActivePairs() {
+        try {
+            Project project = context.getProject();
+            if (project == null) return;
+            PairSessionManager mgr = PairSessionManager.getInstance(project);
+            CodemossSettingsService settings = new CodemossSettingsService();
+
+            // Only replay pairs created by THIS tab. Iterating all project-scoped
+            // pairs would let a new tab's frontend_ready inherit another tab's
+            // pair via onPairResume — but the underlying SupervisorBridge is
+            // bound to the originating tab's ClaudeSDKBridge + webview, so the
+            // inheriting tab could post events but never see responses.
+            for (PairSession session : mgr.getActivePairsOwnedBy(context.getWindowId())) {
+                if (session == null || session.isDisposed()) continue;
+
+                String agentId = session.getAgentId();
+                JsonObject agentConfig = null;
+                try {
+                    agentConfig = settings.getSupervisorAgentManager().getAgent(agentId);
+                } catch (Exception ignored) { /* best-effort */ }
+
+                JsonObject payload = new JsonObject();
+                payload.addProperty("pairId", session.getPairId());
+                payload.addProperty("agentId", agentId);
+                payload.addProperty("name", session.getAgentName());
+                String model = session.getModel();
+                if (model != null && !model.isEmpty()) {
+                    payload.addProperty("model", model);
+                }
+                if (agentConfig != null) {
+                    if (agentConfig.has("defaultLongContext")
+                            && !agentConfig.get("defaultLongContext").isJsonNull()) {
+                        payload.addProperty("defaultLongContext",
+                                agentConfig.get("defaultLongContext").getAsBoolean());
+                    }
+                    if (agentConfig.has("defaultReasoning")
+                            && !agentConfig.get("defaultReasoning").isJsonNull()) {
+                        payload.addProperty("defaultReasoning",
+                                agentConfig.get("defaultReasoning").getAsString());
+                    }
+                }
+                pushToWebview("window.onPairResume", gson.toJson(payload));
+                LOG.info("[PairHandler] replayed pair " + session.getPairId()
+                        + " (agent=" + agentId + ") after frontend reload");
+            }
+        } catch (Exception e) {
+            LOG.warn("[PairHandler] replayActivePairs failed: "
+                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
         }
     }
 
@@ -519,11 +840,35 @@ public class PairHandler extends BaseMessageHandler {
         }
         @Override
         public void onInjectPrompt(String pairId, String supervisorId, String prompt) {
+            // Legacy path — invoked only when directiveId is unknown.
             JsonObject p = new JsonObject();
             p.addProperty("pairId", pairId);
             p.addProperty("supervisorId", supervisorId);
             p.addProperty("prompt", prompt);
             pushToWebview("window.onPairInjectPrompt", gson.toJson(p));
+        }
+        @Override
+        public void onInjectPromptV2(String pairId, String supervisorId,
+                                     String directiveId, String prompt) {
+            // Protocol v2 (2026-05-24): directiveId travels alongside prompt so
+            // webview can later post pair_directive_ack with the same id.
+            JsonObject p = new JsonObject();
+            p.addProperty("pairId", pairId);
+            p.addProperty("supervisorId", supervisorId);
+            p.addProperty("directiveId", directiveId);
+            p.addProperty("prompt", prompt);
+            // 2026-05-24 (Q4 trace): record the bridge call. Paired with the
+            // webview-side `[INJECT_TRACE] webview onPairInjectPrompt` log.
+            LOG.info("[INJECT_TRACE] PairHandler.onInjectPromptV2"
+                    + " pair=" + pairId + " directiveId=" + directiveId
+                    + " promptLen=" + (prompt != null ? prompt.length() : 0));
+            pushToWebview("window.onPairInjectPrompt", gson.toJson(p));
+        }
+        @Override
+        public void onPairAlert(JsonObject payload) {
+            // Protocol v2 (2026-05-24): record_alert webview surface — toast
+            // notification, non-blocking. Webview handler should NOT open a modal.
+            pushToWebview("window.onPairAlert", gson.toJson(payload));
         }
         @Override
         public void onEscalate(JsonObject payload) {
@@ -535,6 +880,13 @@ public class PairHandler extends BaseMessageHandler {
             p.addProperty("supervisorId", supervisorId);
             p.addProperty("thinking", thinking);
             pushToWebview("window.onPairThinking", gson.toJson(p));
+        }
+        @Override
+        public void onPairStatusUpdate(JsonObject snapshot) {
+            // Phase 2 (2026-05-24): the snapshot already contains pairId so the
+            // webview can route by pair when multiple pairs exist (not yet, but
+            // shape is forward-compat).
+            pushToWebview("window.onPairStatusUpdate", gson.toJson(snapshot));
         }
     }
 }

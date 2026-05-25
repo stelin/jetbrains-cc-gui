@@ -490,6 +490,21 @@ interface Window {
   onPairEscalate?: (json: string) => void;
   onPairThinking?: (json: string) => void;
   /**
+   * Protocol v2 (2026-05-24): non-blocking alert from supervisor record_alert.
+   * Payload: { pairId, supervisorId, severity, category, fallback_choice, ... }.
+   * Non-modal — the webview should show a toast / banner and let the user
+   * review the decision in the timeline asynchronously. Replaces the legacy
+   * {@link onPairEscalate} modal for autonomy-mode C1/C2 decisions.
+   */
+  onPairAlert?: (json: string) => void;
+  /**
+   * Phase 2 (2026-05-24): per-pair status panel snapshot. Payload matches
+   * PairStatusSnapshot.toJson — see Java side for field schema. Pushed by
+   * PairStatusPusher; throttled to ~1s and coalesced server-side, so the
+   * handler can render directly without further debouncing.
+   */
+  onPairStatusUpdate?: (json: string) => void;
+  /**
    * v4 unified pipeline: one raw SDK message streamed by the daemon during a
    * supervisor turn. Payload: { pairId, supervisorId, turnId, message: <SDK msg> }.
    * Each call delivers exactly one assistant/user/system/result frame the
@@ -503,6 +518,24 @@ interface Window {
    * for PairContext to consume.
    */
   onSupervisorMessage?: (json: string) => void;
+
+  /**
+   * Batched variant of {@link onSupervisorMessage}. Payload is a JSON array
+   * of the same envelope shape as {@link onSupervisorMessage}. Used by the
+   * Java-side {@code SupervisorMessageBatcher} to coalesce IPC traffic during
+   * a supervisor turn so JCEF's EDT doesn't get saturated and trip the
+   * webview-stall watchdog.
+   */
+  onSupervisorMessageBatch?: (json: string) => void;
+
+  /**
+   * Re-emitted by Java after the webview reloads (e.g. WebviewWatchdog
+   * triggered) so the supervisor pane can rebind to a pair that is still
+   * alive on the Java/daemon side. Payload mirrors the SelectedSupervisor
+   * shape plus pairId, so PairContext can restore selected + pairId in one
+   * shot without going back through the picker.
+   */
+  onPairResume?: (json: string) => void;
 
   /**
    * Update prompts list

@@ -24,7 +24,19 @@ public final class EventFilter {
             "verify_result",
             "review_result",
             "human_response",
-            "user_input"
+            "user_input",
+            // Phase 3 (Protocol v2, 2026-05-24): structured turn report + subagent
+            // visibility + budget tracking + directive ack timeout.
+            "turn_report",
+            "subagent_stop",
+            "budget_warning",
+            "budget_exceeded",
+            "directive_lost",
+            // Phase 6 (2026-05-24): autonomy control layer.
+            // step_blocked: F2 — 3 consecutive directive_lost, supervisor should skip step.
+            // replan_due:   T1 — periodic (every 5 steps) / after_alert nudge.
+            "step_blocked",
+            "replan_due"
     );
 
     private EventFilter() { /* static-only */ }

@@ -33,7 +33,8 @@ class ClaudeRequestParamsBuilder {
             String agentPrompt,
             Boolean streaming,
             Boolean disableThinking,
-            String reasoningEffort
+            String reasoningEffort,
+            String systemPromptAppend
     ) {
         JsonObject params = new JsonObject();
         params.addProperty("message", message);
@@ -62,6 +63,14 @@ class ClaudeRequestParamsBuilder {
         }
         if (reasoningEffort != null && !reasoningEffort.isEmpty()) {
             params.addProperty("reasoningEffort", reasoningEffort);
+        }
+        // Phase 6c (2026-05-24): one-shot append for main-AI rotation handoff.
+        // Staged on SessionState by ClaudeSession.swapInnerSession; consumed
+        // exactly once per send by SessionSendService.sendToClaude. The daemon
+        // concatenates this with the existing IDE/agentPrompt append before
+        // passing both to the SDK's systemPrompt.append.
+        if (systemPromptAppend != null && !systemPromptAppend.isEmpty()) {
+            params.addProperty("systemPromptAppend", systemPromptAppend);
         }
 
         return params;

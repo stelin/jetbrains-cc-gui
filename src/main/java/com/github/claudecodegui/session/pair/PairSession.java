@@ -1,10 +1,14 @@
 package com.github.claudecodegui.session.pair;
 
 import com.github.claudecodegui.bridge.SupervisorBridge;
+import com.github.claudecodegui.bridge.SupervisorMessageBatcher;
+import com.github.claudecodegui.session.pair.protocol.PairBudget;
 
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Aggregate state for one running Supervisor Pair.
@@ -25,6 +29,18 @@ public class PairSession {
     private final SupervisorBridge supervisorBridge;
     private final ProgressManager progressManager;
     private final long startedAt = System.currentTimeMillis();
+
+    /**
+     * Id of the tab that created this Pair. Used by {@link PairSessionManager}
+     * and {@code PairHandler} to scope replay + input dispatch back to the
+     * originating tab — the SupervisorBridge captured the originating tab's
+     * {@code ClaudeSDKBridge} and the {@code SupervisorMessageBatcher} was
+     * wired to push messages to the originating tab's webview, so a
+     * different tab adopting this Pair would post events to the right
+     * daemon but never see the response. Nullable for legacy/test paths
+     * that build a session without window context.
+     */
+    private final String ownerWindowId;
 
     // Snapshot of the parameters that started the daemon-side supervisor runtime.
     // EventBus uses these to lazily re-run supervisor.start after a daemon restart
@@ -51,6 +67,97 @@ public class PairSession {
     private volatile ActionRouter actionRouter;
     private volatile boolean disposed = false;
 
+    // Protocol v2 (2026-05-24): autonomy-mode trackers. directiveTracker is
+    // always non-null (every pair has one — directives are core to v2 flow).
+    // budgetTracker is non-null even with no limits (PairBudget defaults all
+    // fields to null, hasAnyLimit() returns false; calling check() is cheap).
+    // paused is set by Java when budget exceeds 100% or supervisor escalates
+    // a hard C3 — subsequent inject_prompt dispatches are NO-OPed.
+    private volatile DirectiveTracker directiveTracker;
+    private volatile PairBudgetTracker budgetTracker;
+    private final AtomicBoolean paused = new AtomicBoolean(false);
+
+    // Phase 5 (2026-05-24): autonomy mode. Default "mixed" — C1/C2 auto-fallback
+    // with alert toast; C3 真停. "strict" reverts to legacy modal escalate
+    // (escalate_to_human stays modal even when daemon aliases it). "full" makes
+    // even legacy escalate go through the alert path (only C3 truly stops).
+    private volatile String autonomyMode = "mixed";
+
+    // Phase 6 (2026-05-24): F2 — consecutive directive-ack failures since the
+    // last approve_and_continue. When this reaches 3, the supervisor is told
+    // to skip the current step (step_blocked event) and the counter resets.
+    private final AtomicInteger consecutiveDirectiveFailures = new AtomicInteger(0);
+
+    /**
+     * Number of supervisor postEvent round-trips currently in flight on this
+     * pair. Incremented by {@link EventBus} when it enters the daemon round-trip,
+     * decremented in the finally block. Read by
+     * {@code PairSessionManager.hasActiveSupervisorTurn()} so the
+     * {@code WebviewWatchdog} can extend its stall timeout while the supervisor
+     * is hammering IPC — analogous to how the main AI's
+     * {@code StreamMessageCoalescer.isStreamActive()} guards reload during
+     * streaming.
+     */
+    private final AtomicInteger inflightTurnCount = new AtomicInteger(0);
+
+    // Phase 1 (2026-05-23): periodic-monitor infrastructure. Optional — when
+    // the `cc-gui.pair.monitor.enabled` flag is off, these stay null and the
+    // legacy single-thread-dispatcher path inside EventBus is used directly.
+    private volatile PairCoordinator coordinator;
+    private volatile EventCollector eventCollector;
+    private volatile SupervisorMonitor supervisorMonitor;
+
+    // Phase 2 (2026-05-24): status panel publisher. Always constructed
+    // alongside the monitor so it can collect compact-boundary events
+    // even before the user opens the panel.
+    private volatile PairStatusPusher statusPusher;
+
+    // Phase 6a (2026-05-24): per-pair main-AI observability monitor.
+    // Wired by PairSessionManager once mainSessionId is known (usually at
+    // pair start, but may be late-bound after the first SDK response).
+    private volatile MainAIMonitor mainAIMonitor;
+
+    // Phase 6b (2026-05-24): main-AI rotation infrastructure.
+    // - mainAIBridge: thin façade over ClaudeSDKBridge for mainAi.* RPCs.
+    //   PairSessionManager constructs it from the same sdkBridge it uses
+    //   for the supervisor channel.
+    // - claudeSession: bound by PairHandler.handleStart so RotationDecider
+    //   can resolve the live session without a separate registry lookup.
+    //   Nullable in unit tests / pre-handler-wire intervals.
+    private volatile com.github.claudecodegui.provider.claude.MainAIBridge mainAIBridge;
+    private volatile com.github.claudecodegui.session.ClaudeSession claudeSession;
+
+    public PairSession(
+            String pairId,
+            String mainSessionId,
+            String agentId,
+            String agentName,
+            Path pairDir,
+            Path planSnapshotPath,
+            SupervisorBridge supervisorBridge,
+            ProgressManager progressManager,
+            String agentDescription,
+            String planContent,
+            String projectSpec,
+            String model,
+            String ownerWindowId
+    ) {
+        this.pairId = pairId;
+        this.mainSessionId = mainSessionId;
+        this.agentId = agentId;
+        this.agentName = agentName;
+        this.pairDir = pairDir;
+        this.planSnapshotPath = planSnapshotPath;
+        this.supervisorBridge = supervisorBridge;
+        this.progressManager = progressManager;
+        this.agentDescription = agentDescription;
+        this.planContent = planContent;
+        this.projectSpec = projectSpec;
+        this.model = model;
+        this.ownerWindowId = ownerWindowId;
+    }
+
+    /** Back-compat: legacy callers (synthetic tests) that have no window id. */
     public PairSession(
             String pairId,
             String mainSessionId,
@@ -65,18 +172,9 @@ public class PairSession {
             String projectSpec,
             String model
     ) {
-        this.pairId = pairId;
-        this.mainSessionId = mainSessionId;
-        this.agentId = agentId;
-        this.agentName = agentName;
-        this.pairDir = pairDir;
-        this.planSnapshotPath = planSnapshotPath;
-        this.supervisorBridge = supervisorBridge;
-        this.progressManager = progressManager;
-        this.agentDescription = agentDescription;
-        this.planContent = planContent;
-        this.projectSpec = projectSpec;
-        this.model = model;
+        this(pairId, mainSessionId, agentId, agentName, pairDir, planSnapshotPath,
+                supervisorBridge, progressManager, agentDescription, planContent,
+                projectSpec, model, null);
     }
 
     public String getPairId() { return pairId; }
@@ -88,6 +186,8 @@ public class PairSession {
     public SupervisorBridge getSupervisorBridge() { return supervisorBridge; }
     public ProgressManager getProgressManager() { return progressManager; }
     public long getStartedAt() { return startedAt; }
+    /** Window id of the tab that created this Pair; nullable. See field doc. */
+    public String getOwnerWindowId() { return ownerWindowId; }
 
     public EventBus getEventBus() { return eventBus; }
     public void setEventBus(EventBus eventBus) { this.eventBus = eventBus; }
@@ -96,7 +196,123 @@ public class PairSession {
     public void setActionRouter(ActionRouter router) { this.actionRouter = router; }
 
     public boolean isDisposed() { return disposed; }
-    public void markDisposed() { this.disposed = true; }
+    public void markDisposed() {
+        this.disposed = true;
+        // Protocol v2: dispose trackers eagerly so their scheduler threads exit
+        // and pending directive timeouts don't fire after the pair is gone.
+        DirectiveTracker dt = this.directiveTracker;
+        if (dt != null) {
+            try { dt.dispose(); } catch (Exception ignored) { /* best effort */ }
+        }
+    }
+
+    // ---- Protocol v2 (2026-05-24): trackers + pause ----
+
+    public DirectiveTracker getDirectiveTracker() { return directiveTracker; }
+    public void setDirectiveTracker(DirectiveTracker tracker) { this.directiveTracker = tracker; }
+
+    public PairBudgetTracker getBudgetTracker() { return budgetTracker; }
+    public void setBudgetTracker(PairBudgetTracker tracker) { this.budgetTracker = tracker; }
+
+    /** True after pause() — supervisor monitor + event publishers should stop
+     *  dispatching new directives / events. The tracker remains alive for late
+     *  ack arrivals to be cancelled cleanly. */
+    public boolean isPaused() { return paused.get(); }
+
+    /** Idempotent pause. Returns true the first time it transitions; false if
+     *  already paused. */
+    public boolean pause() {
+        return paused.compareAndSet(false, true);
+    }
+
+    /** Phase 6 (2026-05-24): idempotent resume. Returns true the first time it
+     *  transitions paused→running; false if already running. Caller is
+     *  responsible for taking any compensating action (e.g. extending the
+     *  budget) so the monitor does not immediately re-pause. */
+    public boolean resume() {
+        return paused.compareAndSet(true, false);
+    }
+
+    // Phase 6 (2026-05-24): F2 — consecutive inject_prompt failure counter.
+    // Incremented on directive_lost timeout; reset on approve_and_continue
+    // (step advanced) or pair_resume. When 3 are observed in a row,
+    // PairHandler emits step_blocked so the supervisor can skip the step.
+    public int incrementDirectiveFailure() { return consecutiveDirectiveFailures.incrementAndGet(); }
+    public void resetDirectiveFailures() { consecutiveDirectiveFailures.set(0); }
+    public int getDirectiveFailures() { return consecutiveDirectiveFailures.get(); }
+
+    public String getAutonomyMode() { return autonomyMode; }
+    /** Set autonomy mode. Valid: "strict" | "mixed" | "full". Invalid values
+     *  are coerced to "mixed" (safest default). Idempotent. */
+    public void setAutonomyMode(String mode) {
+        if ("strict".equals(mode) || "mixed".equals(mode) || "full".equals(mode)) {
+            this.autonomyMode = mode;
+        } else {
+            this.autonomyMode = "mixed";
+        }
+    }
+
+    /** Tracks supervisor round-trips so watchdog can grace IPC bursts. */
+    public int enterTurn() { return inflightTurnCount.incrementAndGet(); }
+    public int exitTurn() { return Math.max(0, inflightTurnCount.decrementAndGet()); }
+    public boolean hasInflightTurn() { return inflightTurnCount.get() > 0; }
+
+    /**
+     * Per-pair IPC batcher that coalesces {@code [SUPERVISOR_MSG]} envelopes
+     * before pushing them to the webview. Owned by {@code PairHandler}
+     * (created in {@code handleStart}); {@code PairSessionManager.stopPair}
+     * shuts it down so the scheduler thread doesn't leak after dispose.
+     */
+    private volatile SupervisorMessageBatcher messageBatcher;
+    public SupervisorMessageBatcher getMessageBatcher() { return messageBatcher; }
+    public void setMessageBatcher(SupervisorMessageBatcher batcher) { this.messageBatcher = batcher; }
+
+    // ---- Phase 1: monitor infrastructure accessors ----
+
+    public PairCoordinator getCoordinator() { return coordinator; }
+    public void setCoordinator(PairCoordinator coordinator) { this.coordinator = coordinator; }
+
+    public EventCollector getEventCollector() { return eventCollector; }
+    public void setEventCollector(EventCollector eventCollector) { this.eventCollector = eventCollector; }
+
+    public SupervisorMonitor getSupervisorMonitor() { return supervisorMonitor; }
+    public void setSupervisorMonitor(SupervisorMonitor monitor) { this.supervisorMonitor = monitor; }
+
+    public PairStatusPusher getStatusPusher() { return statusPusher; }
+    public void setStatusPusher(PairStatusPusher pusher) { this.statusPusher = pusher; }
+
+    public MainAIMonitor getMainAIMonitor() { return mainAIMonitor; }
+    public void setMainAIMonitor(MainAIMonitor monitor) { this.mainAIMonitor = monitor; }
+
+    public com.github.claudecodegui.provider.claude.MainAIBridge getMainAIBridge() { return mainAIBridge; }
+    public void setMainAIBridge(com.github.claudecodegui.provider.claude.MainAIBridge bridge) { this.mainAIBridge = bridge; }
+
+    public com.github.claudecodegui.session.ClaudeSession getClaudeSession() { return claudeSession; }
+    public void setClaudeSession(com.github.claudecodegui.session.ClaudeSession session) {
+        this.claudeSession = session;
+    }
+
+    /**
+     * Phase 4 (2026-05-24): atomic swap of the daemon-side supervisor session
+     * key. Called by {@code RotationCoordinator} after a successful new-start
+     * + old-stop. The pair's stable identity ({@link #pairId} / {@link #agentId})
+     * never changes; only the per-generation runtime key on the daemon does.
+     */
+    public void swapSupervisorId(String newSupervisorId) {
+        if (newSupervisorId == null || newSupervisorId.isEmpty()) {
+            throw new IllegalArgumentException("newSupervisorId required");
+        }
+        supervisorBridge.setSupervisorId(newSupervisorId);
+    }
+
+    /**
+     * True when the periodic-monitor path is wired and active. EventBus.publish
+     * routes through {@link EventCollector} in this mode; otherwise the legacy
+     * single-thread dispatcher is used.
+     */
+    public boolean isMonitorEnabled() {
+        return supervisorMonitor != null && eventCollector != null && coordinator != null;
+    }
 
     public String getAgentDescription() { return agentDescription; }
     public String getPlanContent() { return planContent; }

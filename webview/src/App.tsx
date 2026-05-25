@@ -66,18 +66,32 @@ const DEFAULT_STATUS = 'ready';
  *   - openManager → open Settings → Supervisor tab
  *   - injectPromptHandler → execute a fake-user message as if the user typed it
  *
+ * Protocol v2 (2026-05-24):
+ *   - inject prompt goes through {@code handleSubmit} (queue-aware) instead of
+ *     {@code executeMessage} (immediate) so a busy main AI doesn't get two
+ *     concurrent sends interleaved in the daemon. The second send just queues.
+ *   - directiveId from supervisor is acked back via {@code pair_directive_ack}
+ *     IPC: "received" right after handleSubmit returns, "applied" when the
+ *     main AI's loading state turns false (handled by an outer effect — see
+ *     directiveLoadingWatcher).
+ *
  * Must be mounted inside <PairProvider> so it can read the context via hook.
  */
 const PairAppBridge = ({
   setSettingsInitialTab,
   setCurrentView,
-  executeMessage,
+  handleSubmit,
+  loading,
 }: {
   setSettingsInitialTab: (t: SettingsTab) => void;
   setCurrentView: (v: ViewMode) => void;
-  executeMessage: (content: string, attachments?: Attachment[]) => void;
+  handleSubmit: (content: string, attachments?: Attachment[]) => void;
+  loading: boolean;
 }) => {
   const { registerOpenManager, registerInjectPromptHandler } = usePairContext();
+  // pendingDirective: directiveId whose "applied" ack is owed once loading→false.
+  const pendingDirectiveRef = useRef<{ pairId: string; directiveId: string } | null>(null);
+
   useEffect(() => {
     registerOpenManager(() => {
       setSettingsInitialTab('supervisor');
@@ -86,14 +100,61 @@ const PairAppBridge = ({
   }, [registerOpenManager, setSettingsInitialTab, setCurrentView]);
 
   useEffect(() => {
-    registerInjectPromptHandler((_pairId, _supervisorId, prompt) => {
-      // Mirror the chat input flow: enqueue the prompt as if the user typed it.
-      // Empty attachments — Supervisor never sends attachments.
-      if (prompt && prompt.trim().length > 0) {
-        executeMessage(prompt, []);
+    registerInjectPromptHandler((pairId, _supervisorId, prompt, directiveId) => {
+      if (!prompt || prompt.trim().length === 0) {
+        console.warn('[INJECT_TRACE] App.injectHandler skipped — empty prompt',
+          { pairId, directiveId });
+        return;
       }
+
+      // 2026-05-24 (Q4 trace): observe entry + decision-relevant state. The
+      // next branch (queue vs immediate execute) is decided inside handleSubmit
+      // by reading `loading`, so we log that snapshot here too.
+      const preview = prompt.length > 80 ? prompt.slice(0, 80).replace(/\n/g, ' ') + '…'
+                                         : prompt.replace(/\n/g, ' ');
+      console.info('[INJECT_TRACE] App.injectHandler',
+        { pairId, directiveId, loading, promptLen: prompt.length, preview });
+
+      // Ack 1/2: directive received. Java's DirectiveTracker cancels the
+      // 5min timeout immediately — even if the prompt then queues for a busy
+      // main AI, we no longer trigger directive_lost.
+      if (directiveId) {
+        sendBridgeEvent('pair_directive_ack', JSON.stringify({
+          pairId, directiveId, status: 'received',
+        }));
+        pendingDirectiveRef.current = { pairId, directiveId };
+      }
+
+      // Queue-aware send: handleSubmit checks `loading` and routes to the
+      // useMessageQueue dequeue path if main AI is busy. This replaces the
+      // legacy `executeMessage(prompt, [])` call which could trigger two
+      // concurrent executeTurn() runs against the same daemon runtime.
+      handleSubmit(prompt, []);
     });
-  }, [registerInjectPromptHandler, executeMessage]);
+  }, [registerInjectPromptHandler, handleSubmit, loading]);
+
+  // Ack 2/2: when loading flips from true → false AND we have a pending
+  // directive, the main AI finished the turn that consumed it. Send "applied"
+  // so the supervisor can mark the step done. We use a transition check so
+  // unrelated loading=false snapshots (no inject_prompt in flight) are ignored.
+  const prevLoadingRef = useRef<boolean>(loading);
+  useEffect(() => {
+    const prev = prevLoadingRef.current;
+    prevLoadingRef.current = loading;
+    if (prev && !loading) {
+      const pending = pendingDirectiveRef.current;
+      if (pending) {
+        // 2026-05-24 (Q4 trace): final ack — main AI consumed the prompt and
+        // produced a turn. Paired with Java's `DirectiveTracker.ack` log.
+        console.info('[INJECT_TRACE] App.applied (loading: true→false)',
+          { pairId: pending.pairId, directiveId: pending.directiveId });
+        sendBridgeEvent('pair_directive_ack', JSON.stringify({
+          pairId: pending.pairId, directiveId: pending.directiveId, status: 'applied',
+        }));
+        pendingDirectiveRef.current = null;
+      }
+    }
+  }, [loading]);
 
   return null;
 };
@@ -394,9 +455,16 @@ const App = () => {
     }
     // If loading, add to queue
     if (loading) {
+      // 2026-05-24 (Q4 trace): handleSubmit routes to queue branch. The eventual
+      // dequeue is in `useMessageQueue` — paired log there.
+      console.info('[INJECT_TRACE] App.handleSubmit → queue (loading=true)',
+        { contentPreview: text.slice(0, 80), contentLen: text.length });
       enqueueMessage(content, attachments);
       return;
     }
+    // 2026-05-24 (Q4 trace): handleSubmit executes immediately.
+    console.info('[INJECT_TRACE] App.handleSubmit → execute',
+      { contentPreview: text.slice(0, 80), contentLen: text.length });
     // Snapshot the current reasoning effort so the WaitingIndicator reflects the
     // effort actually in use for this turn (won't drift if user changes selector mid-turn).
     setTurnEffort(reasoningEffort);
@@ -562,7 +630,8 @@ const App = () => {
       <PairAppBridge
         setSettingsInitialTab={setSettingsInitialTab}
         setCurrentView={setCurrentView}
-        executeMessage={executeMessage}
+        handleSubmit={handleSubmit}
+        loading={loading}
       />
       <ToastContainer messages={toasts} onDismiss={dismissToast} />
       <ChatHeader

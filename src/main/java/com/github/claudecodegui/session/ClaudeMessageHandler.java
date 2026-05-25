@@ -160,6 +160,14 @@ public class ClaudeMessageHandler implements MessageCallback {
                 // Forward Node.js logs to frontend console
                 callbackHandler.notifyNodeLog(content);
                 break;
+            // Protocol v2 (2026-05-24): main-AI Pair-mode events from
+            // daemon's mcp__main MCP server + SubagentStop hook.
+            case "turn_report":
+                handleTurnReport(content);
+                break;
+            case "subagent_stop":
+                handleSubagentStop(content);
+                break;
         }
     }
 
@@ -206,6 +214,9 @@ public class ClaudeMessageHandler implements MessageCallback {
 
         // Notify attached Supervisor Pair (if any).
         publishErrorIfPair(error);
+        // Phase 6a: main-AI observability — accumulates errorCount, surfaces alert
+        // at threshold. Does NOT short-circuit the existing error UI.
+        notifyMainAIMonitorError(error);
     }
 
     /**
@@ -227,6 +238,8 @@ public class ClaudeMessageHandler implements MessageCallback {
             callbackHandler.notifyStateChange(state.isBusy(), state.isLoading(), state.getError());
             // Notify attached Supervisor Pair (turn really ended; reset retry counter).
             turnRetryCount.set(0);
+            // Phase 6a: main-AI monitor — same hook as handleStreamEnd, idempotent.
+            notifyMainAIMonitorTurnEnd();
             publishTurnEndIfPair();
             return;
         }
@@ -266,6 +279,8 @@ public class ClaudeMessageHandler implements MessageCallback {
 
         // Notify attached Supervisor Pair (turn really ended; reset retry counter).
         turnRetryCount.set(0);
+        // Phase 6a: main-AI monitor — same hook as handleStreamEnd, idempotent.
+        notifyMainAIMonitorTurnEnd();
         publishTurnEndIfPair();
     }
 
@@ -505,6 +520,29 @@ public class ClaudeMessageHandler implements MessageCallback {
         state.setSessionId(content);
         callbackHandler.notifySessionIdReceived(content);
         LOG.info("Captured session ID: " + content);
+        // Phase 6b (2026-05-24): a pair started before the first turn was
+        // wired with mainSessionId=null; now that the SDK has assigned one,
+        // late-bind it on the manager so MainAIMonitor's L2 records carry
+        // the right sid and findByMainSession works for subsequent lookups.
+        // Best-effort — never break the main turn flow.
+        lateBindSessionIdToPair(content);
+    }
+
+    /**
+     * Phase 6b helper. Finds the attached pair (via the fallback "most recent
+     * active" path, since findByMainSession would still miss — the index isn't
+     * populated yet) and asks PairSessionManager to wire the sid.
+     */
+    private void lateBindSessionIdToPair(String newSessionId) {
+        if (project == null || newSessionId == null || newSessionId.isEmpty()) return;
+        try {
+            PairSession pair = findAttachedPair();
+            if (pair == null) return;
+            String boundSid = pair.getMainSessionId();
+            if (newSessionId.equals(boundSid)) return; // already bound (started with sid)
+            PairSessionManager.getInstance(project)
+                    .bindMainSessionIdToPair(pair.getPairId(), newSessionId);
+        } catch (Throwable ignored) { /* never propagate */ }
     }
 
     /**
@@ -551,6 +589,12 @@ public class ClaudeMessageHandler implements MessageCallback {
                 LOG.debug("User message from SDK has no text content, skipping uuid patch");
                 return;
             }
+
+            // 2026-05-24: Phase 6b — push the verbatim user text into the main-AI
+            // monitor's bounded ring on L2 so an eventual fallback handoff doc
+            // has the last few user messages available even when the producer
+            // prompt fails to emit them.
+            notifyMainAIMonitorUserMessage(userText);
 
             // Find the latest unresolved matching user message and patch its uuid.
             List<Message> messages = state.getMessagesReference();
@@ -785,6 +829,15 @@ public class ClaudeMessageHandler implements MessageCallback {
                 LOG.debug("Extracted " + commands.size() + " slash commands from system message");
                 callbackHandler.notifySlashCommandsReceived(commands);
             }
+            // Phase 6b (2026-05-24): detect main-AI SDK auto-compactions so the
+            // per-pair MainAIMonitor's compactCount in L2 stays in sync. The
+            // daemon also tag-prints a [COMPACT_BOUNDARY] line for telemetry,
+            // but that goes to the command callback (not the message stream).
+            // The system message is the authoritative signal on the SDK-stream side.
+            if (systemObj.has("subtype") && !systemObj.get("subtype").isJsonNull()
+                    && "compact_boundary".equals(systemObj.get("subtype").getAsString())) {
+                notifyMainAIMonitorCompactBoundary();
+            }
         } catch (Exception e) {
             LOG.warn("Failed to extract slash commands from system message: " + e.getMessage());
         }
@@ -805,11 +858,16 @@ public class ClaudeMessageHandler implements MessageCallback {
         thinkingSegmentActive = false;
         syncedContentOffset = 0;
         syncedThinkingOffset = 0;
+        // Protocol v2 (2026-05-24): reset the per-turn token delta baseline so
+        // mid-turn cumulative [USAGE] tags translate to correct deltas next turn.
+        lastReportedUsedTokens = 0;
         // Supervisor Pair: stream_start is the earliest authoritative "new turn"
         // marker, even when the main AI produces no tool_use this round.
         // Re-arming here makes sure stream_end can publish even for tool-less turns.
         turnEndPublished = false;
         if (turnStartedAt == 0) turnStartedAt = System.currentTimeMillis();
+        // Phase 6a (2026-05-24): main-AI observability monitor hook.
+        notifyMainAIMonitorTurnStart();
         callbackHandler.notifyStreamStart();
     }
 
@@ -851,6 +909,10 @@ public class ClaudeMessageHandler implements MessageCallback {
         // boundary in streaming mode — earlier than (or instead of) onComplete.
         // publishTurnEndIfPair is idempotent so a subsequent onComplete is safe.
         turnRetryCount.set(0);
+        // Phase 6a (2026-05-24): main-AI observability monitor hook — fire BEFORE
+        // publishTurnEndIfPair so the monitor's L2 update lands ahead of the
+        // supervisor's event-bus dispatch (independent paths, but log order matters).
+        notifyMainAIMonitorTurnEnd();
         publishTurnEndIfPair();
     }
 
@@ -1053,10 +1115,35 @@ public class ClaudeMessageHandler implements MessageCallback {
             // Ensure assistant message exists before backfilling usage
             ensureCurrentAssistantMessageExists();
             backfillUsageToAssistantMessage(usageJson);
+            // Protocol v2 (2026-05-24): feed the (delta of) used tokens to the
+            // attached pair's budget tracker. usedTokens here is the cumulative
+            // count for the current turn — we compute the delta from the last
+            // reported value to avoid double-counting across mid-stream updates.
+            notifyBudgetTrackerTokens(usedTokens);
             LOG.debug("Updated token usage from [USAGE] tag: " + usedTokens);
         } catch (Exception e) {
             LOG.warn("Failed to parse usage data: " + e.getMessage());
         }
+    }
+
+    /**
+     * Protocol v2 (2026-05-24): push the token-usage delta to the attached
+     * pair's budget tracker. {@code usedTokens} is a cumulative value emitted
+     * mid-stream and at turn end; we subtract the last seen value to avoid
+     * double-counting. Resets to 0 on a new turn (stream_start clears
+     * {@link #lastReportedUsedTokens}).
+     */
+    private volatile int lastReportedUsedTokens = 0;
+    private void notifyBudgetTrackerTokens(int usedTokens) {
+        try {
+            PairSession pair = findAttachedPair();
+            if (pair == null) return;
+            com.github.claudecodegui.session.pair.PairBudgetTracker bt = pair.getBudgetTracker();
+            if (bt == null) return;
+            int delta = usedTokens - lastReportedUsedTokens;
+            if (delta > 0) bt.addTokens(delta);
+            lastReportedUsedTokens = usedTokens;
+        } catch (Throwable ignored) { /* never break the main flow */ }
     }
 
     /**
@@ -1171,6 +1258,57 @@ public class ClaudeMessageHandler implements MessageCallback {
     }
 
     /**
+     * Phase 6a (2026-05-24): hook the main-AI observability monitor on every
+     * authoritative turn boundary. The monitor lives on the attached pair
+     * (per design — main-AI monitoring is currently pair-scoped). Best-effort
+     * — never break the main turn flow, even if the monitor throws.
+     */
+    private void notifyMainAIMonitorTurnStart() {
+        try {
+            com.github.claudecodegui.session.pair.PairSession pair = findAttachedPair();
+            if (pair == null) return;
+            com.github.claudecodegui.session.pair.MainAIMonitor m = pair.getMainAIMonitor();
+            if (m != null) m.onTurnStart();
+        } catch (Throwable ignored) { /* never propagate */ }
+    }
+
+    private void notifyMainAIMonitorTurnEnd() {
+        try {
+            com.github.claudecodegui.session.pair.PairSession pair = findAttachedPair();
+            if (pair == null) return;
+            com.github.claudecodegui.session.pair.MainAIMonitor m = pair.getMainAIMonitor();
+            if (m != null) m.onTurnEnd();
+        } catch (Throwable ignored) { /* never propagate */ }
+    }
+
+    private void notifyMainAIMonitorError(String error) {
+        try {
+            com.github.claudecodegui.session.pair.PairSession pair = findAttachedPair();
+            if (pair == null) return;
+            com.github.claudecodegui.session.pair.MainAIMonitor m = pair.getMainAIMonitor();
+            if (m != null) m.onError(error);
+        } catch (Throwable ignored) { /* never propagate */ }
+    }
+
+    private void notifyMainAIMonitorCompactBoundary() {
+        try {
+            com.github.claudecodegui.session.pair.PairSession pair = findAttachedPair();
+            if (pair == null) return;
+            com.github.claudecodegui.session.pair.MainAIMonitor m = pair.getMainAIMonitor();
+            if (m != null) m.onCompactBoundary();
+        } catch (Throwable ignored) { /* never propagate */ }
+    }
+
+    private void notifyMainAIMonitorUserMessage(String text) {
+        try {
+            com.github.claudecodegui.session.pair.PairSession pair = findAttachedPair();
+            if (pair == null) return;
+            com.github.claudecodegui.session.pair.MainAIMonitor m = pair.getMainAIMonitor();
+            if (m != null) m.captureUserMessage(text);
+        } catch (Throwable ignored) { /* never propagate */ }
+    }
+
+    /**
      * Append a tool_use record to the in-flight turn buffer. Called from
      * {@link #handleAssistantMessage(String)} whenever a tool_use block is seen.
      */
@@ -1204,9 +1342,79 @@ public class ClaudeMessageHandler implements MessageCallback {
     }
 
     /**
+     * Protocol v2 (2026-05-24): handle a TURN_REPORT NDJSON line emitted by
+     * the daemon's mcp__main MCP server. Extracts the inner payload and
+     * forwards to the attached Pair's EventBus via {@code publishTurnReport}.
+     *
+     * <p>This is the structured replacement for the legacy turn_end path —
+     * carries deliverables / verifications / selfAssessment that supervisor
+     * uses for confidence-based review triage.
+     */
+    private void handleTurnReport(String content) {
+        if (content == null || !content.startsWith("{")) return;
+        try {
+            JsonObject envelope = gson.fromJson(content, JsonObject.class);
+            if (envelope == null || !envelope.has("payload")
+                    || !envelope.get("payload").isJsonObject()) {
+                LOG.warn("[Supervisor] turn_report missing payload, dropping");
+                return;
+            }
+            PairSession pair = findAttachedPair();
+            if (pair == null || pair.getEventBus() == null) return;
+            JsonObject reportPayload = envelope.getAsJsonObject("payload");
+            // Carry directiveId on the payload so supervisor can correlate.
+            if (envelope.has("directiveId") && !envelope.get("directiveId").isJsonNull()) {
+                reportPayload.add("directiveId", envelope.get("directiveId"));
+            }
+            // turnId for downstream cross-reference (UI cards / decision logs)
+            if (envelope.has("turnId") && !envelope.get("turnId").isJsonNull()) {
+                reportPayload.add("turnId", envelope.get("turnId"));
+            }
+            pair.getEventBus().publishTurnReport(reportPayload);
+            // Mark turnEndPublished so the legacy publishTurnEndIfPair path doesn't
+            // double-publish for the same turn (the report is the authoritative signal).
+            turnEndPublished = true;
+        } catch (Exception e) {
+            LOG.warn("[Supervisor] handleTurnReport parse failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Protocol v2 (2026-05-24): handle a SUBAGENT_STOP NDJSON line emitted by
+     * the daemon's SDK SubagentStop hook (registered only on Pair-mode runtimes).
+     * Forwards the inner payload to the supervisor so it can observe what the
+     * main AI's Task subagent did — without breaking subagent context isolation.
+     */
+    private void handleSubagentStop(String content) {
+        if (content == null || !content.startsWith("{")) return;
+        try {
+            JsonObject envelope = gson.fromJson(content, JsonObject.class);
+            if (envelope == null || !envelope.has("payload")
+                    || !envelope.get("payload").isJsonObject()) {
+                LOG.warn("[Supervisor] subagent_stop missing payload, dropping");
+                return;
+            }
+            PairSession pair = findAttachedPair();
+            if (pair == null || pair.getEventBus() == null) return;
+            // Protocol v2 (2026-05-24): bump budget counter so cost tracking
+            // reflects subagent calls (each is a separate model call → tokens).
+            com.github.claudecodegui.session.pair.PairBudgetTracker bt = pair.getBudgetTracker();
+            if (bt != null) bt.incrementSubagentCalls();
+            pair.getEventBus().publishSubagentStop(envelope.getAsJsonObject("payload"));
+        } catch (Exception e) {
+            LOG.warn("[Supervisor] handleSubagentStop parse failed: " + e.getMessage());
+        }
+    }
+
+    /**
      * Forward this turn's accumulated activity to the Supervisor EventBus
      * (if a Pair is attached). Idempotent within one turn: stream_end and a
      * subsequent onComplete will only emit once.
+     *
+     * <p>Protocol v2 fallback path: if the main AI called {@code report_turn_completion},
+     * {@link #handleTurnReport(String)} has already set {@code turnEndPublished}
+     * and this method becomes a no-op. Only fires for legacy turns that didn't
+     * report (e.g. main AI prompt missing or model ignored the instruction).
      */
     private void publishTurnEndIfPair() {
         if (turnEndPublished) {
@@ -1222,6 +1430,20 @@ public class ClaudeMessageHandler implements MessageCallback {
         long startedAt = turnStartedAt == 0 ? now : turnStartedAt;
         long durationMs = now - startedAt;
         List<String> modifiedFiles = new ArrayList<>(turnModifiedFiles);
+
+        // Phase 0 (2026-05-24): include the main AI's natural-language reply so
+        // the supervisor sees manifest YAML / summaries / etc that previously
+        // were invisible behind toolUses+modifiedFiles alone. Capped to 8000
+        // chars matching the Phase 2 spill-to-file threshold; full text spill
+        // arrives via the report_turn_completion MCP tool in Phase 2.
+        String assistantText = assistantContent.toString();
+        final int MAX_ASSISTANT_TEXT_CHARS = 8000;
+        if (assistantText.length() > MAX_ASSISTANT_TEXT_CHARS) {
+            int truncated = assistantText.length() - MAX_ASSISTANT_TEXT_CHARS;
+            assistantText = assistantText.substring(0, MAX_ASSISTANT_TEXT_CHARS)
+                    + "\n…(truncated " + truncated + " chars)";
+        }
+
         try {
             // No plan-aware in/off split here — that's the Supervisor's job using plan.md.
             pair.getEventBus().publishTurnEnd(
@@ -1230,7 +1452,8 @@ public class ClaudeMessageHandler implements MessageCallback {
                     new ArrayList<>(turnToolUses),
                     modifiedFiles,
                     /*modifiedOffPlan*/ null,
-                    durationMs
+                    durationMs,
+                    assistantText
             );
             turnEndPublished = true;
         } catch (Exception e) {

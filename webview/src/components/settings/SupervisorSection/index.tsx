@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type {
+  RotationConfig,
   SupervisorAgent,
   SupervisorAgentListPayload,
   SupervisorAgentOperationResult,
@@ -22,6 +23,16 @@ interface SupervisorSectionProps {
 
 const NEW_DRAFT_ID = '__new__';
 
+// 2026-05-24: rotation-trigger thresholds. Supervisor + main AI share
+// these defaults; the Java side reloads on every health-check tick so
+// updates take effect without restarting any pair.
+const DEFAULT_ROTATION_CONFIG: RotationConfig = {
+  softRatio: 0.85,
+  hardRatio: 0.95,
+  softCompact: 3,
+  hardCompact: 5,
+};
+
 export default function SupervisorSection({ onSuccess, onError }: SupervisorSectionProps) {
   const { t } = useTranslation();
 
@@ -33,6 +44,7 @@ export default function SupervisorSection({ onSuccess, onError }: SupervisorSect
   // CLAUDE_AUTOCOMPACT_PCT_OVERRIDE env on the daemon — applies to both the
   // supervisor and the main AI sharing the same daemon process.
   const [autoCompactThreshold, setAutoCompactThreshold] = useState(70);
+  const [rotationConfig, setRotationConfig] = useState<RotationConfig>(DEFAULT_ROTATION_CONFIG);
 
   const onSuccessRef = useRef(onSuccess);
   const onErrorRef = useRef(onError);
@@ -53,6 +65,14 @@ export default function SupervisorSection({ onSuccess, onError }: SupervisorSect
         setDefaultId(payload.defaultAgentId ?? null);
         if (typeof payload.autoCompactThreshold === 'number') {
           setAutoCompactThreshold(payload.autoCompactThreshold);
+        }
+        if (payload.rotationConfig) {
+          setRotationConfig({
+            softRatio: payload.rotationConfig.softRatio ?? DEFAULT_ROTATION_CONFIG.softRatio,
+            hardRatio: payload.rotationConfig.hardRatio ?? DEFAULT_ROTATION_CONFIG.hardRatio,
+            softCompact: payload.rotationConfig.softCompact ?? DEFAULT_ROTATION_CONFIG.softCompact,
+            hardCompact: payload.rotationConfig.hardCompact ?? DEFAULT_ROTATION_CONFIG.hardCompact,
+          });
         }
         setLoaded(true);
       } catch (e) {
@@ -160,6 +180,32 @@ export default function SupervisorSection({ onSuccess, onError }: SupervisorSect
     }, 300);
   }, []);
 
+  // 2026-05-24: debounced rotation-config persistence. Local UI state
+  // updates instantly; the backend write fires after 300ms of inactivity.
+  // We send the whole object every time because Java's validate() runs
+  // cross-field checks (soft < hard ordering).
+  const persistRotationTimer = useRef<number | null>(null);
+  const queueRotationConfigSave = useCallback((next: RotationConfig) => {
+    if (persistRotationTimer.current) {
+      window.clearTimeout(persistRotationTimer.current);
+    }
+    persistRotationTimer.current = window.setTimeout(() => {
+      sendToJava(`set_rotation_config:${JSON.stringify(next)}`);
+      persistRotationTimer.current = null;
+    }, 300);
+  }, []);
+
+  const handleRotationField = useCallback(
+    (field: keyof RotationConfig, value: number) => {
+      setRotationConfig((prev) => {
+        const next = { ...prev, [field]: value };
+        queueRotationConfigSave(next);
+        return next;
+      });
+    },
+    [queueRotationConfigSave]
+  );
+
   return (
     <div className={styles.container}>
       <div className={styles.header}>
@@ -196,6 +242,72 @@ export default function SupervisorSection({ onSuccess, onError }: SupervisorSect
             className={styles.globalSettingsRange}
           />
           <span className={styles.globalSettingsValue}>{autoCompactThreshold}%</span>
+        </div>
+      </div>
+
+      <div className={styles.globalSettings}>
+        <div className={styles.globalSettingsLabel}>
+          <div className={styles.globalSettingsTitle}>
+            {t('settings.supervisor.rotation.title', '自动 Rotation 触发阈值')}
+          </div>
+          <div className={styles.globalSettingsHint}>
+            {t('settings.supervisor.rotation.hint',
+               '上下文用量比例或压缩次数达到阈值时，监督者会话与主 AI 会话都会自动 rotate（创建新会话 + 通过 handoff 文档承接上下文）。soft 仅记录 WARN 告警，hard 记录 ERROR；冷却时间统一 5 分钟。')}
+          </div>
+        </div>
+        <div className={styles.globalSettingsControl} style={{ flexDirection: 'column', alignItems: 'stretch', gap: 8 }}>
+          <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+            <label style={{ minWidth: 110 }}>
+              {t('settings.supervisor.rotation.softRatio', 'Soft ratio')}
+            </label>
+            <input
+              type="number"
+              min={0.3}
+              max={1}
+              step={0.05}
+              value={rotationConfig.softRatio}
+              onChange={(e) => handleRotationField('softRatio', Number(e.target.value))}
+              style={{ width: 80 }}
+            />
+            <label style={{ minWidth: 110, marginLeft: 16 }}>
+              {t('settings.supervisor.rotation.hardRatio', 'Hard ratio')}
+            </label>
+            <input
+              type="number"
+              min={0.3}
+              max={1}
+              step={0.05}
+              value={rotationConfig.hardRatio}
+              onChange={(e) => handleRotationField('hardRatio', Number(e.target.value))}
+              style={{ width: 80 }}
+            />
+          </div>
+          <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+            <label style={{ minWidth: 110 }}>
+              {t('settings.supervisor.rotation.softCompact', 'Soft compact')}
+            </label>
+            <input
+              type="number"
+              min={1}
+              max={50}
+              step={1}
+              value={rotationConfig.softCompact}
+              onChange={(e) => handleRotationField('softCompact', Number(e.target.value))}
+              style={{ width: 80 }}
+            />
+            <label style={{ minWidth: 110, marginLeft: 16 }}>
+              {t('settings.supervisor.rotation.hardCompact', 'Hard compact')}
+            </label>
+            <input
+              type="number"
+              min={1}
+              max={50}
+              step={1}
+              value={rotationConfig.hardCompact}
+              onChange={(e) => handleRotationField('hardCompact', Number(e.target.value))}
+              style={{ width: 80 }}
+            />
+          </div>
         </div>
       </div>
 

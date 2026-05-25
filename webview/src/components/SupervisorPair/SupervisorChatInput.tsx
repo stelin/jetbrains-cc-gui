@@ -86,7 +86,7 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
     longContextEnabled,
     setLongContextEnabled,
     usageByAgentId,
-    setSelected,
+    startSupervisorPair,
     openManager,
   } = usePairContext();
   const usage = usageByAgentId[supervisor.agentId];
@@ -157,33 +157,21 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
   }, []);
 
   // Switch which supervisor is active. Mirrors SupervisorToggle.handleConfirm:
-  // stop the running pair on the daemon, swap the selected list, then start a
-  // fresh pair with the new agent.
+  // stop the running pair on the daemon, then start a fresh pair with the new
+  // agent via startSupervisorPair — that helper resolves the right-pane
+  // composer state (effective model w/ [1m], longContextEnabled, reasoning
+  // tier) into the pair_start payload so the daemon SDK boots with the
+  // user's chosen config on the first turn.
   const handleSwitchAgent = useCallback(
     (agent: SupervisorAgent) => {
-      const next: SelectedSupervisor[] = [
-        {
-          agentId: agent.id,
-          name: agent.name,
-          role: 'coordinator',
-          model: agent.model,
-          defaultLongContext: agent.defaultLongContext,
-          defaultReasoning: agent.defaultReasoning,
-        },
-      ];
       try {
         sendToJava(`pair_stop:${JSON.stringify({ pairId: '' })}`);
       } catch {
         /* ignore */
       }
-      setSelected(next);
-      try {
-        sendToJava(`pair_start:${JSON.stringify({ agentId: agent.id })}`);
-      } catch {
-        /* ignore */
-      }
+      startSupervisorPair(agent);
     },
-    [setSelected]
+    [startSupervisorPair]
   );
 
   // The base model id (without the [1m] suffix) is what we render in the

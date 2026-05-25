@@ -42,6 +42,16 @@ public class SessionState {
     private String channelId;
     private volatile String runtimeSessionEpoch = UUID.randomUUID().toString();
 
+    /**
+     * Phase 6c (2026-05-24): one-shot system-prompt append staged by
+     * {@code ClaudeSession#swapInnerSession} for the next outgoing daemon send.
+     * Cleared atomically by {@link #consumePendingSystemPromptAppend} once
+     * delivered. Volatile because the staging caller (main-AI rotation
+     * coordinator on a background thread) and the consuming caller
+     * (SessionSendService on the EDT/send thread) have no other happens-before.
+     */
+    private volatile String pendingSystemPromptAppend;
+
     // Session state — accessed only on EDT / single handler thread, no volatile needed.
     private boolean busy = false;
     private boolean loading = false;
@@ -209,6 +219,26 @@ public class SessionState {
         String newEpoch = UUID.randomUUID().toString();
         this.runtimeSessionEpoch = newEpoch;
         return newEpoch;
+    }
+
+    /** Phase 6c: stage a system-prompt append for the next send. Null clears. */
+    public void setPendingSystemPromptAppend(String append) {
+        this.pendingSystemPromptAppend = (append == null || append.isEmpty()) ? null : append;
+    }
+
+    /** Phase 6c: non-destructive peek. Use {@link #consumePendingSystemPromptAppend} when sending. */
+    public String getPendingSystemPromptAppend() {
+        return pendingSystemPromptAppend;
+    }
+
+    /**
+     * Phase 6c: take-and-clear. Called by the send path so the appended prompt
+     * is delivered exactly once.
+     */
+    public synchronized String consumePendingSystemPromptAppend() {
+        String v = pendingSystemPromptAppend;
+        pendingSystemPromptAppend = null;
+        return v;
     }
 
     public void setSlashCommands(List<String> slashCommands) {

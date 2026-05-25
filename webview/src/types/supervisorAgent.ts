@@ -34,6 +34,19 @@ export interface SupervisorAgent {
 }
 
 /**
+ * 2026-05-24: rotation-trigger thresholds shared by supervisor and main-AI
+ * auto-rotation. Persisted under {@code rotationConfig} in
+ * supervisor-agents.json. Exposed alongside the agent list so the Settings
+ * UI can render its current values without a second roundtrip.
+ */
+export interface RotationConfig {
+  softRatio: number;
+  hardRatio: number;
+  softCompact: number;
+  hardCompact: number;
+}
+
+/**
  * Payload pushed from Java to window.updateSupervisorAgents.
  */
 export interface SupervisorAgentListPayload {
@@ -44,6 +57,8 @@ export interface SupervisorAgentListPayload {
    * on the Java side; UI exposes this as a slider/number input.
    */
   autoCompactThreshold?: number;
+  /** 2026-05-24: rotation-trigger thresholds. */
+  rotationConfig?: RotationConfig;
 }
 
 /**

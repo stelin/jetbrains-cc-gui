@@ -35,7 +35,7 @@ export default function SupervisorToggle({ onChange, onOpenManager }: Supervisor
   const { t } = useTranslation();
 
   // Pair state lives at the top-level provider so PairLayout can react to it.
-  const { selected, setSelected, openManager: openManagerFromCtx } = usePairContext();
+  const { selected, setSelected, startSupervisorPair, openManager: openManagerFromCtx } = usePairContext();
   const effectiveOpenManager = onOpenManager ?? openManagerFromCtx;
 
   const [agents, setAgents] = useState<SupervisorAgent[]>([]);
@@ -75,6 +75,14 @@ export default function SupervisorToggle({ onChange, onOpenManager }: Supervisor
   }, []);
 
   const handleConfirm = useCallback((agent: SupervisorAgent) => {
+    setPickerOpen(false);
+    // startSupervisorPair fans out to setSelected + a resolved pair_start
+    // payload (model w/ [1m], longContextEnabled, reasoningEffort) so the
+    // daemon SDK is born with the user's current composer state. Without
+    // it the supervisor would launch at the agent's bare base model and
+    // the user would have to re-toggle 1M to see the right context limit
+    // — see the 2026-05-24 supervisor-1M bug.
+    startSupervisorPair(agent);
     const next: SelectedSupervisor[] = [{
       agentId: agent.id,
       name: agent.name,
@@ -83,15 +91,8 @@ export default function SupervisorToggle({ onChange, onOpenManager }: Supervisor
       defaultLongContext: agent.defaultLongContext,
       defaultReasoning: agent.defaultReasoning,
     }];
-    setSelected(next);
-    setPickerOpen(false);
-    // Ask Java to start the Pair on the daemon. The Supervisor starts with an
-    // EMPTY plan; the user will describe the task in the right-pane input box.
-    try {
-      sendToJava(`pair_start:${JSON.stringify({ agentId: agent.id })}`);
-    } catch { /* ignore */ }
     onChangeRef.current?.(next);
-  }, [setSelected]);
+  }, [startSupervisorPair]);
 
   const handleDisable = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();

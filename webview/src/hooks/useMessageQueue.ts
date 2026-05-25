@@ -80,6 +80,15 @@ export function useMessageQueue({
       // Remove from queue first
       setQueue(prev => prev.slice(1));
 
+      // 2026-05-24 (Q4 trace): queue dequeue + execute. If you see App.handleSubmit
+      // route to queue but never see this line, the dequeue was blocked (e.g.
+      // isExecutingFromQueueRef stuck true, or `loading` never went false).
+      console.info('[INJECT_TRACE] useMessageQueue dequeue+execute',
+        { messageId: nextMessage.id, queuedAtMs: nextMessage.queuedAt,
+          waitedMs: Date.now() - nextMessage.queuedAt,
+          contentPreview: nextMessage.content.slice(0, 80),
+          remainingInQueue: queue.length - 1 });
+
       // Execute with small delay to ensure state updates
       setTimeout(() => {
         onExecute(nextMessage.content, nextMessage.attachments);

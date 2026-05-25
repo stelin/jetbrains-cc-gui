@@ -168,12 +168,17 @@ class ClaudeDaemonCoordinator {
     }
 
     void prewarmDaemonAsync(String cwd, String runtimeSessionEpoch) {
-        RemoteModeContext rmCtx = RemoteModeContext.getInstance();
-        if (rmCtx != null && rmCtx.isRemote()) {
-            log.info("[DaemonCoordinator] Skip prewarm in remote mode (credentials live on the server)");
-            return;
-        }
-
+        // 2026-05-24: previously early-returned in remote mode with "credentials
+        // live on the server" — but claude.preconnect is daemon-side auth +
+        // SDK load, the client doesn't ship any credentials. Skipping prewarm
+        // pushed the entire RemoteBridge.start() (HTTP POST /session + 30s
+        // readyLatch.await) plus the SDK first-load onto the FIRST daemon RPC,
+        // which in the supervisor pair_start path runs on the JCEF callback
+        // thread and stalls the webview IPC for 30-60s. Prewarm runs on a
+        // background pool so the cost is paid silently at project open.
+        // Outbound path fields for claude.preconnect (cwd / env.*) are
+        // registered in PathFields.OUTBOUND, so the local cwd argument is
+        // translated to the remote form before transport.
         CompletableFuture<?> previous = prewarmFuture;
         if (previous != null && !previous.isDone()) {
             previous.cancel(true);

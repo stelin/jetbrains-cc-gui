@@ -35,6 +35,37 @@
         }
       })();
     </script>
+    <!-- 2026-05-25: window-level inbox for Pair inject_prompt. Java's JBCef
+         bridge calls window.onPairInjectPrompt(json) from ActionRouter. If
+         the React tree hasn't mounted yet (cold start / webview reload), the
+         callback is undefined and the directive is silently lost. This stub
+         buffers every payload into __pairInjectInbox; PairProvider drains
+         the inbox on mount and replaces the stub with the real handler. The
+         stub also handles the unmount path: PairProvider restores the stub
+         on cleanup so any push during navigation is buffered for the next
+         remount instead of throwing TypeError. -->
+    <script>
+      (function () {
+        if (!window.__pairInjectInbox) {
+          window.__pairInjectInbox = [];
+        }
+        if (typeof window.onPairInjectPrompt !== 'function') {
+          window.onPairInjectPrompt = function (json) {
+            try {
+              window.__pairInjectInbox.push(json);
+              if (typeof console !== 'undefined' && console.info) {
+                console.info('[INJECT_TRACE] inbox stub buffered payload',
+                  { inboxSize: window.__pairInjectInbox.length });
+              }
+            } catch (e) {
+              if (typeof console !== 'undefined' && console.error) {
+                console.error('[INJECT_TRACE] inbox stub failed to buffer', e);
+              }
+            }
+          };
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>

@@ -8,9 +8,11 @@ import com.intellij.openapi.project.Project;
 
 // Project is currently retained for forward-compat (notifications, etc.); see field comment.
 
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Translates Supervisor {@code ACTION} payloads into effects:
@@ -92,6 +94,27 @@ public class ActionRouter {
     private final PairSession pair;
     private final ScheduledExecutorService scheduler;
     private volatile WebviewBridge webview = NoopWebviewBridge.INSTANCE;
+
+    /** Max number of received-ack retry attempts before falling through to the
+     *  slow applied-timeout (DirectiveTracker.DEFAULT_ACK_TIMEOUT_MS). */
+    private static final int MAX_RECEIVED_RETRIES = 3;
+    /** Per-directive retry counter. Entries are removed in markDirectiveAcked
+     *  (when status is "received") and on dispose. */
+    private final ConcurrentHashMap<String, AtomicInteger> retryCounters = new ConcurrentHashMap<>();
+
+    /**
+     * 2026-05-25: webview readiness gate. Flips to true the first time
+     * {@link #markWebviewReady} fires (driven by the {@code pair_webview_ready}
+     * IPC the PairProvider posts on mount). Until then, inject pushes are
+     * buffered in {@link #pendingInjectsBeforeReady} so a cold-start dispatch
+     * that races the React tree mount isn't lost. Drained synchronously
+     * inside {@link #markWebviewReady}.
+     */
+    private volatile boolean webviewReady = false;
+    private final java.util.concurrent.ConcurrentLinkedDeque<PendingInject> pendingInjectsBeforeReady
+            = new java.util.concurrent.ConcurrentLinkedDeque<>();
+    /** Cap so a permanently-unready webview can't bloat memory. */
+    private static final int MAX_PENDING_INJECTS_BEFORE_READY = 64;
 
     public ActionRouter(Project project, PairSession pair) {
         this.project = project;
@@ -337,14 +360,84 @@ public class ActionRouter {
      * Protocol v2 (2026-05-24): called by {@link PairHandler} when the
      * webview posts {@code pair_directive_ack}. Delegates to the pair's
      * {@code DirectiveTracker} so its timeout is cancelled. Status is one of
-     * "received" | "applied" | "failed" — the tracker logs but does not
-     * distinguish them for cancellation purposes.
+     * "received" | "applied" | "failed" — "received" only cancels the fast
+     * received-timeout; "applied"/"failed" remove the directive entirely.
      */
     public void markDirectiveAcked(String directiveId, String status) {
         if (directiveId == null || directiveId.isEmpty()) return;
         DirectiveTracker tracker = pair.getDirectiveTracker();
         if (tracker == null) return;
         tracker.markAcked(directiveId, status);
+        // Drop the retry counter once the webview confirmed receipt — a later
+        // retry-timeout from a stale schedule would be a no-op anyway, but
+        // freeing the entry keeps the map small.
+        if ("received".equals(status) || "applied".equals(status) || "failed".equals(status)) {
+            retryCounters.remove(directiveId);
+        }
+    }
+
+    /**
+     * 2026-05-25: invoked by the per-pair {@link DirectiveTracker}'s
+     * received-timeout (~3s with no "received" ack). Re-pushes the inject to
+     * the webview up to {@link #MAX_RECEIVED_RETRIES} times before giving up
+     * and letting the slow applied-timeout fire {@code directive_lost}.
+     *
+     * <p>The retry covers the JBCef-bridge-drop intermittent failure: the
+     * Java side wrote {@code callJavaScript("window.onPairInjectPrompt",...)}
+     * but the webview never received the call (cold start, EDT blocked,
+     * watchdog reload). Each retry is a fresh {@code pushToWebview} attempt
+     * — by the second or third try, the webview has usually finished
+     * mounting and accepts the inject.
+     */
+    public void retryInjectOnReceivedTimeout(String directiveId, JsonObject payload) {
+        if (directiveId == null || directiveId.isEmpty() || payload == null) return;
+        if (pair.isDisposed()) return;
+        AtomicInteger ctr = retryCounters.computeIfAbsent(directiveId, k -> new AtomicInteger(0));
+        int attempt = ctr.incrementAndGet();
+        if (attempt > MAX_RECEIVED_RETRIES) {
+            LOG.warn("[INJECT_TRACE] ActionRouter.retryGaveUp"
+                    + " pair=" + pair.getPairId()
+                    + " directiveId=" + directiveId
+                    + " attempts=" + attempt
+                    + " — falling through to slow applied-timeout");
+            return;
+        }
+        String prompt = resolvePromptFromPayload(payload);
+        if (prompt == null || prompt.isEmpty()) {
+            LOG.warn("[INJECT_TRACE] ActionRouter.retrySkippedEmptyPrompt"
+                    + " pair=" + pair.getPairId()
+                    + " directiveId=" + directiveId);
+            return;
+        }
+        LOG.info("[INJECT_TRACE] ActionRouter.retry"
+                + " pair=" + pair.getPairId()
+                + " directiveId=" + directiveId
+                + " attempt=" + attempt + "/" + MAX_RECEIVED_RETRIES);
+        invokeInjectOnWebview(directiveId, prompt);
+        DirectiveTracker tracker = pair.getDirectiveTracker();
+        if (tracker != null) tracker.rearmReceivedTimeout(directiveId);
+    }
+
+    /**
+     * Mirror of the prompt-resolution logic in {@link #handleInjectPrompt} so
+     * retry can use the same final string. Kept private so the live
+     * dispatch path remains the single source of truth for shape decisions.
+     */
+    private String resolvePromptFromPayload(JsonObject payload) {
+        if (payload.has("inlinePrompt") && !payload.get("inlinePrompt").isJsonNull()
+                && !payload.get("inlinePrompt").getAsString().isEmpty()) {
+            return payload.get("inlinePrompt").getAsString();
+        }
+        if (payload.has("prompt") && !payload.get("prompt").isJsonNull()) {
+            return payload.get("prompt").getAsString();
+        }
+        if (payload.has("spilledPath") && !payload.get("spilledPath").isJsonNull()) {
+            String spilled = payload.get("spilledPath").getAsString();
+            String objective = payload.has("objective") && !payload.get("objective").isJsonNull()
+                    ? payload.get("objective").getAsString() : "(no objective)";
+            return "请按 `" + spilled + "` 中的完整指令执行(objective: " + objective + ")";
+        }
+        return "";
     }
 
     /**
@@ -463,8 +556,33 @@ public class ActionRouter {
      * the legacy 3-arg form when there is no id (e.g. test paths or daemons
      * that predate v2). On dispatch failure we DON'T cancel the directive —
      * letting it time out naturally surfaces directive_lost to the supervisor.
+     *
+     * <p>2026-05-25: if the webview hasn't signalled readiness yet, buffer
+     * the push instead of firing — {@link #markWebviewReady} drains the
+     * buffer once the IPC arrives. This prevents a cold-start dispatch from
+     * being lost when the React tree hasn't mounted yet.
      */
     private void invokeInjectOnWebview(String directiveId, String prompt) {
+        if (!webviewReady) {
+            if (pendingInjectsBeforeReady.size() >= MAX_PENDING_INJECTS_BEFORE_READY) {
+                LOG.warn("[INJECT_TRACE] ActionRouter.bufferOverflow"
+                        + " pair=" + pair.getPairId()
+                        + " directiveId=" + (directiveId != null ? directiveId : "(none)")
+                        + " — pre-ready buffer full ("
+                        + MAX_PENDING_INJECTS_BEFORE_READY + "), dropping oldest");
+                pendingInjectsBeforeReady.pollFirst();
+            }
+            pendingInjectsBeforeReady.offerLast(new PendingInject(directiveId, prompt));
+            LOG.info("[INJECT_TRACE] ActionRouter.bufferedBeforeReady"
+                    + " pair=" + pair.getPairId()
+                    + " directiveId=" + (directiveId != null ? directiveId : "(none)")
+                    + " bufferSize=" + pendingInjectsBeforeReady.size());
+            return;
+        }
+        pushInjectNow(directiveId, prompt);
+    }
+
+    private void pushInjectNow(String directiveId, String prompt) {
         try {
             // 2026-05-24 (Q4 trace): record the push attempt. The webview-side
             // counterpart logs `[INJECT_TRACE] webview onPairInjectPrompt`. If
@@ -481,6 +599,39 @@ public class ActionRouter {
             }
         } catch (Exception e) {
             LOG.warn("[ActionRouter] onInjectPrompt(V2) failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * 2026-05-25: called by {@link com.github.claudecodegui.handler.PairHandler}
+     * when the webview posts {@code pair_webview_ready}. Flips the readiness
+     * gate and drains any injects that were buffered while we were waiting.
+     * Idempotent — subsequent calls drain the buffer (covers webview reload
+     * where state was cleared but the Java pair is still alive).
+     */
+    public void markWebviewReady() {
+        webviewReady = true;
+        if (pendingInjectsBeforeReady.isEmpty()) {
+            LOG.info("[INJECT_TRACE] ActionRouter.webviewReady"
+                    + " pair=" + pair.getPairId() + " bufferEmpty=true");
+            return;
+        }
+        int drained = 0;
+        PendingInject p;
+        while ((p = pendingInjectsBeforeReady.pollFirst()) != null) {
+            drained++;
+            pushInjectNow(p.directiveId, p.prompt);
+        }
+        LOG.info("[INJECT_TRACE] ActionRouter.webviewReady"
+                + " pair=" + pair.getPairId() + " drained=" + drained);
+    }
+
+    private static final class PendingInject {
+        final String directiveId;
+        final String prompt;
+        PendingInject(String directiveId, String prompt) {
+            this.directiveId = directiveId;
+            this.prompt = prompt;
         }
     }
 

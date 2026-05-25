@@ -55,7 +55,7 @@ public final class PairStatusSnapshot {
     // Phase 5 (2026-05-24): autonomy-mode fields surfaced for the webview's
     // DecisionTimeline / AutonomyToggle / status panel. All nullable — pushers
     // that haven't yet wired them leave them null and the webview falls back
-    // to defaults (e.g. autonomyMode = 'mixed', empty timeline).
+    // to defaults (autonomyMode = 'full' since 2026-05-25, empty timeline).
     public final List<L2State.DecisionEntry> recentDecisions;
     public final String autonomyMode;       // "strict" | "mixed" | "full"
     public final BudgetStatus budgetStatus;

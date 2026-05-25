@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type {
   SelectedSupervisor,
@@ -12,6 +12,10 @@ import { TokenIndicator } from '../ChatInputBox/TokenIndicator';
 import { SUPERVISOR_MODELS } from '../settings/SupervisorSection/templates';
 import SupervisorAgentSelect from './SupervisorAgentSelect';
 import { usePairContext } from './PairContext';
+import {
+  markChatInputFocused,
+  registerChatInputDropHandler,
+} from '../../utils/chatInputDropRouter';
 import styles from './style.module.less';
 
 const sendToJava = (message: string) => {
@@ -121,6 +125,55 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
     e.dataTransfer.dropEffect = 'copy';
   }, []);
 
+  /**
+   * Insert one or more `@<path>` tokens into the draft. Used by:
+   *   - {@link handleDrop} for in-browser HTML drops on the textarea
+   *   - the chatInputDropRouter for IDE-originated drops dispatched by
+   *     Java's WebviewInitializer (the user can drag a file from the
+   *     Project Tool Window onto the JBCef component and the router
+   *     will hand the path to this input when supervisor was last focused)
+   *
+   * Caret behaviour: insert at the current selection when the textarea is
+   * focused; append at the end otherwise (router path may fire when focus
+   * has drifted to the IDE source pane during the drag).
+   */
+  const insertFilePaths = useCallback((paths: string[]) => {
+    const cleaned = paths
+      .map((p) => p.replace(/^file:\/\//, '').trim())
+      .filter((p) => !!p);
+    if (cleaned.length === 0) return;
+    const insertion =
+      cleaned.map((p) => (p.startsWith('@') ? p : `@${p}`)).join(' ') + ' ';
+
+    const ta = textareaRef.current;
+    const isFocused = ta != null && document.activeElement === ta;
+    const captureStart = ta && isFocused ? ta.selectionStart : null;
+    const captureEnd = ta && isFocused ? ta.selectionEnd : null;
+
+    setDraft((prev) => {
+      if (captureStart == null || captureEnd == null) {
+        const needsSep = prev.length > 0 && !/\s$/.test(prev);
+        return prev + (needsSep ? ' ' : '') + insertion;
+      }
+      const before = prev.slice(0, captureStart);
+      const after = prev.slice(captureEnd);
+      return before + insertion + after;
+    });
+
+    requestAnimationFrame(() => {
+      const node = textareaRef.current;
+      if (!node) return;
+      node.focus();
+      if (captureStart != null) {
+        const caret = captureStart + insertion.length;
+        node.setSelectionRange(caret, caret);
+      } else {
+        const tail = node.value.length;
+        node.setSelectionRange(tail, tail);
+      }
+    });
+  }, []);
+
   const handleDrop = useCallback((e: React.DragEvent<HTMLElement>) => {
     e.preventDefault();
     e.stopPropagation();
@@ -131,30 +184,23 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
     }
     raw = raw.trim();
     if (!raw) return;
-    const firstLine =
-      raw.split('\n').map((l) => l.trim()).find((l) => l && !l.startsWith('#')) ?? raw;
-    const filePath = firstLine.replace(/^file:\/\//, '');
-    const insertion = (filePath.startsWith('@') ? filePath : `@${filePath}`) + ' ';
+    // Multi-select drops arrive as newline-separated paths; uri-list comments
+    // start with '#'.
+    const paths = raw
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('#'));
+    insertFilePaths(paths);
+  }, [insertFilePaths]);
 
-    const ta = textareaRef.current;
-    if (!ta) {
-      setDraft((prev) => prev + insertion);
-      return;
-    }
-    const start = ta.selectionStart ?? ta.value.length;
-    const end = ta.selectionEnd ?? ta.value.length;
-    const before = ta.value.slice(0, start);
-    const after = ta.value.slice(end);
-    const nextValue = before + insertion + after;
-    setDraft(nextValue);
-    requestAnimationFrame(() => {
-      if (textareaRef.current) {
-        const caret = start + insertion.length;
-        textareaRef.current.focus();
-        textareaRef.current.setSelectionRange(caret, caret);
-      }
-    });
-  }, []);
+  // Register with the chat-input drop router so Java-mediated drops (IDE
+  // Project Tool Window → JBCef) route here when supervisor was last focused.
+  // HTML drops on this textarea are handled by {@link handleDrop} above;
+  // the router is the catch-net for the Java DropTarget path that has no
+  // cursor-target information.
+  useEffect(() => {
+    return registerChatInputDropHandler('supervisor', insertFilePaths);
+  }, [insertFilePaths]);
 
   // Switch which supervisor is active. Mirrors SupervisorToggle.handleConfirm:
   // stop the running pair on the daemon, then start a fresh pair with the new
@@ -260,6 +306,7 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
           onKeyDown={handleKeyDown}
           onDragOver={handleDragOver}
           onDrop={handleDrop}
+          onFocus={() => markChatInputFocused('supervisor')}
           placeholder={t('pairLayout.composer.placeholder')}
           spellCheck={false}
         />

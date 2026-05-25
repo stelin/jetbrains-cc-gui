@@ -7,8 +7,8 @@ export type AutonomyMode = 'strict' | 'mixed' | 'full';
 
 /** Switch the autonomy level for the current pair.
  *  strict = legacy modal escalate;
- *  mixed (default) = C1/C2 auto fallback + alert toast, C3 真停;
- *  full = 只 C3 停, C1/C2 全自决, alert 仍 toast 但不阻塞。 */
+ *  mixed = C1/C2 auto fallback + alert toast, C3 真停;
+ *  full (default, 2026-05-25) = C1/C2/C3 全自决, alert 仍 toast 但不阻塞。 */
 export default function AutonomyToggle() {
   const { pairId, autonomyMode, setAutonomyMode } = usePairContext();
 
@@ -19,7 +19,7 @@ export default function AutonomyToggle() {
   }, [pairId, setAutonomyMode]);
 
   if (!pairId) return null;
-  const current: AutonomyMode = autonomyMode ?? 'mixed';
+  const current: AutonomyMode = autonomyMode ?? 'full';
 
   return (
     <div className={styles.autonomyToggle}>

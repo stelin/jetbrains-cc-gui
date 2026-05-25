@@ -77,11 +77,11 @@ public class PairSession {
     private volatile PairBudgetTracker budgetTracker;
     private final AtomicBoolean paused = new AtomicBoolean(false);
 
-    // Phase 5 (2026-05-24): autonomy mode. Default "mixed" — C1/C2 auto-fallback
-    // with alert toast; C3 真停. "strict" reverts to legacy modal escalate
-    // (escalate_to_human stays modal even when daemon aliases it). "full" makes
-    // even legacy escalate go through the alert path (only C3 truly stops).
-    private volatile String autonomyMode = "mixed";
+    // Phase 5 (2026-05-24): autonomy mode.
+    // "full" (default, 2026-05-25): C1/C2/C3 全部自决 — alert 走 toast 但不阻塞。
+    // "mixed": C1/C2 自决 + alert toast, C3 真停.
+    // "strict": 退回 modal escalate (escalate_to_human 仍 modal even when daemon aliases it).
+    private volatile String autonomyMode = "full";
 
     // Phase 6 (2026-05-24): F2 — consecutive directive-ack failures since the
     // last approve_and_continue. When this reaches 3, the supervisor is told
@@ -243,12 +243,12 @@ public class PairSession {
 
     public String getAutonomyMode() { return autonomyMode; }
     /** Set autonomy mode. Valid: "strict" | "mixed" | "full". Invalid values
-     *  are coerced to "mixed" (safest default). Idempotent. */
+     *  are coerced to "full" (matches the new 2026-05-25 default). Idempotent. */
     public void setAutonomyMode(String mode) {
         if ("strict".equals(mode) || "mixed".equals(mode) || "full".equals(mode)) {
             this.autonomyMode = mode;
         } else {
-            this.autonomyMode = "mixed";
+            this.autonomyMode = "full";
         }
     }
 

@@ -272,7 +272,8 @@ export function PairProvider({ children }: PairProviderProps) {
   // pair stop; capped at MAX_NOTICES.
   const [notices, setNotices] = useState<PairNotice[]>([]);
   // Phase 5 (2026-05-24): optimistic autonomy mode (canonical comes from
-  // pairStatus.autonomyMode each push). Default "mixed" matches Java's default.
+  // pairStatus.autonomyMode each push). Initial undefined; AutonomyToggle
+  // falls back to "full" (matches Java's 2026-05-25 default).
   const [autonomyMode, setAutonomyModeState] = useState<'strict' | 'mixed' | 'full' | undefined>(undefined);
   const setAutonomyMode = useCallback((mode: 'strict' | 'mixed' | 'full') => {
     setAutonomyModeState(mode);
@@ -290,6 +291,12 @@ export function PairProvider({ children }: PairProviderProps) {
   // ack back via pair_directive_ack. Legacy registrants that ignore the 4th
   // arg keep working — TypeScript parameter widening is safe here.
   const injectHandlerRef = useRef<((pairId: string, supervisorId: string, prompt: string, directiveId?: string) => void) | null>(null);
+  // 2026-05-25: in-React cold-start buffer. The PairProvider's useEffect
+  // installing window.onPairInjectPrompt runs before PairAppBridge's
+  // registerInjectPromptHandler effect, so an inject can arrive with no
+  // attached handler — previously the optional chain silently dropped it.
+  // Buffered entries are drained by registerInjectPromptHandler.
+  const pendingInjectQueueRef = useRef<Array<{ pairId: string; supervisorId: string; prompt: string; directiveId?: string }>>([]);
   const pairIdRef = useRef<string | null>(null);
   useEffect(() => { pairIdRef.current = pairId; }, [pairId]);
 
@@ -425,6 +432,22 @@ export function PairProvider({ children }: PairProviderProps) {
   const registerInjectPromptHandler = useCallback(
     (fn: (pairId: string, supervisorId: string, prompt: string, directiveId?: string) => void) => {
       injectHandlerRef.current = fn;
+      // Drain any injects that arrived before the handler attached
+      // (cold-start race — see pendingInjectQueueRef field doc).
+      const backlog = pendingInjectQueueRef.current;
+      if (backlog.length > 0) {
+        const drained = backlog.splice(0, backlog.length);
+        console.info('[INJECT_TRACE] registerInjectPromptHandler draining backlog',
+          { count: drained.length });
+        for (const entry of drained) {
+          try {
+            fn(entry.pairId, entry.supervisorId, entry.prompt, entry.directiveId);
+          } catch (err) {
+            console.error('[INJECT_TRACE] registerInjectPromptHandler drain delivery threw',
+              { directiveId: entry.directiveId, err: String(err) });
+          }
+        }
+      }
     },
     []
   );
@@ -883,28 +906,53 @@ export function PairProvider({ children }: PairProviderProps) {
       } catch { /* ignore malformed */ }
     };
 
-    window.onPairInjectPrompt = (json: string) => {
+    const realInjectHandler = (json: string) => {
+      let parsed: { pairId: string; supervisorId: string; prompt: string; directiveId?: string } | null = null;
       try {
-        // Protocol v2 (2026-05-24): directiveId is present when the supervisor
-        // emitted an inject_prompt that needs ack tracking. Legacy daemons
-        // (or non-Pair-mode injections) omit it — handler treats it as optional.
-        const o = JSON.parse(json) as {
-          pairId: string;
-          supervisorId: string;
-          prompt: string;
-          directiveId?: string;
-        };
-        // 2026-05-24 (Q4 trace): IPC receipt point. If you see Java's
-        // `[INJECT_TRACE] PairHandler.onInjectPromptV2` but not this line,
-        // the JBCef bridge dropped the call.
-        console.info('[INJECT_TRACE] webview onPairInjectPrompt',
-          { pairId: o.pairId, directiveId: o.directiveId, promptLen: o.prompt?.length ?? 0,
-            handlerAttached: Boolean(injectHandlerRef.current) });
-        injectHandlerRef.current?.(o.pairId, o.supervisorId, o.prompt, o.directiveId);
+        parsed = JSON.parse(json);
       } catch (err) {
         console.warn('[INJECT_TRACE] webview onPairInjectPrompt parse failed', err);
+        return;
+      }
+      if (!parsed) return;
+      const handlerAttached = Boolean(injectHandlerRef.current);
+      console.info('[INJECT_TRACE] webview onPairInjectPrompt',
+        { pairId: parsed.pairId, directiveId: parsed.directiveId,
+          promptLen: parsed.prompt?.length ?? 0, handlerAttached });
+
+      // Buffer if the App-side handler hasn't registered yet (cold-start
+      // race: PairProvider mounts before PairAppBridge runs its
+      // registerInjectPromptHandler effect). Drained from registerInjectPromptHandler.
+      if (!injectHandlerRef.current) {
+        pendingInjectQueueRef.current.push(parsed);
+        console.warn('[INJECT_TRACE] webview onPairInjectPrompt — handler not attached, buffered',
+          { directiveId: parsed.directiveId, bufferedCount: pendingInjectQueueRef.current.length });
+        return;
+      }
+      try {
+        injectHandlerRef.current(parsed.pairId, parsed.supervisorId, parsed.prompt, parsed.directiveId);
+      } catch (err) {
+        console.error('[INJECT_TRACE] webview onPairInjectPrompt handler threw',
+          { directiveId: parsed.directiveId, err: String(err) });
       }
     };
+
+    // Drain anything the index.html stub buffered before React mounted.
+    // The stub at webview/index.html intercepts callJavaScript("window.onPairInjectPrompt",...)
+    // and pushes into window.__pairInjectInbox; we replay those entries here
+    // (in arrival order) THEN install the real handler so a push that lands
+    // mid-drain still reaches the real handler.
+    const inbox = (window as unknown as { __pairInjectInbox?: string[] }).__pairInjectInbox;
+    if (Array.isArray(inbox) && inbox.length > 0) {
+      const drained = inbox.splice(0, inbox.length);
+      console.info('[INJECT_TRACE] PairProvider draining window inbox', { count: drained.length });
+      for (const json of drained) {
+        try { realInjectHandler(json); }
+        catch (err) { console.error('[INJECT_TRACE] PairProvider inbox drain delivery threw', err); }
+      }
+    }
+
+    window.onPairInjectPrompt = realInjectHandler;
 
     window.onPairEscalate = (json: string) => {
       try {
@@ -1009,6 +1057,22 @@ export function PairProvider({ children }: PairProviderProps) {
       window.onPairNotice = prevNotice;
     };
   }, [appendAssistantBlocks, attachToolResults, endStreaming]);
+
+  // 2026-05-25 (intermittent-inject fix D): tell Java the webview side is
+  // alive and PairProvider is mounted, so ActionRouter can drain anything
+  // it buffered while we were cold-starting. Re-fires whenever pairId
+  // changes — covers webview reload (PairProvider remounts → state lost →
+  // ActionRouter still has the live pair → resending ready triggers a fresh
+  // drain of whatever accumulated during the reload window).
+  useEffect(() => {
+    if (!pairId) return;
+    try {
+      sendToJava(`pair_webview_ready:${JSON.stringify({ pairId })}`);
+      console.info('[INJECT_TRACE] PairProvider sent pair_webview_ready', { pairId });
+    } catch (err) {
+      console.warn('[INJECT_TRACE] PairProvider sending pair_webview_ready failed', err);
+    }
+  }, [pairId]);
 
   useEffect(() => {
     const onSupervisorUsage = (e: Event) => {
@@ -1134,8 +1198,9 @@ export function usePairContext(): PairContextValue {
       _text: string,
       _attachments?: Array<{ path: string }>
     ) => { /* no-op */ },
-    // Phase 5 (2026-05-24): autonomy defaults — fall back to "mixed" so the
-    // UI doesn't show a confusing "unset" state outside a Provider.
+    // Phase 5 (2026-05-24): autonomy defaults — fall back to "full" (matches
+    // Java's 2026-05-25 default) so the UI doesn't show a confusing "unset"
+    // state outside a Provider.
     autonomyMode: undefined,
     setAutonomyMode: () => { /* no-op */ },
   };

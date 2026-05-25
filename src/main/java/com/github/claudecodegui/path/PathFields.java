@@ -53,6 +53,38 @@ public final class PathFields {
             "$.params.cwd",
             "$.params.env.IDEA_PROJECT_PATH",
             "$.params.env.PROJECT_PATH"
+        )),
+
+        // Supervisor channel — paths in the event payload are LOCAL-originated
+        // (extracted by ClaudeMessageHandler from main-AI tool_use input fields
+        // which were already inbound-translated to LOCAL via __tool_use_input__).
+        // They must become REMOTE before the daemon-side supervisor sees them.
+        //
+        // Two layouts are registered:
+        //   - Direct payload — legacy non-monitor mode, events go to the daemon
+        //     one at a time without wrapping.
+        //   - events[*].payload — current monitor-mode default; SupervisorMonitor
+        //     wraps a batch of child events into a single composite_summary.
+        //
+        // Free-form `payload.text` (user_input) is intentionally NOT registered:
+        // PairHandler.translateUserInputPaths handles @<path>-token rewriting on
+        // that field at the IPC boundary, before the event reaches EventBus —
+        // the field-walker manifest cannot regex-scan free text.
+        //
+        // Daemon-originated path fields (deliverables[*].path, spilledPath,
+        // transcriptPath from protocol-v2 hooks) are intentionally NOT registered
+        // because they ALREADY arrive at Java in REMOTE form (RemoteBridge does
+        // not inbound-translate them; they are not in PathFields.INBOUND). Re-
+        // applying toRemote would double-prepend the prefix.
+        entry("supervisor.postEvent", List.of(
+            "$.params.event.payload.modifiedFilesInPlan[*]",
+            "$.params.event.payload.modifiedFilesOffPlan[*]",
+            "$.params.event.payload.files[*]",
+            "$.params.event.payload.toolUses[*].path",
+            "$.params.event.payload.events[*].payload.modifiedFilesInPlan[*]",
+            "$.params.event.payload.events[*].payload.modifiedFilesOffPlan[*]",
+            "$.params.event.payload.events[*].payload.files[*]",
+            "$.params.event.payload.events[*].payload.toolUses[*].path"
         ))
     );
 

@@ -104,6 +104,15 @@ const PairAppBridge = ({
       if (!prompt || prompt.trim().length === 0) {
         console.warn('[INJECT_TRACE] App.injectHandler skipped — empty prompt',
           { pairId, directiveId });
+        // Surface as failed so the supervisor doesn't sit on a 5min timeout
+        // waiting for a directive that can never apply.
+        if (directiveId) {
+          try {
+            sendBridgeEvent('pair_directive_ack', JSON.stringify({
+              pairId, directiveId, status: 'failed',
+            }));
+          } catch { /* best-effort */ }
+        }
         return;
       }
 
@@ -112,16 +121,36 @@ const PairAppBridge = ({
       // by reading `loading`, so we log that snapshot here too.
       const preview = prompt.length > 80 ? prompt.slice(0, 80).replace(/\n/g, ' ') + '…'
                                          : prompt.replace(/\n/g, ' ');
+      // 2026-05-25 (intermittent-inject fix E): include handleSubmit identity in
+      // the trace so we can detect if a stale-closure ref ever fires. If
+      // handleSubmit is undefined we ack failed and bail loudly.
+      const handleSubmitReady = typeof handleSubmit === 'function';
       console.info('[INJECT_TRACE] App.injectHandler',
-        { pairId, directiveId, loading, promptLen: prompt.length, preview });
+        { pairId, directiveId, loading, promptLen: prompt.length, preview, handleSubmitReady });
+      if (!handleSubmitReady) {
+        console.error('[INJECT_TRACE] App.injectHandler — handleSubmit unavailable, acking failed',
+          { pairId, directiveId });
+        if (directiveId) {
+          try {
+            sendBridgeEvent('pair_directive_ack', JSON.stringify({
+              pairId, directiveId, status: 'failed',
+            }));
+          } catch { /* best-effort */ }
+        }
+        return;
+      }
 
       // Ack 1/2: directive received. Java's DirectiveTracker cancels the
-      // 5min timeout immediately — even if the prompt then queues for a busy
-      // main AI, we no longer trigger directive_lost.
+      // fast received-timeout (3s) immediately — even if the prompt then
+      // queues for a busy main AI, we no longer trigger a retry-storm.
       if (directiveId) {
-        sendBridgeEvent('pair_directive_ack', JSON.stringify({
-          pairId, directiveId, status: 'received',
-        }));
+        try {
+          sendBridgeEvent('pair_directive_ack', JSON.stringify({
+            pairId, directiveId, status: 'received',
+          }));
+        } catch (err) {
+          console.warn('[INJECT_TRACE] App.injectHandler received-ack send failed', err);
+        }
         pendingDirectiveRef.current = { pairId, directiveId };
       }
 
@@ -129,7 +158,20 @@ const PairAppBridge = ({
       // useMessageQueue dequeue path if main AI is busy. This replaces the
       // legacy `executeMessage(prompt, [])` call which could trigger two
       // concurrent executeTurn() runs against the same daemon runtime.
-      handleSubmit(prompt, []);
+      try {
+        handleSubmit(prompt, []);
+      } catch (err) {
+        console.error('[INJECT_TRACE] App.injectHandler handleSubmit threw',
+          { pairId, directiveId, err: String(err) });
+        if (directiveId) {
+          try {
+            sendBridgeEvent('pair_directive_ack', JSON.stringify({
+              pairId, directiveId, status: 'failed',
+            }));
+          } catch { /* best-effort */ }
+          pendingDirectiveRef.current = null;
+        }
+      }
     });
   }, [registerInjectPromptHandler, handleSubmit, loading]);
 

@@ -543,7 +543,8 @@ public class SupervisorAgentManager {
                 || LEGACY_HAIKU_MODEL_ID.equals(m)
                 || "claude-sonnet-4-6".equals(m)
                 || "claude-opus-4-7".equals(m)
-                || "claude-opus-4-6".equals(m);
+                || "claude-opus-4-6".equals(m)
+                || "gpt-5.5".equals(m);
     }
 
     private JsonObject buildBuiltInAgent(String id, String name, String description, String model, long ts) {

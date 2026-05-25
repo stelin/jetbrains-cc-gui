@@ -60,7 +60,11 @@ public class PairHandler extends BaseMessageHandler {
             // 2026-05-25 (FUNDAMENTAL FIX): manual user-initiated cancel of the
             // supervisor's current turn. Replaces the wall-clock auto-interrupt
             // that previously fired on monitor-tick timeout.
-            "pair_supervisor_interrupt"
+            "pair_supervisor_interrupt",
+            // 2026-05-25 (intermittent-inject fix D): webview signals it's
+            // mounted and ready to receive injects. ActionRouter buffers any
+            // dispatch that arrived before this and drains on ready.
+            "pair_webview_ready"
     };
 
     private final Gson gson;
@@ -114,8 +118,42 @@ public class PairHandler extends BaseMessageHandler {
             case "pair_supervisor_interrupt":
                 handleSupervisorInterrupt(content);
                 return true;
+            case "pair_webview_ready":
+                handleWebviewReady(content);
+                return true;
             default:
                 return false;
+        }
+    }
+
+    /**
+     * 2026-05-25 (intermittent-inject fix D): webview signals it's mounted
+     * and ready to receive {@code window.onPairInjectPrompt} pushes. Drains
+     * any inject that was buffered at the ActionRouter level. Idempotent —
+     * a webview reload that re-mounts PairProvider will re-fire this IPC and
+     * we treat each one as a drain trigger.
+     */
+    private void handleWebviewReady(String content) {
+        try {
+            JsonObject data = gson.fromJson(content, JsonObject.class);
+            String pairId = data != null && data.has("pairId") && !data.get("pairId").isJsonNull()
+                    ? data.get("pairId").getAsString() : "";
+            PairSession session = resolvePair(pairId);
+            if (session == null) {
+                // Webview can post ready before the pair_start round-trip
+                // finished — that's normal on first mount, not an error. The
+                // next inject will use ActionRouter's buffer path until ready
+                // arrives, so we just log at info level.
+                LOG.info("[PairHandler] pair_webview_ready (no active pair yet) pairId=" + pairId);
+                return;
+            }
+            com.github.claudecodegui.session.pair.ActionRouter router = session.getActionRouter();
+            if (router != null) {
+                router.markWebviewReady();
+            }
+        } catch (Exception e) {
+            LOG.warn("[PairHandler] pair_webview_ready failed: "
+                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getName()));
         }
     }
 
@@ -184,7 +222,8 @@ public class PairHandler extends BaseMessageHandler {
     /**
      * Phase 5 (2026-05-24): webview toggled autonomy level for a pair.
      * Payload: { pairId, mode: "strict" | "mixed" | "full" }.
-     * Invalid modes are coerced to "mixed" by PairSession.setAutonomyMode.
+     * Invalid modes are coerced to "full" by PairSession.setAutonomyMode
+     * (matches the 2026-05-25 default).
      */
     private void handleSetAutonomyMode(String content) {
         try {
@@ -192,7 +231,7 @@ public class PairHandler extends BaseMessageHandler {
             String pairId = data.has("pairId") && !data.get("pairId").isJsonNull()
                     ? data.get("pairId").getAsString() : "";
             String mode = data.has("mode") && !data.get("mode").isJsonNull()
-                    ? data.get("mode").getAsString() : "mixed";
+                    ? data.get("mode").getAsString() : "full";
             PairSession session = resolvePair(pairId);
             if (session == null) {
                 LOG.info("[PairHandler] pair_set_autonomy_mode ignored — no active pair for id=" + pairId);
@@ -348,6 +387,16 @@ public class PairHandler extends BaseMessageHandler {
                     dtSessionRef.getEventBus().publishStepBlocked(fails, lastObjective);
                     dtSessionRef.resetDirectiveFailures();
                 }
+            });
+            // 2026-05-25: fast received-timeout (3s). Re-push the inject if the
+            // webview never ack'd "received" — covers the JBCef bridge drop
+            // intermittent failure that the user reported (sometimes works,
+            // sometimes doesn't). ActionRouter caps retries at MAX_RECEIVED_RETRIES.
+            dt.setOnReceivedTimeout((directiveId, payload) -> {
+                if (dtSessionRef.isDisposed()) return;
+                com.github.claudecodegui.session.pair.ActionRouter router = dtSessionRef.getActionRouter();
+                if (router == null) return;
+                router.retryInjectOnReceivedTimeout(directiveId, payload);
             });
             session.setDirectiveTracker(dt);
 
@@ -681,6 +730,15 @@ public class PairHandler extends BaseMessageHandler {
      * elsewhere in the text are left alone (per the "structured tokens only"
      * design contract — see PathFields.java for the same rule on the main AI
      * side).
+     *
+     * <p><b>Why this lives here</b> (not as a PathFields.OUTBOUND entry):
+     * {@code payload.text} of a {@code user_input} event is free-form prose
+     * and the {@link PathFieldVisitor} can only translate STRUCTURED string
+     * leaves — calling {@code toRemote(entireText)} would yield garbage. The
+     * @-token regex sweep here complements the supervisor.postEvent manifest:
+     * structured path fields (modifiedFilesInPlan[*], toolUses[*].path, …)
+     * are translated at {@code RemoteBridge.sendCommand}, free-form @-tokens
+     * are translated here at the IPC boundary before publish.
      */
     private String translateUserInputPaths(String text, JsonArray attachments) {
         if (attachments == null || attachments.isEmpty()) {

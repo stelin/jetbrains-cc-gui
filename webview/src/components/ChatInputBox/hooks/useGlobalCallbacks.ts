@@ -1,5 +1,9 @@
 import { useEffect } from 'react';
 import { createTextFragment } from '../utils/selectionUtils.js';
+import {
+  markChatInputFocused,
+  tryDispatchExternalDrop,
+} from '../../../utils/chatInputDropRouter';
 
 interface UseGlobalCallbacksOptions {
   editableRef: React.RefObject<HTMLDivElement | null>;
@@ -86,8 +90,6 @@ export function useGlobalCallbacks({
 
     window.handleFilePathFromJava = (filePathInput: string | string[]) => {
       try {
-        if (!editableRef.current) return;
-
         // Normalize input to string array.
         // Java side (v0.1.9+) passes a JS array directly via executeJavaScript,
         // so Array.isArray branch is the primary path.
@@ -107,6 +109,16 @@ export function useGlobalCallbacks({
         } else {
           return;
         }
+
+        // Focus-aware routing: if the supervisor (or other non-main) chat input
+        // was last focused, hand the drop to it instead. Returns false when
+        // 'main' is the last-focused id, so existing behaviour is preserved
+        // for the common case.
+        if (tryDispatchExternalDrop(filePaths.filter((p) => !!p && p.trim()))) {
+          return;
+        }
+
+        if (!editableRef.current) return;
 
         // Insert all file paths
         for (const filePath of filePaths) {
@@ -216,4 +228,18 @@ export function useGlobalCallbacks({
       delete window.insertCodeSnippetAtCursor;
     };
   }, [editableRef, getTextContent, renderFileTags, adjustHeight, onInput, setHasContent]);
+
+  // Track main-AI editable focus so IDE-originated file drops route here when
+  // the user was last typing in this input. The supervisor input registers
+  // itself similarly; the router picks the most-recently-focused one. Default
+  // is 'main' so behaviour is unchanged when no supervisor pane is active.
+  useEffect(() => {
+    const editable = editableRef.current;
+    if (!editable) return;
+    const onFocus = () => markChatInputFocused('main');
+    editable.addEventListener('focus', onFocus);
+    return () => {
+      editable.removeEventListener('focus', onFocus);
+    };
+  }, [editableRef]);
 }

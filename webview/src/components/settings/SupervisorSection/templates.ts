@@ -124,6 +124,7 @@ export const SUPERVISOR_MODELS = [
   { id: 'claude-sonnet-4-6',         label: 'Claude Sonnet 4.6 · 默认推荐' },
   { id: 'claude-opus-4-7',           label: 'Claude Opus 4.7 · 最强' },
   { id: 'claude-opus-4-6',           label: 'Claude Opus 4.6 · 长会话模式' },
+  { id: 'gpt-5.5',                   label: 'GPT-5.5' },
 ];
 
 export const NAME_MAX_LENGTH = 30;

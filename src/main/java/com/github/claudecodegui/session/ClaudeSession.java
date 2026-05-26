@@ -138,12 +138,34 @@ public class ClaudeSession {
     }
 
     public ClaudeSession(Project project, ClaudeSDKBridge claudeSDKBridge, CodexSDKBridge codexSDKBridge) {
+        this(project, claudeSDKBridge, codexSDKBridge, null);
+    }
+
+    /**
+     * Construct with an explicit per-tab window id. Carried through to
+     * {@link SessionState#setWindowId(String)} so downstream Pair lookup
+     * ({@code ClaudeMessageHandler.findAttachedPair},
+     * {@code SessionSendService.prependPairContextMarker}) can scope to
+     * pairs owned by THIS tab and avoid the cross-tab event leakage where
+     * Tab A's supervisor heard Tab B's main-AI events because the fallback
+     * picked the most-recently-started pair project-wide (2026-05-25 fix).
+     *
+     * @param windowId per-tab id from {@code ClaudeChatWindow.windowId}; may
+     *                 be null for legacy / test callers (Pair attachment will
+     *                 then deliberately return null instead of guessing).
+     */
+    public ClaudeSession(
+            Project project,
+            ClaudeSDKBridge claudeSDKBridge,
+            CodexSDKBridge codexSDKBridge,
+            String windowId) {
         this.project = project;
         this.claudeSDKBridge = claudeSDKBridge;
         this.codexSDKBridge = codexSDKBridge;
 
         // Initialize managers
         this.state = new com.github.claudecodegui.session.SessionState();
+        this.state.setWindowId(windowId);
         this.messageParser = new com.github.claudecodegui.session.MessageParser();
         this.messageMerger = new com.github.claudecodegui.session.MessageMerger();
         this.contextCollector = new com.github.claudecodegui.session.EditorContextCollector(project);

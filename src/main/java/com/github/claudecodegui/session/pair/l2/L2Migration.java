@@ -38,8 +38,20 @@ public final class L2Migration {
             throw new L2Validator.L2ValidationException(
                     "L2 migrate: cannot downgrade from v" + from + " to v" + L2Schema.CURRENT_VERSION);
         }
-        // Phase 3 baseline: no earlier persisted versions yet. Treat unknown
-        // older versions as un-migratable so the caller falls back to .bak.
+        // v2 → v3 (2026-05-25): adds Contract State Machine fields.
+        // Existing fields (anchoredFacts, planProgress, fileState, recentDecisions,
+        // mainAI, etc.) are unchanged. Gson has already populated them from the
+        // raw JSON; we just initialize the new fields.
+        if (from == 2) {
+            state.plan = null;
+            if (state.openContracts == null) {
+                state.openContracts = new java.util.ArrayList<>();
+            }
+            state.schemaVersion = 3;
+            LOG.info("[L2Migration] " + state.pairId + " v2 → v3: added plan=null, openContracts=[]");
+            return state;
+        }
+        // No further migration paths. Treat unknown older versions as un-migratable.
         throw new L2Validator.L2ValidationException(
                 "L2 migrate: no migration path from v" + from + " to v" + L2Schema.CURRENT_VERSION);
     }

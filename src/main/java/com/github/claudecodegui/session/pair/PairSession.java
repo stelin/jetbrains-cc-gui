@@ -67,13 +67,14 @@ public class PairSession {
     private volatile ActionRouter actionRouter;
     private volatile boolean disposed = false;
 
-    // Protocol v2 (2026-05-24): autonomy-mode trackers. directiveTracker is
-    // always non-null (every pair has one — directives are core to v2 flow).
+    // Protocol v2 (2026-05-24): autonomy-mode trackers.
     // budgetTracker is non-null even with no limits (PairBudget defaults all
     // fields to null, hasAnyLimit() returns false; calling check() is cheap).
     // paused is set by Java when budget exceeds 100% or supervisor escalates
     // a hard C3 — subsequent inject_prompt dispatches are NO-OPed.
-    private volatile DirectiveTracker directiveTracker;
+    // Contract State Machine v3 (2026-05-25): directiveTracker removed.
+    // ContractRegistry is now the single source of truth for outstanding
+    // tasks (see {@link #contractRegistry}).
     private volatile PairBudgetTracker budgetTracker;
     private final AtomicBoolean paused = new AtomicBoolean(false);
 
@@ -126,6 +127,26 @@ public class PairSession {
     //   Nullable in unit tests / pre-handler-wire intervals.
     private volatile com.github.claudecodegui.provider.claude.MainAIBridge mainAIBridge;
     private volatile com.github.claudecodegui.session.ClaudeSession claudeSession;
+
+    // Contract State Machine v3 (2026-05-25): authoritative plan + contract
+    // owner. PairSessionManager constructs and starts these alongside the
+    // monitor infrastructure. ContractRegistry replaces the legacy
+    // DirectiveTracker (deleted) as the single source of truth for
+    // outstanding tasks; deadlines + R1/R2/R3 escalation are driven by
+    // DeadlockGuard.
+    private volatile com.github.claudecodegui.session.pair.plan.PlanStateMachine planStateMachine;
+    private volatile com.github.claudecodegui.session.pair.contract.ContractRegistry contractRegistry;
+    private volatile com.github.claudecodegui.session.pair.guard.DeadlockGuard deadlockGuard;
+    private volatile com.github.claudecodegui.session.pair.dispatcher.TransitionDispatcher transitionDispatcher;
+
+    // Stage C (2026-05-25): split SupervisorMonitor's side responsibilities.
+    // HealthWatcher owns supervisor health-state transitions (DEGRADED /
+    // UNHEALTHY → rotation). BudgetWatcher is a facade over PairBudgetTracker
+    // for uniform watcher access. RotationWatcher consolidates rotation
+    // request entry points across the distributed trigger sources.
+    private volatile com.github.claudecodegui.session.pair.watcher.HealthWatcher healthWatcher;
+    private volatile com.github.claudecodegui.session.pair.watcher.BudgetWatcher budgetWatcher;
+    private volatile com.github.claudecodegui.session.pair.watcher.RotationWatcher rotationWatcher;
 
     public PairSession(
             String pairId,
@@ -198,18 +219,36 @@ public class PairSession {
     public boolean isDisposed() { return disposed; }
     public void markDisposed() {
         this.disposed = true;
-        // Protocol v2: dispose trackers eagerly so their scheduler threads exit
-        // and pending directive timeouts don't fire after the pair is gone.
-        DirectiveTracker dt = this.directiveTracker;
-        if (dt != null) {
-            try { dt.dispose(); } catch (Exception ignored) { /* best effort */ }
+        // Contract State Machine v3 (2026-05-25): DirectiveTracker removed —
+        // ContractRegistry below owns all directive timing now.
+        // Contract State Machine v3 (2026-05-25): dispose order matters —
+        // dispatcher first (removes its plan listener), then guard (stops
+        // scheduler), then registry (cancels deadline timers), then plan SM
+        // (clears listeners). Each is null-safe.
+        com.github.claudecodegui.session.pair.dispatcher.TransitionDispatcher td = this.transitionDispatcher;
+        if (td != null) {
+            try { td.stop(); } catch (Exception ignored) { }
+        }
+        com.github.claudecodegui.session.pair.guard.DeadlockGuard dg = this.deadlockGuard;
+        if (dg != null) {
+            try { dg.stop(); } catch (Exception ignored) { }
+        }
+        com.github.claudecodegui.session.pair.contract.ContractRegistry cr = this.contractRegistry;
+        if (cr != null) {
+            try { cr.dispose(); } catch (Exception ignored) { }
+        }
+        com.github.claudecodegui.session.pair.plan.PlanStateMachine sm = this.planStateMachine;
+        if (sm != null) {
+            try { sm.stop(); } catch (Exception ignored) { }
+        }
+        // Contract State Machine v3 (2026-05-25): stop pusher's own scheduler.
+        PairStatusPusher sp = this.statusPusher;
+        if (sp != null) {
+            try { sp.stopPeriodicPush(); } catch (Exception ignored) { }
         }
     }
 
     // ---- Protocol v2 (2026-05-24): trackers + pause ----
-
-    public DirectiveTracker getDirectiveTracker() { return directiveTracker; }
-    public void setDirectiveTracker(DirectiveTracker tracker) { this.directiveTracker = tracker; }
 
     public PairBudgetTracker getBudgetTracker() { return budgetTracker; }
     public void setBudgetTracker(PairBudgetTracker tracker) { this.budgetTracker = tracker; }
@@ -290,6 +329,57 @@ public class PairSession {
     public com.github.claudecodegui.session.ClaudeSession getClaudeSession() { return claudeSession; }
     public void setClaudeSession(com.github.claudecodegui.session.ClaudeSession session) {
         this.claudeSession = session;
+    }
+
+    // ---- Contract State Machine v3 (2026-05-25) accessors ----
+
+    public com.github.claudecodegui.session.pair.plan.PlanStateMachine getPlanStateMachine() {
+        return planStateMachine;
+    }
+    public void setPlanStateMachine(com.github.claudecodegui.session.pair.plan.PlanStateMachine sm) {
+        this.planStateMachine = sm;
+    }
+
+    public com.github.claudecodegui.session.pair.contract.ContractRegistry getContractRegistry() {
+        return contractRegistry;
+    }
+    public void setContractRegistry(com.github.claudecodegui.session.pair.contract.ContractRegistry r) {
+        this.contractRegistry = r;
+    }
+
+    public com.github.claudecodegui.session.pair.guard.DeadlockGuard getDeadlockGuard() {
+        return deadlockGuard;
+    }
+    public void setDeadlockGuard(com.github.claudecodegui.session.pair.guard.DeadlockGuard g) {
+        this.deadlockGuard = g;
+    }
+
+    public com.github.claudecodegui.session.pair.dispatcher.TransitionDispatcher getTransitionDispatcher() {
+        return transitionDispatcher;
+    }
+    public void setTransitionDispatcher(com.github.claudecodegui.session.pair.dispatcher.TransitionDispatcher d) {
+        this.transitionDispatcher = d;
+    }
+
+    public com.github.claudecodegui.session.pair.watcher.HealthWatcher getHealthWatcher() {
+        return healthWatcher;
+    }
+    public void setHealthWatcher(com.github.claudecodegui.session.pair.watcher.HealthWatcher w) {
+        this.healthWatcher = w;
+    }
+
+    public com.github.claudecodegui.session.pair.watcher.BudgetWatcher getBudgetWatcher() {
+        return budgetWatcher;
+    }
+    public void setBudgetWatcher(com.github.claudecodegui.session.pair.watcher.BudgetWatcher w) {
+        this.budgetWatcher = w;
+    }
+
+    public com.github.claudecodegui.session.pair.watcher.RotationWatcher getRotationWatcher() {
+        return rotationWatcher;
+    }
+    public void setRotationWatcher(com.github.claudecodegui.session.pair.watcher.RotationWatcher w) {
+        this.rotationWatcher = w;
     }
 
     /**

@@ -2,6 +2,7 @@ package com.github.claudecodegui.session.pair.l2;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.annotations.SerializedName;
 
@@ -68,6 +69,22 @@ public class L2State {
      * meaningful state is always pair-scoped in the current model.
      */
     public MainAIState mainAI;
+
+    /**
+     * Contract State Machine v3 (2026-05-25): plan snapshot. Null when the
+     * pair has no plan yet (state == INIT). Persisted shape — bidirectional
+     * conversion to/from the runtime {@code Plan} POJO lives in the plan
+     * package.
+     */
+    public PersistedPlan plan;
+
+    /**
+     * Contract State Machine v3 (2026-05-25): open contracts at the moment
+     * of last write. Closed contracts are not persisted — they only live in
+     * ContractRegistry's in-memory rolling history. On IDE restart,
+     * ContractRegistry.hydrateFromL2 reads this list and re-arms timers.
+     */
+    public List<PersistedContract> openContracts = new ArrayList<>();
 
     public static L2State initial(String pairId) {
         L2State s = new L2State();
@@ -147,7 +164,20 @@ public class L2State {
         public long ts;
         public String action;
         public String reason;
-        public JsonObject payload;
+        /**
+         * Bug fix 2026-05-26: typed as {@link JsonElement} (not {@code JsonObject})
+         * so the field round-trips through Gson when the serialized value is
+         * JSON {@code null}. Combined with {@code GSON.serializeNulls()}, a
+         * Java-null {@code payload} writes as {@code "payload": null}; reading
+         * it back into a {@code JsonObject}-typed field threw
+         * {@code Expected a JsonObject but was JsonNull at $.recentDecisions[N].payload}
+         * on every L2 deep-copy, dropping the L2 update silently. Widening to
+         * {@code JsonElement} (which is the parent of both {@code JsonObject}
+         * and {@code JsonNull}) lets Gson deserialize null cleanly; downstream
+         * consumers ({@code PairStatusSnapshot.decisionEntryToJson}) treat
+         * non-null values uniformly via {@code JsonElement}.
+         */
+        public JsonElement payload;
         public String result;
         public String confidence = "high";
         // Protocol v2 (2026-05-24): autonomy-mode fields. All nullable so legacy
@@ -260,5 +290,71 @@ public class L2State {
             this.ts = ts;
             this.text = text;
         }
+    }
+
+    // ─── Contract State Machine v3 (2026-05-25) ──────────────────────────
+    //
+    // Persisted shapes for Plan / PlanStep / Contract / ContractEvent. The
+    // runtime classes (Plan, PlanStep, Contract, ContractEvent in the plan/
+    // and contract/ packages) carry behavior; these mirror only the fields
+    // we need to survive IDE restart. Strings are used for enum-shaped
+    // fields so adding new enum values doesn't break old serializations.
+    //
+    // Conversion between runtime and persisted forms is done in Stage B.
+
+    public static class PersistedPlan {
+        public String id;
+        /** INIT|ACTIVE|WAITING|DONE|ABORTED */
+        public String state;
+        /** EXECUTING|PENDING_DISCHARGE|PENDING_DECISION (only valid when state==ACTIVE) */
+        public String subState;
+        public int currentStepIndex;
+        public long createdAt;
+        public long lastTransitionAt;
+        public List<PersistedPlanStep> steps = new ArrayList<>();
+        public Map<String, Object> metadata = new LinkedHashMap<>();
+    }
+
+    public static class PersistedPlanStep {
+        public String id;
+        public int index;
+        public String title;
+        /** SUPERVISOR|MAIN_AI */
+        public String owner;
+        /** TODO|IN_PROGRESS|DONE|BLOCKED|SKIPPED */
+        public String status;
+        public List<String> contractIds = new ArrayList<>();
+        public long createdAt;
+        public long completedAt;
+        public int attempts;
+        public String lastError;
+        public List<String> filesChanged = new ArrayList<>();
+    }
+
+    public static class PersistedContract {
+        public String id;
+        public String parentStepId;
+        /** TASK_ASSIGNMENT|DECISION_REQUEST|SYSTEM_NUDGE|APPROVAL_REQUEST|STATE_REPORT_REQUEST */
+        public String type;
+        /** MAIN_AI|SUPERVISOR */
+        public String assignedTo;
+        /** OPEN|RECEIVED|DISCHARGED|EXPIRED_RETRIED|EXPIRED_ESCALATED|CANCELLED */
+        public String status;
+        public long issuedAt;
+        public long deadlineMs;
+        public long lastActivityAt;
+        public String payloadJson;
+        public int retryCount;
+        public int maxRetries;
+        public String retryOf;
+        public List<PersistedContractEvent> history = new ArrayList<>();
+    }
+
+    public static class PersistedContractEvent {
+        public long ts;
+        /** ISSUED|RECEIVED|RETRIED|DISCHARGED|ESCALATED|CANCELLED */
+        public String type;
+        public String evidence;
+        public String note;
     }
 }

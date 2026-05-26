@@ -145,14 +145,6 @@ export function useGlobalCallbacks({
       }
     };
 
-    // Initial focus — but only if no other input/editable element is focused (B-013)
-    const active = document.activeElement;
-    const isOtherInputFocused = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement ||
-      (active instanceof HTMLElement && active.isContentEditable && active !== editableRef.current);
-    if (!isOtherInputFocused) {
-      focusInput();
-    }
-
     // Cleanup function
     return () => {
       delete window.handleFilePathFromJava;
@@ -166,8 +158,29 @@ export function useGlobalCallbacks({
     setHasContent,
     onInput,
     closeAllCompletions,
-    focusInput,
   ]);
+
+  // Initial focus is intentionally in its own mount-only effect.
+  //
+  // Previously this lived inside the `handleFilePathFromJava` registration
+  // effect, which re-ran on every dep change (closeAllCompletions in
+  // particular changes whenever completion state shifts). The B-013 guard
+  // only suppresses re-focus when another input/editable is actively
+  // focused — if the user clicked into the supervisor pane and then clicked
+  // a non-input element (e.g. a button, the message list, a code block),
+  // re-running this would steal focus back to main AI and silently flip
+  // the `chatInputDropRouter`'s last-focused id, sending subsequent IDE
+  // drops to the wrong pane. Confining the focus call to mount means a
+  // user click on supervisor stays sticky for the router.
+  useEffect(() => {
+    const active = document.activeElement;
+    const isOtherInputFocused = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement ||
+      (active instanceof HTMLElement && active.isContentEditable && active !== editableRef.current);
+    if (!isOtherInputFocused) {
+      focusInput();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional mount-only
+  }, []);
 
   // Register global method: insert code snippet at cursor position
   useEffect(() => {

@@ -4,11 +4,20 @@ import type {
   SelectedSupervisor,
   SupervisorAgent,
 } from '../../types/supervisorAgent';
-import type { ModelInfo, ReasoningEffort } from '../ChatInputBox/types';
+import type {
+  DropdownPosition,
+  FileItem,
+  ModelInfo,
+  ReasoningEffort,
+  TriggerQuery,
+} from '../ChatInputBox/types';
 import { apply1MContextSuffix, strip1MContextSuffix } from '../ChatInputBox/types';
 import { ModelSelect } from '../ChatInputBox/selectors/ModelSelect';
 import { ReasoningSelect } from '../ChatInputBox/selectors/ReasoningSelect';
 import { TokenIndicator } from '../ChatInputBox/TokenIndicator';
+import { useCompletionDropdown } from '../ChatInputBox/hooks';
+import { fileReferenceProvider, fileToDropdownItem } from '../ChatInputBox/providers';
+import { CompletionDropdown } from '../ChatInputBox/Dropdown';
 import { SUPERVISOR_MODELS } from '../settings/SupervisorSection/templates';
 import SupervisorAgentSelect from './SupervisorAgentSelect';
 import { usePairContext } from './PairContext';
@@ -63,6 +72,32 @@ function extractAtPathAttachments(text: string): Array<{ path: string }> {
   return out;
 }
 
+/**
+ * Detect an `@` file-reference trigger in a plain textarea. Mirrors the main
+ * AI's contenteditable trigger detection (see `detectAtTrigger` in
+ * `useTriggerDetection.ts`), minus the rendered-tag check: the supervisor
+ * textarea has no file-tag DOM, just raw text.
+ *
+ * Walk backwards from the caret; abort on whitespace; the first `@` we hit is
+ * the anchor and everything between it and the caret is the search query.
+ */
+function detectAtTriggerInTextarea(
+  text: string,
+  cursorPosition: number
+): TriggerQuery | null {
+  let start = cursorPosition - 1;
+  while (start >= 0) {
+    const char = text[start];
+    if (/\s/.test(char)) return null;
+    if (char === '@') {
+      const query = text.slice(start + 1, cursorPosition);
+      return { trigger: '@', query, start, end: cursorPosition };
+    }
+    start--;
+  }
+  return null;
+}
+
 interface SupervisorChatInputProps {
   /** The active supervisor this input addresses. */
   supervisor: SelectedSupervisor;
@@ -98,6 +133,75 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
   const [draft, setDraft] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  /**
+   * `@` file-reference completion — same provider + dropdown UI as the main
+   * AI, but driven by a plain-text trigger detector since the supervisor
+   * composer is a `<textarea>` (no contenteditable / no rendered file tags).
+   *
+   * On select we splice the chosen path into the draft at the trigger anchor
+   * and reposition the caret behind it. The path is still plain text — the
+   * existing {@link extractAtPathAttachments} at submit time will lift it into
+   * the structured `attachments[]` payload that Java translates to remote.
+   */
+  const fileCompletion = useCompletionDropdown<FileItem>({
+    trigger: '@',
+    provider: fileReferenceProvider,
+    toDropdownItem: fileToDropdownItem,
+    onSelect: (file, query) => {
+      if (!query) return;
+      const path = file.absolutePath || file.path;
+      // Trailing space on files lets the user keep typing after the insert;
+      // skip it for directories so they can chain another path segment.
+      const replacement = file.type === 'directory' ? `@${path}` : `@${path} `;
+      const cursorPos = query.start + replacement.length;
+
+      setDraft((prev) => prev.slice(0, query.start) + replacement + prev.slice(query.end));
+
+      requestAnimationFrame(() => {
+        const ta = textareaRef.current;
+        if (!ta) return;
+        ta.focus();
+        ta.setSelectionRange(cursorPos, cursorPos);
+      });
+    },
+  });
+
+  /**
+   * Re-evaluate the `@` trigger against the current textarea state and either
+   * open/update or close the completion dropdown. Reads the value/caret
+   * directly off the DOM so it works after both controlled state writes and
+   * native cursor moves (click, arrow keys) without waiting for React to
+   * commit.
+   */
+  const detectFileTrigger = useCallback(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const text = ta.value;
+    const cursorPos = ta.selectionStart;
+    const trigger = detectAtTriggerInTextarea(text, cursorPos);
+
+    if (trigger) {
+      // Anchor the dropdown to the textarea's top edge — the Dropdown
+      // component aligns its bottom to `position.top`, so this floats the
+      // menu just above the composer. Cheaper and more reliable than
+      // mirror-div caret measurement, and the menu still tracks the input
+      // the user is typing into.
+      const rect = ta.getBoundingClientRect();
+      const position: DropdownPosition = {
+        top: rect.top,
+        left: rect.left,
+        width: rect.width,
+        height: 0,
+      };
+      if (!fileCompletion.isOpen) {
+        fileCompletion.open(position, trigger);
+      }
+      fileCompletion.updateQuery(trigger);
+    } else if (fileCompletion.isOpen) {
+      fileCompletion.close();
+    }
+  }, [fileCompletion]);
+
   const handleSubmit = useCallback(() => {
     const text = draft.trim();
     if (!text) return;
@@ -106,17 +210,26 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
     const attachments = extractAtPathAttachments(text);
     sendUserInputToSupervisor(text, attachments);
     setDraft('');
+    fileCompletion.close();
     requestAnimationFrame(() => textareaRef.current?.focus());
-  }, [draft, sendUserInputToSupervisor]);
+  }, [draft, sendUserInputToSupervisor, fileCompletion]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+      // Let the dropdown intercept navigation/select keys (↑↓ Enter Tab Esc)
+      // before Enter triggers submit. `handleKeyDown` returns true when it
+      // consumed the event and has already called `preventDefault` on it.
+      if (fileCompletion.isOpen) {
+        const handled = fileCompletion.handleKeyDown(e.nativeEvent);
+        if (handled) return;
+      }
+
       if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
         e.preventDefault();
         handleSubmit();
       }
     },
-    [handleSubmit]
+    [handleSubmit, fileCompletion]
   );
 
   const handleDragOver = useCallback((e: React.DragEvent<HTMLElement>) => {
@@ -302,8 +415,19 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
           ref={textareaRef}
           className={styles.supervisorTextarea}
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            // Detect synchronously off the DOM — `setDraft` is async but the
+            // browser has already applied the new value/caret to the textarea,
+            // so the trigger detector sees the up-to-date state.
+            detectFileTrigger();
+          }}
           onKeyDown={handleKeyDown}
+          // Cursor-only moves (click, arrow keys) don't fire onChange, so
+          // re-detect on these too. Without this, clicking back into an
+          // existing `@path` wouldn't reopen the dropdown for editing.
+          onKeyUp={detectFileTrigger}
+          onClick={detectFileTrigger}
           onDragOver={handleDragOver}
           onDrop={handleDrop}
           onFocus={() => markChatInputFocused('supervisor')}
@@ -348,6 +472,21 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
           </button>
         </div>
       </div>
+
+      {/* @ file-reference dropdown — shares the main AI's CompletionDropdown
+          UI and `fileReferenceProvider` so the list, icons, keyboard model
+          and Java backend wiring all stay consistent across both composers. */}
+      <CompletionDropdown
+        isVisible={fileCompletion.isOpen}
+        position={fileCompletion.position}
+        items={fileCompletion.items}
+        selectedIndex={fileCompletion.activeIndex}
+        loading={fileCompletion.loading}
+        emptyText={t('chat.noMatchingFiles')}
+        onClose={fileCompletion.close}
+        onSelect={(_, index) => fileCompletion.selectIndex(index)}
+        onMouseEnter={fileCompletion.handleMouseEnter}
+      />
     </div>
   );
 }

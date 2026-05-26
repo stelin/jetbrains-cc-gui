@@ -29,7 +29,13 @@ public class PairCoordinator {
 
     private static final Logger LOG = Logger.getInstance(PairCoordinator.class);
 
-    public enum State { IDLE, MAIN_TURN, TICK, ROTATING }
+    /**
+     * Contract State Machine v3 (2026-05-25): {@code PLAN_TRANSITIONING} added
+     * for observability — surfaces "PlanStateMachine is mid-transition" in
+     * status snapshots. It does NOT take the write lock (PlanStateMachine has
+     * its own internal synchronized methods); it's a display-only state.
+     */
+    public enum State { IDLE, MAIN_TURN, TICK, ROTATING, PLAN_TRANSITIONING }
 
     /** Default 60s upper bound on rotation waiting for readers. */
     public static final long DEFAULT_ROTATION_WAIT_SEC = 60;

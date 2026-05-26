@@ -110,8 +110,14 @@ public class SessionLifecycleManager {
             host.clearPendingPermissionRequests();
             host.clearPermissionDecisionMemory();
 
+            // Carry the originating tab's windowId so Pair lookup on the new
+            // session is scoped to pairs owned by this tab (cross-tab event
+            // leakage fix, 2026-05-25). HandlerContext is constructed before
+            // the first session, so getWindowId() is always available here.
+            HandlerContext ctx = host.getHandlerContext();
+            String tabWindowId = ctx != null ? ctx.getWindowId() : null;
             ClaudeSession newSession = new ClaudeSession(
-                    host.getProject(), host.getClaudeSDKBridge(), host.getCodexSDKBridge());
+                    host.getProject(), host.getClaudeSDKBridge(), host.getCodexSDKBridge(), tabWindowId);
             newSession.setPermissionMode(previousPermissionMode);
             newSession.setProvider(previousProvider);
             newSession.setModel(previousModel);
@@ -194,8 +200,11 @@ public class SessionLifecycleManager {
                         + oldSession.getRuntimeSessionEpoch());
             }
 
+            // Same windowId pass-through as createNewSession (see 2026-05-25 fix).
+            HandlerContext ctx = host.getHandlerContext();
+            String tabWindowId = ctx != null ? ctx.getWindowId() : null;
             ClaudeSession newSession = new ClaudeSession(
-                    host.getProject(), host.getClaudeSDKBridge(), host.getCodexSDKBridge());
+                    host.getProject(), host.getClaudeSDKBridge(), host.getCodexSDKBridge(), tabWindowId);
             newSession.setPermissionMode(previousPermissionMode);
             newSession.setProvider(previousProvider);
             newSession.setModel(previousModel);

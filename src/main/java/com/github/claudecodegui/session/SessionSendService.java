@@ -281,9 +281,12 @@ public class SessionSendService {
         try {
             if (project == null) return currentAppend;
             String sessionId = state.getSessionId();
-            // Find attached pair: by main session id first, fall back to
-            // most-recently-started active pair (covers the "pair started
-            // before first response" window).
+            // Find attached pair: by main session id first, fall back to the
+            // most-recently-started pair OWNED BY THIS TAB (covers the
+            // "pair started before first response" window without crossing
+            // tab boundaries — see 2026-05-25 fix in
+            // ClaudeMessageHandler.findAttachedPair). If no windowId is
+            // available (legacy / test contexts), give up rather than guess.
             com.github.claudecodegui.session.pair.PairSessionManager mgr =
                     com.github.claudecodegui.session.pair.PairSessionManager.getInstance(project);
             com.github.claudecodegui.session.pair.PairSession pair = null;
@@ -291,7 +294,9 @@ public class SessionSendService {
                 pair = mgr.findByMainSession(sessionId);
             }
             if (pair == null) {
-                pair = mgr.getActivePairs().stream()
+                String windowId = state.getWindowId();
+                if (windowId == null) return currentAppend;
+                pair = mgr.getActivePairsOwnedBy(windowId).stream()
                         .filter(p -> !p.isDisposed())
                         .reduce((a, b) -> a.getStartedAt() > b.getStartedAt() ? a : b)
                         .orElse(null);

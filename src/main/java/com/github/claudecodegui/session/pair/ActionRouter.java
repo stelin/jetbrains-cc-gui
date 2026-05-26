@@ -1,18 +1,26 @@
 package com.github.claudecodegui.session.pair;
 
+import com.github.claudecodegui.session.pair.contract.Contract;
+import com.github.claudecodegui.session.pair.contract.ContractAssignee;
+import com.github.claudecodegui.session.pair.contract.ContractIssueRequest;
+import com.github.claudecodegui.session.pair.contract.ContractListener;
+import com.github.claudecodegui.session.pair.contract.ContractRegistry;
+import com.github.claudecodegui.session.pair.contract.ContractType;
+import com.github.claudecodegui.session.pair.plan.Plan;
+import com.github.claudecodegui.session.pair.plan.PlanStateMachine;
+import com.github.claudecodegui.session.pair.plan.PlanStep;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.project.Project;
 
 // Project is currently retained for forward-compat (notifications, etc.); see field comment.
 
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Translates Supervisor {@code ACTION} payloads into effects:
@@ -95,13 +103,6 @@ public class ActionRouter {
     private final ScheduledExecutorService scheduler;
     private volatile WebviewBridge webview = NoopWebviewBridge.INSTANCE;
 
-    /** Max number of received-ack retry attempts before falling through to the
-     *  slow applied-timeout (DirectiveTracker.DEFAULT_ACK_TIMEOUT_MS). */
-    private static final int MAX_RECEIVED_RETRIES = 3;
-    /** Per-directive retry counter. Entries are removed in markDirectiveAcked
-     *  (when status is "received") and on dispose. */
-    private final ConcurrentHashMap<String, AtomicInteger> retryCounters = new ConcurrentHashMap<>();
-
     /**
      * 2026-05-25: webview readiness gate. Flips to true the first time
      * {@link #markWebviewReady} fires (driven by the {@code pair_webview_ready}
@@ -116,6 +117,16 @@ public class ActionRouter {
     /** Cap so a permanently-unready webview can't bloat memory. */
     private static final int MAX_PENDING_INJECTS_BEFORE_READY = 64;
 
+    /**
+     * Plan A (2026-05-26 v3.2): consecutive {@code emit_action(wait)} rejections
+     * for the same "no open MAIN_AI contract" reason. Bumped each time
+     * {@link #handleWaitGuard} rejects; reset to 0 whenever any non-wait action
+     * makes it past the dispatch switch. Used by the rejection message builder
+     * to escalate the suggestion text — by the 3rd consecutive rejection the
+     * supervisor is told the Liveness Guard will hand off to system auto-dispatch.
+     */
+    private volatile int consecutiveWaitRejections = 0;
+
     public ActionRouter(Project project, PairSession pair) {
         this.project = project;
         this.pair = pair;
@@ -124,6 +135,102 @@ public class ActionRouter {
             t.setDaemon(true);
             return t;
         });
+    }
+
+    /**
+     * Contract State Machine v3 (2026-05-25): wire ContractRegistry events
+     * into the existing delivery channels. Call once after both
+     * {@code ActionRouter} and {@code ContractRegistry} are attached to the
+     * {@link PairSession}. Idempotent.
+     *
+     * <p>Routing rules:
+     * <ul>
+     *   <li>{@code assignedTo == MAIN_AI}: deliver via {@code webview.onInjectPromptV2}
+     *       using contract.id as the directiveId.</li>
+     *   <li>{@code assignedTo == SUPERVISOR}: deliver via
+     *       {@code SupervisorBridge.postEvent(payload, "system")} so the
+     *       message lands as a system-role input on the supervisor SDK.</li>
+     * </ul>
+     */
+    public void attachContractRegistryListener() {
+        ContractRegistry registry = pair.getContractRegistry();
+        if (registry == null) return;
+        registry.addListener(new ContractListener() {
+            @Override
+            public void onIssued(Contract c) {
+                deliverContract(c);
+            }
+            @Override
+            public void onRetried(Contract original, Contract newRetry) {
+                deliverContract(newRetry);
+            }
+        });
+    }
+
+    /**
+     * Route a contract to its assignee's delivery channel. Called on
+     * {@code onIssued} and {@code onRetried} so initial dispatches and
+     * framework-driven retries both flow through the same code path.
+     */
+    private void deliverContract(Contract c) {
+        if (c == null || c.payloadJson == null) return;
+        if (pair.isDisposed()) return;
+        try {
+            JsonObject payload = JsonParser.parseString(c.payloadJson).getAsJsonObject();
+            if (c.assignedTo == ContractAssignee.MAIN_AI) {
+                deliverToMainAi(c, payload);
+            } else if (c.assignedTo == ContractAssignee.SUPERVISOR) {
+                deliverToSupervisor(c, payload);
+            }
+        } catch (Exception e) {
+            LOG.warn("[ActionRouter] deliverContract " + c.id + " failed: " + e.getMessage());
+        }
+    }
+
+    private void deliverToMainAi(Contract c, JsonObject payload) {
+        String prompt = resolvePromptFromPayload(payload);
+        if (prompt == null || prompt.isEmpty()) {
+            LOG.warn("[ActionRouter] deliverToMainAi empty prompt for contract " + c.id);
+            return;
+        }
+        // Retries get a "[系统提示]" prefix so the LLM sees what's going on.
+        if (c.retryCount > 0) {
+            prompt = buildRetryHint(c) + "\n\n" + prompt;
+        }
+        invokeInjectOnWebview(c.id, prompt);
+    }
+
+    private void deliverToSupervisor(Contract c, JsonObject payload) {
+        com.github.claudecodegui.bridge.SupervisorBridge bridge = pair.getSupervisorBridge();
+        if (bridge == null) {
+            LOG.warn("[ActionRouter] deliverToSupervisor: no SupervisorBridge for contract " + c.id);
+            return;
+        }
+        // DECISION_REQUEST and other supervisor-bound contracts go as system-role
+        // input so they don't pollute the conversation history as a user turn.
+        JsonObject event = new JsonObject();
+        event.addProperty("type", c.type == null ? "system_message" : c.type.name().toLowerCase());
+        event.addProperty("contractId", c.id);
+        event.addProperty("retryCount", c.retryCount);
+        event.add("payload", payload);
+        try {
+            bridge.postEvent(event, "system");
+            LOG.info("[ActionRouter] supervisor-bound contract delivered: " + c.id + " type=" + c.type);
+        } catch (Exception e) {
+            LOG.warn("[ActionRouter] supervisor delivery failed for " + c.id + ": " + e.getMessage());
+        }
+    }
+
+    private String buildRetryHint(Contract c) {
+        if (c.retryCount >= 2) {
+            return "[系统提示] contract " + c.id + " 已重推 " + (c.retryCount - 1)
+                    + " 次仍未 discharge。你的下一个 turn 必须以下三者之一结尾,"
+                    + "不允许纯文本对话:(a) 至少一个 tool_use;"
+                    + "(b) report_turn_completion;(c) ask_clarification 工具。立即处理。";
+        }
+        return "[系统提示] 这是 contract " + c.id + " 的第 " + c.retryCount + " 次重推。"
+                + "如果你已经完成,直接 report_turn_completion;"
+                + "如果你正在做,继续;如果你没开始,立即按原任务执行,不要再发文字解释。";
     }
 
     public void setWebviewBridge(WebviewBridge bridge) {
@@ -210,31 +317,74 @@ public class ActionRouter {
         // message, so the TokenIndicator updates mid-turn rather than only at
         // the closing [SUPERVISOR_ACTION].
 
-        // First, surface the natural-language + action card to the right pane.
-        webview.onActionEvent(actionWrapper);
-
         JsonObject action = actionWrapper.has("action") && actionWrapper.get("action").isJsonObject()
                 ? actionWrapper.getAsJsonObject("action") : null;
-        if (action == null) return;
+        if (action == null) {
+            // No structured action — render the wrapper as-is (parse error /
+            // narration-only paths) and bail; nothing flows through the
+            // contract pipeline so there's no "successful dispatch" claim.
+            webview.onActionEvent(actionWrapper);
+            return;
+        }
 
         String type = action.has("action") ? action.get("action").getAsString() : "wait";
         JsonObject payload = action.has("payload") && action.get("payload").isJsonObject()
                 ? action.getAsJsonObject("payload") : new JsonObject();
 
+        // Plan A (2026-05-26 v3.2): supervisor broke out of the wait loop by
+        // emitting *anything* other than `wait` — reset the consecutive counter.
+        // We don't gate on whether the action will succeed (empty inject_prompt
+        // gets rejected below); the signal we care about is "supervisor tried
+        // something different this turn".
+        if (!"wait".equals(type)) {
+            consecutiveWaitRejections = 0;
+        }
+
+        // Route C (2026-05-26): dispatch-type actions get their payload
+        // validated at the entry. Reject WITHOUT rendering the "已注入指令到
+        // 主 AI" card so the UI never shows a successful injection that did
+        // not happen. Replaces the late-stage check in handleInjectPrompt
+        // that fired after the card had already been pushed.
+        boolean isInjectType = "inject_prompt".equals(type) || "retry_with_hint".equals(type);
+        if (isInjectType) {
+            String prompt = resolvePromptFromPayload(payload);
+            if (prompt == null || prompt.isEmpty()) {
+                LOG.warn("[ActionRouter] " + type + " rejected at dispatch entry: empty payload (no inlinePrompt/prompt/spilledPath)");
+                sendActionRejectionToSupervisor(
+                        type + " rejected: payload 缺少 prompt 内容(inlinePrompt / prompt / spilledPath 都为空)。"
+                                + "只有 reason 字段是不够的 —— reason 只用于显示卡片,主 AI 看不到。",
+                        "本轮重新 emit_action(" + type + ", payload={inlinePrompt: '<给主 AI 的具体指令>', "
+                                + "objective: '...', expectedDeliverables: [...]})。"
+                                + "注意: save_plan 只是登记 plan 结构,不会自动派单 —— 派单必须靠 emit_action(inject_prompt) 带 inlinePrompt 字段。"
+                                + "如果是 ping/echo 类轻量任务, inlinePrompt 写出你要主 AI 回复什么即可。");
+                return;
+            }
+        }
+
+        // Route A (2026-05-26): for inject-type actions, defer the action-card
+        // render until AFTER ContractRegistry.issue() succeeds (see
+        // handleInjectPrompt). For everything else, render now — they don't
+        // go through the registry so there's no truth source to wait for.
+        if (!isInjectType) {
+            webview.onActionEvent(actionWrapper);
+        }
+
         // v3: a `decisions[]` array may ride along ANY action type. Process it
         // before the action switch so counters and webview cards are updated
-        // even if the action itself is a no-op (e.g. wait).
+        // even if the action itself is a no-op (e.g. wait). Decisions are
+        // self-contained records of supervisor mini-judgments; they're
+        // independent of whether dispatch succeeds, so render immediately.
         dispatchDecisions(payload);
 
         switch (type) {
             case "inject_prompt":
-                handleInjectPrompt(payload, /*delaySec*/ 0);
+                handleInjectPrompt(payload, /*delaySec*/ 0, actionWrapper);
                 break;
             case "retry_with_hint":
                 int wait = payload.has("wait_seconds") && !payload.get("wait_seconds").isJsonNull()
                         ? payload.get("wait_seconds").getAsInt() : 0;
                 pair.getProgressManager().incrementCounter("auto_recover_count");
-                handleInjectPrompt(payload, Math.max(0, wait));
+                handleInjectPrompt(payload, Math.max(0, wait), actionWrapper);
                 break;
             case "approve_and_continue":
                 if (payload.has("mark_step_complete") && !payload.get("mark_step_complete").isJsonNull()) {
@@ -309,11 +459,296 @@ public class ActionRouter {
                 if (payload.has("proposal")) wrapped.add("proposal", payload.get("proposal"));
                 webview.onEscalate(wrapped);
                 break;
+            case "complete_plan":
+                // v3.1 (2026-05-26): supervisor explicitly signals "plan done".
+                // Transitions PlanState → DONE; the wired listener in
+                // PairSessionManager writes COMPLETION_REPORT.md.
+                handleCompletePlan(payload);
+                break;
+            case "wait_for_contract":
+                // v3.1 (2026-05-26): typed wait — supervisor declares it's
+                // waiting for a specific OPEN contract to come back. Rejected
+                // (Layer 2) if the named contract doesn't exist in OPEN state.
+                handleWaitForContract(payload);
+                break;
             case "wait":
+                // v3.1 (2026-05-26): generic wait now goes through a state-
+                // machine guard. Rejected when the plan is ACTIVE / PENDING_DECISION
+                // with no open MAIN_AI contract — that combo means "supervisor
+                // owes a dispatch decision but emitted wait instead" (the
+                // narrate-says-派单-but-action-says-wait hallucination class).
+                handleWaitGuard(payload, actionWrapper);
+                break;
             default:
                 // intentionally no-op
                 break;
         }
+    }
+
+    /**
+     * v3.1 (2026-05-26): handle {@code emit_action(complete_plan)}. Transitions
+     * the plan to DONE; {@code PairSessionManager.wireCompletionReportListener}
+     * fires the report write off the resulting state-change event.
+     */
+    private void handleCompletePlan(JsonObject payload) {
+        PlanStateMachine sm = pair.getPlanStateMachine();
+        if (sm == null) {
+            LOG.warn("[ActionRouter] complete_plan: no PlanStateMachine for pair " + pair.getPairId());
+            return;
+        }
+        Plan current = sm.getCurrent();
+        if (current == null) {
+            LOG.warn("[ActionRouter] complete_plan: no current plan to complete for pair " + pair.getPairId());
+            sendActionRejectionToSupervisor(
+                    "complete_plan rejected: no active plan exists.",
+                    "If you intended to acknowledge completion without a plan, just emit_action(wait_for_user_input) or emit_action(escalate_to_human).");
+            return;
+        }
+        if (current.isTerminal()) {
+            LOG.info("[ActionRouter] complete_plan ignored: plan " + current.id + " already terminal=" + current.state);
+            return;
+        }
+        String summary = payload != null && payload.has("summary") && !payload.get("summary").isJsonNull()
+                ? payload.get("summary").getAsString() : null;
+        sm.onPlanCompleted(summary);
+        LOG.info("[ActionRouter] " + pair.getPairId() + " complete_plan → plan " + current.id + " transitioned to DONE");
+    }
+
+    /**
+     * v3.1 (2026-05-26): handle {@code emit_action(wait_for_contract, {contractId})}.
+     * Validates that the named contract is OPEN; if not, rejects so the
+     * supervisor must pick a real outstanding contract or use a different action.
+     */
+    private void handleWaitForContract(JsonObject payload) {
+        String contractId = payload != null && payload.has("contractId") && !payload.get("contractId").isJsonNull()
+                ? payload.get("contractId").getAsString() : null;
+        if (contractId == null || contractId.isEmpty()) {
+            sendActionRejectionToSupervisor(
+                    "wait_for_contract rejected: missing payload.contractId.",
+                    "Specify the contract id you are waiting for, e.g. {\"contractId\":\"ctr_step1_xxx\"}, or emit_action(complete_plan) if all done.");
+            return;
+        }
+        ContractRegistry registry = pair.getContractRegistry();
+        Contract c = registry == null ? null : registry.findById(contractId);
+        if (c == null) {
+            sendActionRejectionToSupervisor(
+                    "wait_for_contract rejected: contract " + contractId + " not found.",
+                    "Use emit_action(inject_prompt) to issue a real contract first, or emit_action(complete_plan) if the plan is finished.");
+            return;
+        }
+        if (!c.isOpen()) {
+            sendActionRejectionToSupervisor(
+                    "wait_for_contract rejected: contract " + contractId + " is not OPEN (status=" + c.status + ").",
+                    "That contract already terminated. Either decide the next step now (emit_action inject_prompt / complete_plan), or wait on a different OPEN contract.");
+            return;
+        }
+        LOG.info("[ActionRouter] " + pair.getPairId() + " wait_for_contract acknowledged contractId=" + contractId);
+    }
+
+    /**
+     * v3.1 (2026-05-26): Layer 2 guard for the generic {@code emit_action(wait)}.
+     * Rejects when the supervisor "narrated dispatch but actually waited" —
+     * detected as: plan ACTIVE (any sub-state) and **no open MAIN_AI contracts**.
+     * In that state the next correct action is inject_prompt / complete_plan /
+     * escalate_to_human — wait is by definition wrong because there's literally
+     * nothing main-AI-side to wait for.
+     *
+     * <p>2026-05-26 fix: this used to gate only on PENDING_DECISION sub-state,
+     * but a transient PENDING_DISCHARGE-with-Open=0 happens whenever discharge
+     * races ahead of the next onTurnEnded recomputation (and even AFTER the
+     * markDirectiveAcked auto-onTurnEnded fix, the supervisor's wake might
+     * latch the stale sub-state). Reject regardless of sub-state — the
+     * authoritative signal is "no open MAIN_AI contract".
+     */
+    private void handleWaitGuard(JsonObject payload, JsonObject actionWrapper) {
+        PlanStateMachine sm = pair.getPlanStateMachine();
+        if (sm == null) return;
+        Plan current = sm.getCurrent();
+        if (current == null) return; // no plan → no rule to enforce
+        if (current.state != Plan.PlanState.ACTIVE) return; // WAITING/DONE/ABORTED wait is fine
+
+        ContractRegistry registry = pair.getContractRegistry();
+        boolean hasOpenMainAi = false;
+        if (registry != null) {
+            for (Contract c : registry.getOpenContracts()) {
+                if (c.assignedTo == ContractAssignee.MAIN_AI) {
+                    hasOpenMainAi = true;
+                    break;
+                }
+            }
+        }
+        if (hasOpenMainAi) {
+            // Legitimate wait — supervisor is actually waiting for an in-flight
+            // contract. Treat this like any non-wait action: reset the consecutive
+            // counter so a later wait→reject cycle starts fresh.
+            consecutiveWaitRejections = 0;
+            return;
+        }
+
+        // Hallucination caught — narration may claim dispatch but no contract was issued.
+        consecutiveWaitRejections++;
+        int attempt = consecutiveWaitRejections;
+
+        String narrate = "";
+        try {
+            if (actionWrapper != null && actionWrapper.has("naturalText") && !actionWrapper.get("naturalText").isJsonNull()) {
+                narrate = actionWrapper.get("naturalText").getAsString();
+            }
+        } catch (Exception ignored) { /* best-effort */ }
+        boolean narrateClaimsDispatch = narrate.contains("派单") || narrate.contains("inject")
+                || narrate.contains("下发") || narrate.contains("已发送") || narrate.contains("已派")
+                || narrate.contains("已注入");
+
+        String stateSnapshot = buildWaitRejectionStateSnapshot(current, registry);
+        String narrateHint = narrateClaimsDispatch
+                ? "\n【narration 检测】本轮 narration 含'派单/下发/inject/已注入'字样,但 emit_action 是 wait —— "
+                + "这就是上一节 v3.2 硬规则 #3 禁止的不一致。narration 不会派单,只有 emit_action(inject_prompt) 派单。"
+                : "";
+        String escalationNotice = buildEscalationNotice(attempt);
+
+        sendActionRejectionToSupervisor(
+                "wait rejected: plan is ACTIVE (sub=" + current.subState + ") with no open MAIN_AI contract — "
+                        + "literally nothing for main AI to do, so wait is invalid."
+                        + narrateHint
+                        + "\n" + stateSnapshot
+                        + escalationNotice,
+                "本轮必须三选一: (a) emit_action(inject_prompt, {inlinePrompt:'<具体指令>', objective:'...'}) 派单给主 AI; "
+                        + "(b) emit_action(complete_plan, {summary:'...'}) 收尾; "
+                        + "(c) emit_action(escalate_to_human, ...) 升级。"
+                        + "禁止再 emit wait —— 主 AI 当前没有任何 OPEN 合同,等不到任何回执。");
+    }
+
+    /**
+     * Plan A (2026-05-26 v3.2): build a "what is actually true right now"
+     * snapshot the supervisor must see to break out of its stale mental model
+     * ("I dispatched ping #N, contract still OPEN" when in fact no contract
+     * exists). Includes plan state + open contract list + a hint about the most
+     * recently closed MAIN_AI contract so the supervisor can see what it just
+     * lost track of.
+     */
+    private String buildWaitRejectionStateSnapshot(Plan plan, ContractRegistry registry) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("【真实状态快照(以这份为准,不要再相信你自己的记忆)】\n");
+        sb.append("- Plan: ").append(plan.id)
+                .append(" state=").append(plan.state)
+                .append("/").append(plan.subState).append("\n");
+
+        PlanStep cur = plan.getCurrentStep();
+        if (cur != null) {
+            sb.append("- 当前 step: #").append(cur.index + 1)
+                    .append("/").append(plan.steps.size())
+                    .append(" \"").append(cur.title).append("\"")
+                    .append(" status=").append(cur.status).append("\n");
+        } else {
+            sb.append("- 当前 step: (无)\n");
+        }
+
+        if (registry == null) {
+            sb.append("- ContractRegistry: 未挂载\n");
+            return sb.toString();
+        }
+
+        // Open contracts (split by assignee for clarity)
+        int openMainAi = 0;
+        int openSupervisor = 0;
+        StringBuilder openIds = new StringBuilder();
+        for (Contract c : registry.getOpenContracts()) {
+            if (c.assignedTo == ContractAssignee.MAIN_AI) openMainAi++;
+            else if (c.assignedTo == ContractAssignee.SUPERVISOR) openSupervisor++;
+            if (openIds.length() > 0) openIds.append(", ");
+            openIds.append(c.id).append("(").append(c.type).append("/").append(c.assignedTo).append(")");
+        }
+        sb.append("- OPEN 合同: 主 AI=").append(openMainAi)
+                .append(" 监督者=").append(openSupervisor);
+        if (openIds.length() > 0) {
+            sb.append(" → [").append(openIds).append("]");
+        }
+        sb.append("\n");
+
+        if (openMainAi == 0) {
+            sb.append("  ⚠️ 主 AI 没有任何 OPEN 合同 —— 你以为存在的'ping #N contract' / 'step contract' 已不存在");
+            sb.append("(要么从未通过 emit_action(inject_prompt) 创建,要么已 DISCHARGE)。\n");
+        }
+
+        // Most-recently-closed MAIN_AI contract to help supervisor anchor
+        Contract lastClosedMainAi = findMostRecentClosedMainAiContract(registry);
+        if (lastClosedMainAi != null) {
+            sb.append("- 最近一次主 AI 合同 (已 ")
+                    .append(lastClosedMainAi.status)
+                    .append("): ").append(lastClosedMainAi.id);
+            if (lastClosedMainAi.parentStepId != null) {
+                sb.append(" step=").append(lastClosedMainAi.parentStepId);
+            }
+            sb.append("\n");
+        }
+
+        return sb.toString();
+    }
+
+    private Contract findMostRecentClosedMainAiContract(ContractRegistry registry) {
+        Contract latest = null;
+        try {
+            for (Contract c : registry.getClosedContractsCopy()) {
+                if (c.assignedTo != ContractAssignee.MAIN_AI) continue;
+                if (latest == null || c.lastActivityAt > latest.lastActivityAt) {
+                    latest = c;
+                }
+            }
+        } catch (Exception ignored) { /* best-effort */ }
+        return latest;
+    }
+
+    /**
+     * Plan A (2026-05-26 v3.2): escalating notice text appended to the
+     * rejection. By the 3rd consecutive rejection the supervisor is told the
+     * Liveness Guard will take over with system auto-dispatch.
+     */
+    private String buildEscalationNotice(int attempt) {
+        if (attempt <= 1) {
+            return "";
+        }
+        if (attempt == 2) {
+            return "\n【⚠️ 连续第 " + attempt + " 次 wait 被拒】"
+                    + "再 wait 一轮,Pair Liveness 守护会判定为持续死锁,自动接管派单。";
+        }
+        return "\n【🚨 连续第 " + attempt + " 次 wait 被拒】"
+                + "Pair Liveness 守护已在准备 system_takeover —— 即将绕过你直接给主 AI 派恢复任务。"
+                + "本轮如果还不 emit_action(inject_prompt / complete_plan),你的派单决策权将被系统暂时接管。";
+    }
+
+    /**
+     * v3.1 (2026-05-26): send a system-role event back to the supervisor to
+     * surface a rejected action. Supervisor sees this on its next turn and
+     * is expected to re-emit a valid action.
+     */
+    private void sendActionRejectionToSupervisor(String reason, String suggestion) {
+        com.github.claudecodegui.bridge.SupervisorBridge bridge = pair.getSupervisorBridge();
+        if (bridge == null) {
+            LOG.warn("[ActionRouter] sendActionRejectionToSupervisor: no SupervisorBridge for pair " + pair.getPairId());
+            return;
+        }
+        JsonObject event = new JsonObject();
+        event.addProperty("type", "action_rejected");
+        event.addProperty("reason", reason);
+        if (suggestion != null) event.addProperty("suggestion", suggestion);
+        event.addProperty("ts", System.currentTimeMillis());
+        try {
+            bridge.postEvent(event, "system");
+            LOG.warn("[ActionRouter] " + pair.getPairId() + " action rejected → supervisor: " + reason);
+        } catch (Exception e) {
+            LOG.warn("[ActionRouter] sendActionRejectionToSupervisor postEvent failed: " + e.getMessage());
+        }
+        // Record a coordinator event so the operator sees the rejection in the strip.
+        try {
+            PairStatusPusher pusher = pair.getStatusPusher();
+            if (pusher != null) {
+                pusher.recordCoordinatorEvent(
+                        PairStatusSnapshot.CoordinatorEvent.Source.GUARD,
+                        "action_rejected",
+                        "Action rejected: " + reason,
+                        null);
+            }
+        } catch (Exception ignored) { /* best-effort */ }
     }
 
     /**
@@ -357,71 +792,62 @@ public class ActionRouter {
     }
 
     /**
-     * Protocol v2 (2026-05-24): called by {@link PairHandler} when the
-     * webview posts {@code pair_directive_ack}. Delegates to the pair's
-     * {@code DirectiveTracker} so its timeout is cancelled. Status is one of
-     * "received" | "applied" | "failed" — "received" only cancels the fast
-     * received-timeout; "applied"/"failed" remove the directive entirely.
+     * Contract State Machine v3 (2026-05-25): called by {@link PairHandler}
+     * when the webview posts {@code pair_directive_ack}. Delegates to the
+     * pair's {@link ContractRegistry} so its deadline timer is cancelled
+     * (for "applied"/"failed") or status flipped to RECEIVED (for
+     * "received"). Status is one of "received" | "applied" | "failed".
+     *
+     * <p>Legacy DirectiveTracker call is gone — registry is now the
+     * single source of truth for outstanding contract state.
      */
     public void markDirectiveAcked(String directiveId, String status) {
         if (directiveId == null || directiveId.isEmpty()) return;
-        DirectiveTracker tracker = pair.getDirectiveTracker();
-        if (tracker == null) return;
-        tracker.markAcked(directiveId, status);
-        // Drop the retry counter once the webview confirmed receipt — a later
-        // retry-timeout from a stale schedule would be a no-op anyway, but
-        // freeing the entry keeps the map small.
-        if ("received".equals(status) || "applied".equals(status) || "failed".equals(status)) {
-            retryCounters.remove(directiveId);
+        ContractRegistry registry = pair.getContractRegistry();
+        if (registry == null) return;
+        boolean handled;
+        if ("received".equals(status)) {
+            handled = registry.markReceived(directiveId, null);
+        } else if ("applied".equals(status) || "failed".equals(status)) {
+            handled = registry.discharge(directiveId,
+                    "failed".equals(status) ? "main AI reported failure" : null);
+            // Plan SM: the discharge may free the plan to move on.
+            PlanStateMachine sm = pair.getPlanStateMachine();
+            if (sm != null && handled) {
+                Contract c = registry.findById(directiveId);
+                String stepId = c != null ? c.parentStepId : null;
+                sm.onContractDischarged(directiveId, stepId);
+                // Bug fix 2026-05-26: discharge typically fires AFTER handleStreamEnd
+                // (ack arrives after the main-AI turn has already ended). In that
+                // case, handleStreamEnd's onTurnEnded saw hasOpenContracts=true and
+                // moved the plan to PENDING_DISCHARGE. Now that the contract is
+                // gone, we must recompute hasOpenContracts and re-fire onTurnEnded
+                // so the plan transitions to PENDING_DECISION — otherwise the plan
+                // sits in PENDING_DISCHARGE forever and the supervisor (now woken
+                // by TransitionDispatcher) sees stale state and may hallucinate
+                // "already dispatched, waiting" instead of choosing the next action.
+                boolean hasOpenMainAi = false;
+                for (Contract other : registry.getOpenContracts()) {
+                    if (other.assignedTo == ContractAssignee.MAIN_AI) {
+                        hasOpenMainAi = true;
+                        break;
+                    }
+                }
+                if (!hasOpenMainAi) {
+                    sm.onTurnEnded(ContractAssignee.MAIN_AI, false);
+                }
+            }
+        } else {
+            return;
         }
+        // Successfully handled — retryCounters from the legacy fast-retry path
+        // was removed with DirectiveTracker (Stage B.3.1).
     }
 
     /**
-     * 2026-05-25: invoked by the per-pair {@link DirectiveTracker}'s
-     * received-timeout (~3s with no "received" ack). Re-pushes the inject to
-     * the webview up to {@link #MAX_RECEIVED_RETRIES} times before giving up
-     * and letting the slow applied-timeout fire {@code directive_lost}.
-     *
-     * <p>The retry covers the JBCef-bridge-drop intermittent failure: the
-     * Java side wrote {@code callJavaScript("window.onPairInjectPrompt",...)}
-     * but the webview never received the call (cold start, EDT blocked,
-     * watchdog reload). Each retry is a fresh {@code pushToWebview} attempt
-     * — by the second or third try, the webview has usually finished
-     * mounting and accepts the inject.
-     */
-    public void retryInjectOnReceivedTimeout(String directiveId, JsonObject payload) {
-        if (directiveId == null || directiveId.isEmpty() || payload == null) return;
-        if (pair.isDisposed()) return;
-        AtomicInteger ctr = retryCounters.computeIfAbsent(directiveId, k -> new AtomicInteger(0));
-        int attempt = ctr.incrementAndGet();
-        if (attempt > MAX_RECEIVED_RETRIES) {
-            LOG.warn("[INJECT_TRACE] ActionRouter.retryGaveUp"
-                    + " pair=" + pair.getPairId()
-                    + " directiveId=" + directiveId
-                    + " attempts=" + attempt
-                    + " — falling through to slow applied-timeout");
-            return;
-        }
-        String prompt = resolvePromptFromPayload(payload);
-        if (prompt == null || prompt.isEmpty()) {
-            LOG.warn("[INJECT_TRACE] ActionRouter.retrySkippedEmptyPrompt"
-                    + " pair=" + pair.getPairId()
-                    + " directiveId=" + directiveId);
-            return;
-        }
-        LOG.info("[INJECT_TRACE] ActionRouter.retry"
-                + " pair=" + pair.getPairId()
-                + " directiveId=" + directiveId
-                + " attempt=" + attempt + "/" + MAX_RECEIVED_RETRIES);
-        invokeInjectOnWebview(directiveId, prompt);
-        DirectiveTracker tracker = pair.getDirectiveTracker();
-        if (tracker != null) tracker.rearmReceivedTimeout(directiveId);
-    }
-
-    /**
-     * Mirror of the prompt-resolution logic in {@link #handleInjectPrompt} so
-     * retry can use the same final string. Kept private so the live
-     * dispatch path remains the single source of truth for shape decisions.
+     * Resolve the human-readable prompt string from a structured payload
+     * (inlinePrompt > prompt > spilledPath stub). Used by
+     * {@link #deliverContract} when routing a Contract to the webview.
      */
     private String resolvePromptFromPayload(JsonObject payload) {
         if (payload.has("inlinePrompt") && !payload.get("inlinePrompt").isJsonNull()
@@ -479,75 +905,150 @@ public class ActionRouter {
         }
     }
 
-    private void handleInjectPrompt(JsonObject payload, long delaySeconds) {
-        // Protocol v2 (2026-05-24): structured payload may have inlinePrompt OR
-        // spilledPath instead of (or alongside) the legacy `prompt` field.
-        // For the webview side we still send a single string — supervisor
-        // prompt content is the most common case, spill is rare. When only
-        // spilledPath is set, we send a stub prompt that points to the file
-        // (webview/main AI can Read it).
-        String prompt;
-        if (payload.has("inlinePrompt") && !payload.get("inlinePrompt").isJsonNull()
-                && !payload.get("inlinePrompt").getAsString().isEmpty()) {
-            prompt = payload.get("inlinePrompt").getAsString();
-        } else if (payload.has("prompt") && !payload.get("prompt").isJsonNull()) {
-            prompt = payload.get("prompt").getAsString();
-        } else if (payload.has("spilledPath") && !payload.get("spilledPath").isJsonNull()) {
-            String spilled = payload.get("spilledPath").getAsString();
-            String objective = payload.has("objective") && !payload.get("objective").isJsonNull()
-                    ? payload.get("objective").getAsString() : "(no objective)";
-            prompt = "请按 `" + spilled + "` 中的完整指令执行(objective: " + objective + ")";
-        } else {
-            prompt = "";
-        }
-        if (prompt.isEmpty()) {
-            LOG.warn("[ActionRouter] inject_prompt with empty payload — skipping");
+    private void handleInjectPrompt(JsonObject payload, long delaySeconds, JsonObject actionWrapper) {
+        // Route C check (empty payload) already happened at dispatch() entry;
+        // this defensive duplicate exists only for callers that bypass dispatch().
+        String prompt = resolvePromptFromPayload(payload);
+        if (prompt == null || prompt.isEmpty()) {
+            LOG.warn("[ActionRouter] handleInjectPrompt invoked with empty payload — caller bypassed dispatch() validation");
             return;
         }
 
-        // Protocol v2: register directive with the per-pair DirectiveTracker so
-        // a 5min ack timeout fires if the main AI never responds. directiveId
-        // is generated by the daemon (normalizeAction) and surfaces on the
-        // payload (also on the wrapper top-level, but payload is more reliable).
-        String directiveId = null;
-        if (payload.has("directiveId") && !payload.get("directiveId").isJsonNull()) {
-            directiveId = payload.get("directiveId").getAsString();
-        }
-        if (directiveId != null && !directiveId.isEmpty()) {
-            DirectiveTracker tracker = pair.getDirectiveTracker();
-            if (tracker != null) {
-                tracker.registerDirective(directiveId, payload);
+        // Contract State Machine v3 (2026-05-25): all inject_prompt deliveries
+        // now flow through ContractRegistry. The registry's onIssued listener
+        // (wired in attachContractRegistryListener) handles actual webview
+        // delivery, so we just describe the work as a Contract here.
+        ContractRegistry registry = pair.getContractRegistry();
+        if (registry == null) {
+            // Fallback: registry not wired (legacy path / synthetic tests).
+            // Push direct so the user doesn't lose the inject; render the
+            // action card alongside since we won't get a registry callback.
+            LOG.warn("[ActionRouter] no ContractRegistry — falling back to direct push");
+            if (actionWrapper != null) {
+                try { webview.onActionEvent(actionWrapper); } catch (Exception e) {
+                    LOG.warn("[ActionRouter] fallback onActionEvent push failed: " + e.getMessage());
+                }
             }
+            String fallbackId = payload.has("directiveId") && !payload.get("directiveId").isJsonNull()
+                    ? payload.get("directiveId").getAsString() : null;
+            if (delaySeconds <= 0) {
+                invokeInjectOnWebview(fallbackId, prompt);
+            } else {
+                scheduler.schedule(() -> {
+                    if (!pair.isDisposed()) invokeInjectOnWebview(fallbackId, prompt);
+                }, delaySeconds, TimeUnit.SECONDS);
+            }
+            return;
         }
 
-        // 2026-05-24 (Q4 trace): observe the prompt entering the dispatch path
-        // with directiveId + length so we can correlate against daemon stderr
-        // (`[INJECT_TRACE] daemon wrote ...`) and the webview console
-        // (`[INJECT_TRACE] webview onPairInjectPrompt ...`).
+        String directiveId = payload.has("directiveId") && !payload.get("directiveId").isJsonNull()
+                ? payload.get("directiveId").getAsString() : null;
+        String stepId = ensurePlanAndStep(payload, prompt);
+        long deadlineMs = payload.has("deadlineMs") && !payload.get("deadlineMs").isJsonNull()
+                ? payload.get("deadlineMs").getAsLong() : 0L;
+
         String preview = prompt.length() > 80
                 ? prompt.substring(0, 80).replace('\n', ' ') + "…"
                 : prompt.replace('\n', ' ');
         LOG.info("[INJECT_TRACE] ActionRouter.handleInjectPrompt"
                 + " pair=" + pair.getPairId()
-                + " directiveId=" + (directiveId != null ? directiveId : "(none)")
+                + " directiveId=" + (directiveId != null ? directiveId : "(auto)")
+                + " stepId=" + stepId
                 + " delaySec=" + delaySeconds
                 + " promptLen=" + prompt.length()
                 + " preview=\"" + preview + "\"");
 
-        final String capturedDirectiveId = directiveId;
-        final String capturedPrompt = prompt;
+        Runnable doIssue = () -> {
+            if (pair.isDisposed()) return;
+            try {
+                Contract issued = registry.issue(ContractIssueRequest.builder()
+                        .contractIdHint(directiveId)
+                        .parentStepId(stepId)
+                        .type(ContractType.TASK_ASSIGNMENT)
+                        .assignedTo(ContractAssignee.MAIN_AI)
+                        .payloadJson(payload.toString())
+                        .deadlineMs(deadlineMs)
+                        .build());
+                // Route A (2026-05-26): render the "已注入指令到主 AI" card
+                // ONLY now that registry.issue() has accepted the contract.
+                // This makes the UI a derivative of registry truth rather
+                // than supervisor narration — if issuance never happens,
+                // the user never sees a misleading dispatch confirmation.
+                if (actionWrapper != null) {
+                    try {
+                        webview.onActionEvent(actionWrapper);
+                    } catch (Exception ex) {
+                        LOG.warn("[ActionRouter] deferred onActionEvent push failed: " + ex.getMessage());
+                    }
+                }
+                PlanStateMachine sm = pair.getPlanStateMachine();
+                if (sm != null) {
+                    sm.onContractIssued(issued.id, stepId, ContractAssignee.MAIN_AI);
+                }
+            } catch (Exception e) {
+                LOG.warn("[ActionRouter] registry.issue failed: " + e.getMessage());
+                // Route A (2026-05-26): issuance failed — do NOT render the
+                // success card; tell supervisor explicitly so its next turn
+                // re-emits instead of waiting on a contract that doesn't exist.
+                sendActionRejectionToSupervisor(
+                        "inject_prompt rejected: ContractRegistry.issue() 抛异常 — " + e.getMessage(),
+                        "本轮重试 emit_action(inject_prompt, ...);如果反复失败,emit_action(escalate_to_human)。");
+            }
+        };
         if (delaySeconds <= 0) {
-            invokeInjectOnWebview(capturedDirectiveId, capturedPrompt);
+            doIssue.run();
         } else {
-            scheduler.schedule(
-                    () -> {
-                        if (pair.isDisposed()) return;
-                        invokeInjectOnWebview(capturedDirectiveId, capturedPrompt);
-                    },
-                    delaySeconds,
-                    TimeUnit.SECONDS
-            );
+            scheduler.schedule(doIssue, delaySeconds, TimeUnit.SECONDS);
         }
+    }
+
+    /**
+     * Contract State Machine v3 (2026-05-25): synthetic plan/step bootstrap.
+     * The supervisor doesn't yet emit explicit plan_create / step_create
+     * actions, so we auto-create a single-step plan on first inject_prompt
+     * and append a new step for each subsequent inject_prompt. This gives
+     * the PlanStateMachine + DeadlockGuard the structure they need to
+     * monitor PENDING_DISCHARGE without requiring supervisor prompt changes.
+     *
+     * <p>Future work: replace this with explicit supervisor-driven plan
+     * management once the supervisor prompt grows save_plan / save_step MCP
+     * tools that emit plan transitions directly.
+     */
+    private String ensurePlanAndStep(JsonObject payload, String prompt) {
+        PlanStateMachine sm = pair.getPlanStateMachine();
+        if (sm == null) {
+            return "step_synthetic_" + System.currentTimeMillis();
+        }
+        Plan plan = sm.getCurrent();
+        if (plan == null) {
+            // First inject_prompt: bootstrap a one-step plan.
+            java.util.List<PlanStep> steps = new java.util.ArrayList<>();
+            steps.add(PlanStep.create("auto", 0, summarizeTitle(payload, prompt), PlanStep.StepOwner.MAIN_AI));
+            sm.onPlanCreated(steps, null);
+            plan = sm.getCurrent();
+        }
+        PlanStep current = plan.getCurrentStep();
+        // If the current step is already DONE/SKIPPED, append a new step.
+        if (current != null
+                && (current.status == PlanStep.StepStatus.DONE
+                || current.status == PlanStep.StepStatus.SKIPPED)) {
+            int next = plan.steps.size();
+            PlanStep added = PlanStep.create("auto", next, summarizeTitle(payload, prompt), PlanStep.StepOwner.MAIN_AI);
+            plan.steps.add(added);
+            plan.currentStepIndex = next;
+            current = added;
+        }
+        return current != null ? current.id : "step_synthetic_" + System.currentTimeMillis();
+    }
+
+    private String summarizeTitle(JsonObject payload, String prompt) {
+        if (payload.has("objective") && !payload.get("objective").isJsonNull()) {
+            String obj = payload.get("objective").getAsString();
+            if (obj.length() > 80) return obj.substring(0, 80);
+            return obj;
+        }
+        if (prompt.length() <= 60) return prompt;
+        return prompt.substring(0, 60).replace('\n', ' ') + "…";
     }
 
     /**

@@ -344,9 +344,13 @@ public final class PairSessionManager implements Disposable {
         // compactionHistory for rotation-trigger evaluation and write
         // health-transition counters back. Falls back to no-L2 behaviour
         // for unit tests that construct the monitor directly.
+        // Contract State Machine v3 (2026-05-25): pass the 24h interval so
+        // the periodic tick is effectively disabled. Supervisor is now woken
+        // on Contract state changes via TransitionDispatcher and on urgent
+        // events (error / off_plan) via EventCollector's urgent path.
         SupervisorMonitor monitor = new SupervisorMonitor(
                 session, collector, coordinator,
-                SupervisorMonitor.DEFAULT_TICK_INTERVAL_MS,
+                SupervisorMonitor.DEADLOCK_FRIENDLY_INTERVAL_MS,
                 l2Store);
         session.setCoordinator(coordinator);
         session.setEventCollector(collector);
@@ -359,6 +363,20 @@ public final class PairSessionManager implements Disposable {
         // current rotation generation (instead of always reporting 0).
         PairStatusPusher statusPusher = new PairStatusPusher(session, router, l2Store);
         session.setStatusPusher(statusPusher);
+
+        // Stage C (2026-05-25): independent watchers split off from SupervisorMonitor.
+        // HealthWatcher owns supervisor health-state transitions; SupervisorMonitor
+        // delegates recordSuccess/recordFailure to it. RotationWatcher consolidates
+        // rotation request entry points. BudgetWatcher is a facade over
+        // PairBudgetTracker (which PairHandler constructs later, so we wire it
+        // when getBudgetTracker() returns non-null on first access).
+        com.github.claudecodegui.session.pair.watcher.HealthWatcher healthWatcher =
+                new com.github.claudecodegui.session.pair.watcher.HealthWatcher(
+                        pairId, coordinator, statusPusher, l2Store);
+        com.github.claudecodegui.session.pair.watcher.RotationWatcher rotationWatcher =
+                new com.github.claudecodegui.session.pair.watcher.RotationWatcher(pairId, coordinator);
+        session.setHealthWatcher(healthWatcher);
+        session.setRotationWatcher(rotationWatcher);
         bridge.setCompactBoundaryHandler(payload -> {
             // Phase 3 (2026-05-24): also persist a compaction event into L2
             // so the rotation trigger (Phase 5) can count from disk after a
@@ -467,6 +485,113 @@ public final class PairSessionManager implements Disposable {
         // we don't change MainAIMonitor's constructor signature for callers
         // that don't yet have these references.
         mainAIMonitor.wireForAutoRotation(session, coordinator, mainAIBridge);
+
+        // Contract State Machine v3 (2026-05-25): construct the new
+        // plan/contract owners. ContractRegistry is now the authoritative
+        // source of truth for outstanding tasks (DirectiveTracker deleted).
+        // Hydration from L2 happens immediately so an IDE restart picks up
+        // any saved plan + contracts.
+        com.github.claudecodegui.session.pair.plan.PlanStateMachine planSm =
+                new com.github.claudecodegui.session.pair.plan.PlanStateMachine(pairId);
+        com.github.claudecodegui.session.pair.contract.ContractRegistry contractRegistry =
+                new com.github.claudecodegui.session.pair.contract.ContractRegistry(pairId);
+        session.setPlanStateMachine(planSm);
+        session.setContractRegistry(contractRegistry);
+
+        // Hydrate plan + open contracts from L2 if present (IDE restart path).
+        try {
+            L2State persisted = l2Store.read(pairId);
+            if (persisted != null && persisted.plan != null) {
+                planSm.restore(
+                        com.github.claudecodegui.session.pair.plan.PlanPersistence.fromPersisted(
+                                persisted.plan, pairId));
+            }
+            // 2026-05-25 fix: only hydrate contracts when the plan is still
+            // ACTIVE. For DONE/ABORTED/WAITING/null plans, the contracts are
+            // leftover from a finished or aborted session and should not pin
+            // openContracts. ContractRegistry.hydrateFromL2 additionally
+            // auto-cancels any contract older than MAX_HYDRATION_AGE_MS as a
+            // belt-and-suspenders guard.
+            boolean planAllowsContractHydration = persisted != null
+                    && persisted.plan != null
+                    && "ACTIVE".equals(persisted.plan.state);
+            if (planAllowsContractHydration
+                    && persisted.openContracts != null
+                    && !persisted.openContracts.isEmpty()) {
+                contractRegistry.hydrateFromL2(
+                        com.github.claudecodegui.session.pair.contract.ContractPersistence.fromPersistedList(
+                                persisted.openContracts));
+            } else if (persisted != null && persisted.openContracts != null
+                    && !persisted.openContracts.isEmpty()) {
+                LOG.info("[PairSessionManager] " + pairId
+                        + " skipping contract hydration (plan state="
+                        + (persisted.plan == null ? "null" : persisted.plan.state) + ")");
+            }
+        } catch (Exception e) {
+            LOG.warn("[PairSessionManager] L2 hydration of plan/contracts failed for "
+                    + pairId + ": " + e.getMessage());
+        }
+
+        planSm.start();
+        com.github.claudecodegui.session.pair.guard.DeadlockGuard deadlockGuard =
+                new com.github.claudecodegui.session.pair.guard.DeadlockGuard(session, planSm, contractRegistry);
+        com.github.claudecodegui.session.pair.dispatcher.TransitionDispatcher transitionDispatcher =
+                new com.github.claudecodegui.session.pair.dispatcher.TransitionDispatcher(session, planSm);
+        session.setDeadlockGuard(deadlockGuard);
+        session.setTransitionDispatcher(transitionDispatcher);
+        // Contract State Machine v3 (2026-05-25): per-contract deadline timer
+        // → DeadlockGuard.onContractDeadline. The guard's evaluate logic decides
+        // R1/R2/R3. Wired BEFORE start so the first hydrated-from-L2 deadline
+        // firing finds a live callback.
+        contractRegistry.setDeadlineCallback(deadlockGuard::onContractDeadline);
+        // Wire ActionRouter's ContractRegistry listener so issue/retry events
+        // deliver to webview (MAIN_AI) or supervisor (SUPERVISOR) automatically.
+        router.attachContractRegistryListener();
+        // Contract State Machine v3 (2026-05-25): TransitionDispatcher wake
+        // → SupervisorMonitor.wakeForPlanTransition + record coordinator
+        // event so the UI strip sees the wake. Replaces the old 30s
+        // fixedDelay as the primary driver for "forward accumulated events
+        // to supervisor + receive its next action".
+        transitionDispatcher.setSupervisorWakeCallback(() -> {
+            try {
+                statusPusher.recordCoordinatorEvent(
+                        PairStatusSnapshot.CoordinatorEvent.Source.DISPATCHER,
+                        "supervisor_wake",
+                        "Plan PENDING_DECISION → waking supervisor",
+                        null);
+            } catch (Exception e) {
+                LOG.debug("[PairSessionManager] dispatcher wake event record failed: " + e.getMessage());
+            }
+            monitor.wakeForPlanTransition();
+        });
+        try {
+            deadlockGuard.start();
+            transitionDispatcher.start();
+        } catch (Exception e) {
+            LOG.warn("[PairSessionManager] DeadlockGuard/TransitionDispatcher start failed for "
+                    + pairId + ": " + e.getMessage());
+        }
+        // Contract State Machine v3 (2026-05-25): wire coordinator events
+        // (plan transitions + contract lifecycle + dispatcher wake) to the
+        // status pusher's CoordinatorEvent ring. Each event triggers a hard
+        // push so the CoordinatorEventStrip UI updates in real time.
+        wireCoordinatorEventListeners(planSm, contractRegistry, transitionDispatcher, statusPusher);
+        // Bug fix 2026-05-26: when the plan transitions to DONE, write the
+        // COMPLETION_REPORT (this used to live on a SupervisorMonitor tick
+        // that is now effectively disabled — see CompletionReportWriter +
+        // CompletionDetector + onStepCompleted being orphaned before this fix).
+        wireCompletionReportListener(planSm, session, l2Store, statusPusher);
+        // Contract State Machine v3 (2026-05-25): start the pusher's own
+        // 30s push so SessionCountStrip / PairStatusBar / DecisionTimeline
+        // get fresh snapshots even when SupervisorMonitor's (now event-
+        // driven) tick stays idle. Also fires an immediate seed push so
+        // the UI doesn't sit blank waiting for the first event.
+        try {
+            statusPusher.startPeriodicPush();
+        } catch (Exception e) {
+            LOG.warn("[PairSessionManager] statusPusher.startPeriodicPush failed for "
+                    + pairId + ": " + e.getMessage());
+        }
 
         try {
             monitor.start();
@@ -667,6 +792,155 @@ public final class PairSessionManager implements Disposable {
         if (t.isEmpty()) return null;
         if (t.length() <= max) return t;
         return t.substring(0, max) + "\n... (truncated)";
+    }
+
+    /**
+     * Contract State Machine v3 (2026-05-25): subscribe coordinator events
+     * (plan transitions + contract lifecycle + dispatcher wake) to the
+     * pusher's CoordinatorEvent ring. The pusher hard-pushes on each
+     * recording so the UI strip updates in real time.
+     */
+    private static void wireCoordinatorEventListeners(
+            com.github.claudecodegui.session.pair.plan.PlanStateMachine planSm,
+            com.github.claudecodegui.session.pair.contract.ContractRegistry registry,
+            com.github.claudecodegui.session.pair.dispatcher.TransitionDispatcher dispatcher,
+            PairStatusPusher pusher) {
+        if (planSm == null || registry == null || pusher == null) return;
+
+        planSm.addListener((oldState, oldSub, now) -> {
+            String type;
+            String message;
+            if (now == null) {
+                type = "plan_cleared";
+                message = "Plan cleared (replaced)";
+            } else {
+                type = "plan_" + (now.state == null ? "?" : now.state.name().toLowerCase());
+                String sub = now.subState == null ? "" : "/" + now.subState.name();
+                message = "Plan → " + (now.state == null ? "?" : now.state.name()) + sub;
+            }
+            pusher.recordCoordinatorEvent(
+                    PairStatusSnapshot.CoordinatorEvent.Source.PLAN,
+                    type, message,
+                    now == null ? null : now.id);
+        });
+
+        registry.addListener(new com.github.claudecodegui.session.pair.contract.ContractListener() {
+            @Override
+            public void onIssued(com.github.claudecodegui.session.pair.contract.Contract c) {
+                String typeLabel = c.type == null ? "?" : c.type.name();
+                String assignee = c.assignedTo == null ? "?" : c.assignedTo.name();
+                String prefix = c.retryCount > 0 ? "Retry " + c.retryCount + " issued " : "Issued ";
+                pusher.recordCoordinatorEvent(
+                        PairStatusSnapshot.CoordinatorEvent.Source.CONTRACT,
+                        "contract_issued",
+                        prefix + typeLabel + " → " + assignee,
+                        c.id);
+            }
+            @Override
+            public void onDischarged(com.github.claudecodegui.session.pair.contract.Contract c) {
+                pusher.recordCoordinatorEvent(
+                        PairStatusSnapshot.CoordinatorEvent.Source.CONTRACT,
+                        "contract_discharged",
+                        "Discharged " + (c.type == null ? "" : c.type.name()),
+                        c.id);
+            }
+            @Override
+            public void onRetried(com.github.claudecodegui.session.pair.contract.Contract original,
+                                  com.github.claudecodegui.session.pair.contract.Contract retry) {
+                pusher.recordCoordinatorEvent(
+                        PairStatusSnapshot.CoordinatorEvent.Source.GUARD,
+                        "contract_retried",
+                        "R" + retry.retryCount + " retry (" + (retry.type == null ? "" : retry.type.name()) + ")",
+                        retry.id);
+            }
+            @Override
+            public void onEscalated(com.github.claudecodegui.session.pair.contract.Contract c) {
+                pusher.recordCoordinatorEvent(
+                        PairStatusSnapshot.CoordinatorEvent.Source.GUARD,
+                        "contract_escalated",
+                        "R3 escalated — DECISION_REQUEST to supervisor",
+                        c.id);
+            }
+            @Override
+            public void onCancelled(com.github.claudecodegui.session.pair.contract.Contract c, String reason) {
+                pusher.recordCoordinatorEvent(
+                        PairStatusSnapshot.CoordinatorEvent.Source.CONTRACT,
+                        "contract_cancelled",
+                        "Cancelled" + (reason == null ? "" : ": " + reason),
+                        c.id);
+            }
+        });
+
+        // Dispatcher wake callback is set in startPair (chained with the
+        // SupervisorMonitor.wakeForPlanTransition there). See the
+        // transitionDispatcher.setSupervisorWakeCallback line in startPair —
+        // it explicitly records a coordinator event alongside the wake.
+    }
+
+    /**
+     * Bug fix 2026-05-26: subscribe to PlanState → DONE transitions and emit
+     * the COMPLETION_REPORT.md file via {@link CompletionReportWriter}. This
+     * closes the orphaned-completion gap left over from the v3 Contract State
+     * Machine refactor — previously the supervisor wrote a wrap-up inject +
+     * {@code emit_action(wait)} and waited for "the next monitor tick" to run
+     * {@code isComplete}, but that tick was effectively disabled (24h interval)
+     * and neither {@code CompletionReportWriter} nor {@code onPlanCompleted}
+     * had a caller, so the pair sat in {@code ACTIVE/PENDING_DISCHARGE} forever.
+     *
+     * <p>Now: any transition into {@code PlanState.DONE} (whether through the
+     * new {@code emit_action(complete_plan)} or auto-detected via
+     * {@code allStepsDone()}) writes the report and pushes a status snapshot
+     * so the UI clearly shows the pair is done.
+     */
+    private static void wireCompletionReportListener(
+            com.github.claudecodegui.session.pair.plan.PlanStateMachine planSm,
+            PairSession session,
+            L2Store store,
+            PairStatusPusher pusher) {
+        if (planSm == null || session == null || store == null) return;
+        planSm.addListener((oldState, oldSub, now) -> {
+            if (now == null) return;
+            if (now.state != com.github.claudecodegui.session.pair.plan.Plan.PlanState.DONE) return;
+            // Only fire on the transition INTO DONE, not on subsequent listener
+            // notifications (which won't happen — DONE is terminal — but cheap to guard).
+            if (oldState == com.github.claudecodegui.session.pair.plan.Plan.PlanState.DONE) return;
+            try {
+                // The classifier reads L2State.planProgress (legacy mirror), but
+                // the new architecture's source-of-truth is Plan.steps[]. If the
+                // supervisor explicitly completed without updating planProgress,
+                // mirror Plan.steps[].status into planProgress so the writer
+                // produces a meaningful report.
+                L2State state = store.update(session.getPairId(), s -> {
+                    if (now.steps != null && !now.steps.isEmpty()
+                            && (s.planProgress == null || s.planProgress.isEmpty())) {
+                        if (s.planProgress == null) s.planProgress = new java.util.ArrayList<>();
+                        for (com.github.claudecodegui.session.pair.plan.PlanStep ps : now.steps) {
+                            L2State.PlanProgressEntry e = new L2State.PlanProgressEntry();
+                            e.step = ps.index;
+                            e.status = ps.status == null ? "done" : ps.status.name().toLowerCase();
+                            e.attempts = ps.attempts;
+                            s.planProgress.add(e);
+                        }
+                    }
+                    return s;
+                });
+                java.nio.file.Path written = CompletionReportWriter.writeCompletionReport(session, state);
+                if (written != null) {
+                    LOG.info("[PairSessionManager] " + session.getPairId()
+                            + " plan DONE → completion report written to " + written);
+                } else {
+                    LOG.info("[PairSessionManager] " + session.getPairId()
+                            + " plan DONE → CompletionReportWriter returned null"
+                            + " (planProgress empty; transition still committed so deadlock is broken)");
+                }
+            } catch (Exception e) {
+                LOG.warn("[PairSessionManager] writeCompletionReport failed for "
+                        + session.getPairId() + ": " + e.getMessage());
+            }
+            try {
+                if (pusher != null) pusher.pushHard();
+            } catch (Exception ignored) { /* best-effort */ }
+        });
     }
 
     /**

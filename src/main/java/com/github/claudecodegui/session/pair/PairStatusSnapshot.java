@@ -36,6 +36,14 @@ public final class PairStatusSnapshot {
 
     /** Cumulative auto-compactions observed during this supervisor's lifetime. */
     public final int compactCount;
+    /** 2026-05-25: cumulative supervisor rotations performed for this pair
+     *  (separate from {@link #generation}; rotationCount = generation - 1
+     *  for a healthy linear lifetime, but they can diverge during recovery). */
+    public final int supervisorRotationCount;
+    /** 2026-05-25: cumulative main-AI rotations performed for this pair. */
+    public final int mainAiRotationCount;
+    /** 2026-05-25: cumulative main-AI auto-compactions observed for this pair. */
+    public final int mainAiCompactCount;
     /** Ms since last successful supervisor turn end, or null if no turn yet. */
     public final Long lastActivityAgoMs;
     /** Current EventCollector buffer size. */
@@ -61,6 +69,29 @@ public final class PairStatusSnapshot {
     public final BudgetStatus budgetStatus;
     public final Boolean paused;            // true when pair was paused by budget / C3
 
+    /**
+     * Contract State Machine v3 (2026-05-25): recent coordinator events
+     * (plan transitions / contract issue / discharge / retry / escalate /
+     * dispatcher wake). Surfaced to the CoordinatorEventStrip UI so the user
+     * can see what DeadlockGuard / TransitionDispatcher / ContractRegistry
+     * are doing in real time. Oldest → newest; capped at 15 by the pusher.
+     */
+    public final List<CoordinatorEvent> recentCoordinatorEvents;
+
+    // Contract State Machine v3 (2026-05-25): live activity counters so the
+    // operator sees the system moving even when long-running counters
+    // (rotation / compaction) stay at 0. All come from ContractRegistry.
+    /** Currently OPEN/RECEIVED contracts in the registry. */
+    public final int openContractCount;
+    /** Session-lifetime cumulative contracts issued (includes retries). */
+    public final long totalIssuedContracts;
+    /** Session-lifetime cumulative R1/R2 retries triggered. */
+    public final long totalRetriedContracts;
+    /** Session-lifetime cumulative DISCHARGED contracts. */
+    public final long totalDischargedContracts;
+    /** Session-lifetime cumulative R3-escalated contracts. */
+    public final long totalEscalatedContracts;
+
     private PairStatusSnapshot(Builder b) {
         this.pairId = b.pairId;
         this.generation = b.generation;
@@ -70,6 +101,9 @@ public final class PairStatusSnapshot {
         this.supervisorUsedTokens = b.supervisorUsedTokens;
         this.supervisorContextLimit = b.supervisorContextLimit;
         this.compactCount = b.compactCount;
+        this.supervisorRotationCount = b.supervisorRotationCount;
+        this.mainAiRotationCount = b.mainAiRotationCount;
+        this.mainAiCompactCount = b.mainAiCompactCount;
         this.lastActivityAgoMs = b.lastActivityAgoMs;
         this.pendingEvents = b.pendingEvents;
         this.totalDroppedEvents = b.totalDroppedEvents;
@@ -83,6 +117,14 @@ public final class PairStatusSnapshot {
         this.autonomyMode = b.autonomyMode;
         this.budgetStatus = b.budgetStatus;
         this.paused = b.paused;
+        this.recentCoordinatorEvents = b.recentCoordinatorEvents == null
+            ? Collections.emptyList()
+            : Collections.unmodifiableList(new ArrayList<>(b.recentCoordinatorEvents));
+        this.openContractCount = b.openContractCount;
+        this.totalIssuedContracts = b.totalIssuedContracts;
+        this.totalRetriedContracts = b.totalRetriedContracts;
+        this.totalDischargedContracts = b.totalDischargedContracts;
+        this.totalEscalatedContracts = b.totalEscalatedContracts;
     }
 
     public JsonObject toJson() {
@@ -95,6 +137,9 @@ public final class PairStatusSnapshot {
         if (supervisorUsedTokens != null) o.addProperty("supervisorUsedTokens", supervisorUsedTokens);
         if (supervisorContextLimit != null) o.addProperty("supervisorContextLimit", supervisorContextLimit);
         o.addProperty("compactCount", compactCount);
+        o.addProperty("supervisorRotationCount", supervisorRotationCount);
+        o.addProperty("mainAiRotationCount", mainAiRotationCount);
+        o.addProperty("mainAiCompactCount", mainAiCompactCount);
         if (lastActivityAgoMs != null) o.addProperty("lastActivityAgoMs", lastActivityAgoMs);
         o.addProperty("pendingEvents", pendingEvents);
         o.addProperty("totalDroppedEvents", totalDroppedEvents);
@@ -123,6 +168,16 @@ public final class PairStatusSnapshot {
             o.add("budgetStatus", bs);
         }
         if (paused != null) o.addProperty("paused", paused);
+        if (!recentCoordinatorEvents.isEmpty()) {
+            JsonArray ce = new JsonArray();
+            for (CoordinatorEvent e : recentCoordinatorEvents) ce.add(e.toJson());
+            o.add("recentCoordinatorEvents", ce);
+        }
+        o.addProperty("openContractCount", openContractCount);
+        o.addProperty("totalIssuedContracts", totalIssuedContracts);
+        o.addProperty("totalRetriedContracts", totalRetriedContracts);
+        o.addProperty("totalDischargedContracts", totalDischargedContracts);
+        o.addProperty("totalEscalatedContracts", totalEscalatedContracts);
         return o;
     }
 
@@ -140,12 +195,50 @@ public final class PairStatusSnapshot {
         if (d.chosenCandidate != null) e.addProperty("chosenCandidate", d.chosenCandidate);
         if (d.stepId != null) e.addProperty("stepId", d.stepId);
         if (d.autoMode != null) e.addProperty("autoMode", d.autoMode);
-        if (d.payload != null) e.add("payload", d.payload);
+        // 2026-05-26: also skip JsonNull — DecisionEntry.payload is now
+        // JsonElement so a Java-null payload that round-tripped through a Gson
+        // deepCopy comes back as JsonNull, not Java null. Either form means
+        // "absent" for snapshot purposes.
+        if (d.payload != null && !d.payload.isJsonNull()) e.add("payload", d.payload);
         return e;
     }
 
     public static Builder builder(String pairId) {
         return new Builder(pairId);
+    }
+
+    /**
+     * Contract State Machine v3 (2026-05-25): one line in the coordinator
+     * event strip. Sources include PlanStateMachine transitions,
+     * ContractRegistry issue/discharge/retry/escalate/cancel, DeadlockGuard
+     * R1/R2/R3 triggers (which surface as Contract events), and
+     * TransitionDispatcher supervisor wakes.
+     */
+    public static final class CoordinatorEvent {
+        public enum Source { PLAN, CONTRACT, GUARD, DISPATCHER }
+        public final long ts;
+        public final Source source;
+        public final String type;
+        public final String message;
+        public final String detail;          // optional contractId / stepId
+
+        public CoordinatorEvent(long ts, Source source, String type, String message, String detail) {
+            this.ts = ts;
+            this.source = source;
+            this.type = type;
+            this.message = message;
+            this.detail = detail;
+        }
+
+        public JsonObject toJson() {
+            JsonObject o = new JsonObject();
+            o.addProperty("ts", ts);
+            o.addProperty("source", source.name());
+            o.addProperty("type", type);
+            o.addProperty("message", message);
+            if (detail != null) o.addProperty("detail", detail);
+            return o;
+        }
     }
 
     /** Severity-tagged single line in the right-pane status panel. */
@@ -179,6 +272,9 @@ public final class PairStatusSnapshot {
         private Long supervisorUsedTokens;
         private Long supervisorContextLimit;
         private int compactCount;
+        private int supervisorRotationCount;
+        private int mainAiRotationCount;
+        private int mainAiCompactCount;
         private Long lastActivityAgoMs;
         private int pendingEvents;
         private int totalDroppedEvents;
@@ -191,6 +287,12 @@ public final class PairStatusSnapshot {
         private String autonomyMode;
         private BudgetStatus budgetStatus;
         private Boolean paused;
+        private List<CoordinatorEvent> recentCoordinatorEvents;
+        private int openContractCount;
+        private long totalIssuedContracts;
+        private long totalRetriedContracts;
+        private long totalDischargedContracts;
+        private long totalEscalatedContracts;
 
         private Builder(String pairId) { this.pairId = pairId; }
 
@@ -201,6 +303,9 @@ public final class PairStatusSnapshot {
         public Builder supervisorUsedTokens(Long v) { this.supervisorUsedTokens = v; return this; }
         public Builder supervisorContextLimit(Long v) { this.supervisorContextLimit = v; return this; }
         public Builder compactCount(int v) { this.compactCount = v; return this; }
+        public Builder supervisorRotationCount(int v) { this.supervisorRotationCount = v; return this; }
+        public Builder mainAiRotationCount(int v) { this.mainAiRotationCount = v; return this; }
+        public Builder mainAiCompactCount(int v) { this.mainAiCompactCount = v; return this; }
         public Builder lastActivityAgoMs(Long v) { this.lastActivityAgoMs = v; return this; }
         public Builder pendingEvents(int v) { this.pendingEvents = v; return this; }
         public Builder totalDroppedEvents(int v) { this.totalDroppedEvents = v; return this; }
@@ -214,6 +319,14 @@ public final class PairStatusSnapshot {
         public Builder autonomyMode(String v) { this.autonomyMode = v; return this; }
         public Builder budgetStatus(BudgetStatus v) { this.budgetStatus = v; return this; }
         public Builder paused(Boolean v) { this.paused = v; return this; }
+        public Builder recentCoordinatorEvents(List<CoordinatorEvent> v) {
+            this.recentCoordinatorEvents = v; return this;
+        }
+        public Builder openContractCount(int v) { this.openContractCount = v; return this; }
+        public Builder totalIssuedContracts(long v) { this.totalIssuedContracts = v; return this; }
+        public Builder totalRetriedContracts(long v) { this.totalRetriedContracts = v; return this; }
+        public Builder totalDischargedContracts(long v) { this.totalDischargedContracts = v; return this; }
+        public Builder totalEscalatedContracts(long v) { this.totalEscalatedContracts = v; return this; }
 
         public PairStatusSnapshot build() {
             return new PairStatusSnapshot(this);

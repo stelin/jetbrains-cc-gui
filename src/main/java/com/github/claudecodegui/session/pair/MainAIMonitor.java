@@ -26,14 +26,18 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>Phase 6a responsibilities:
  * <ul>
  *   <li>Track turn lifecycle on the pair's L2 sub-state ({@link L2State.MainAIState}).</li>
- *   <li>Arm a {@link StallDetector} on {@code onTurnStart}, cancel on {@code onTurnEnd}.</li>
- *   <li>On stall fire: increment {@code stallCount}, push a WARN alert via
- *       {@link PairStatusPusher}, log. Does NOT auto-interrupt — user decides.</li>
  *   <li>On compaction (when wired from the main-AI SDK side in a follow-up):
  *       increment {@code compactCount} for telemetry. Phase 6a leaves a hook
  *       method ({@link #onCompactBoundary}) that callers can fire when they
  *       have a compact_boundary observation.</li>
  * </ul>
+ *
+ * <p>Contract State Machine v3 (2026-05-25): the 5-minute StallDetector
+ * was removed. Per-turn stall detection now lives on each
+ * {@code Contract} as a deadline timer, owned by {@link
+ * com.github.claudecodegui.session.pair.contract.ContractRegistry}.
+ * R1/R2/R3 escalation flows through
+ * {@link com.github.claudecodegui.session.pair.guard.DeadlockGuard}.
  *
  * <p>Phase 6b will add: actual rotation triggers, getContextUsage on main AI,
  * MainAIRotationCoordinator + swapInnerSession + chat-history boundary marker.
@@ -55,7 +59,6 @@ public class MainAIMonitor {
     private volatile String mainSessionId;
     private final L2Store l2Store;
     private final PairStatusPusher statusPusher;
-    private final StallDetector stallDetector;
 
     private final AtomicLong turnStartedAt = new AtomicLong(0L);
     private final AtomicLong lastErrorAt = new AtomicLong(0L);
@@ -85,7 +88,6 @@ public class MainAIMonitor {
         this.mainSessionId = initialMainSessionId;
         this.l2Store = l2Store;
         this.statusPusher = statusPusher;
-        this.stallDetector = new StallDetector("mainAI-" + pairId, this::onStallFire);
         ThreadFactory tf = r -> {
             Thread t = new Thread(r, "mainai-rotation-eval-" + pairId);
             t.setDaemon(true);
@@ -94,9 +96,24 @@ public class MainAIMonitor {
         this.rotationEvalExecutor = Executors.newSingleThreadExecutor(tf);
     }
 
-    /** Tear down the stall detector's thread + eval executor. */
+    /**
+     * Contract State Machine v3 (2026-05-25): true while a turn is in flight
+     * (turnStartedAt is set on {@link #onTurnStart} and cleared on
+     * {@link #onTurnEnd}). DeadlockGuard reads this to skip retries while the
+     * main AI is actively producing output.
+     */
+    public boolean isTurnInProgress() {
+        return turnStartedAt.get() > 0L;
+    }
+
+    /** Wall-clock ms of the most recent {@link #onTurnStart}, or 0 if no
+     *  turn is in flight. Used by DeadlockGuard for the grace-period check. */
+    public long getTurnStartedAt() {
+        return turnStartedAt.get();
+    }
+
+    /** Tear down the eval executor. */
     public void dispose() {
-        stallDetector.dispose();
         rotationEvalExecutor.shutdown();
         try {
             if (!rotationEvalExecutor.awaitTermination(2, TimeUnit.SECONDS)) {
@@ -147,7 +164,6 @@ public class MainAIMonitor {
     public void onTurnStart() {
         long now = System.currentTimeMillis();
         turnStartedAt.set(now);
-        stallDetector.start();
         try {
             l2Store.update(pairId, s -> {
                 if (s.mainAI == null) s.mainAI = new L2State.MainAIState();
@@ -165,7 +181,6 @@ public class MainAIMonitor {
     /** Patch point invoked from ClaudeMessageHandler.handleStreamEnd. */
     public void onTurnEnd() {
         long now = System.currentTimeMillis();
-        stallDetector.stop();
         long startedAt = turnStartedAt.getAndSet(0L);
         long durationMs = startedAt > 0 ? (now - startedAt) : 0L;
         try {
@@ -358,27 +373,7 @@ public class MainAIMonitor {
         }
     }
 
-    // ── internals ────────────────────────────────────────────────────────
-
-    private void onStallFire() {
-        long now = System.currentTimeMillis();
-        long startedAt = turnStartedAt.get();
-        long elapsedSec = startedAt > 0 ? (now - startedAt) / 1000L : 0L;
-        try {
-            l2Store.update(pairId, s -> {
-                if (s.mainAI == null) s.mainAI = new L2State.MainAIState();
-                s.mainAI.stallCount += 1;
-                s.mainAI.lastStallMs = now;
-                return s;
-            });
-        } catch (Exception e) {
-            LOG.warn("[MainAIMonitor] stall L2 update failed: " + e.getMessage());
-        }
-        if (statusPusher != null) {
-            statusPusher.pushAlert(
-                    PairStatusSnapshot.Alert.Severity.ERROR,
-                    "main AI stalled (" + elapsedSec + "s no turn_end) — interrupt or wait?");
-        }
-        LOG.warn("[MainAIMonitor] " + pairId + " stall fired elapsedSec=" + elapsedSec);
-    }
+    // Contract State Machine v3 (2026-05-25): onStallFire removed.
+    // Per-contract deadline + R1/R2/R3 escalation handles "main AI silent
+    // too long" via DeadlockGuard.
 }

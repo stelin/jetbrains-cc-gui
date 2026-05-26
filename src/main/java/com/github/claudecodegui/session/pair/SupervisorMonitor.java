@@ -52,8 +52,18 @@ public class SupervisorMonitor {
 
     private static final Logger LOG = Logger.getInstance(SupervisorMonitor.class);
 
+    /** Contract State Machine v3 (2026-05-25): the 30s periodic tick is
+     *  effectively disabled by passing a 24h interval (see
+     *  {@link #DEADLOCK_FRIENDLY_INTERVAL_MS}). The constant is retained for
+     *  legacy callers / tests that may construct the monitor directly. */
     public static final long DEFAULT_TICK_INTERVAL_MS = 30_000L;
     public static final long DEFAULT_URGENT_DELAY_MS  = 1_000L;
+    /** Effectively disable the periodic tick in production. Supervisor is
+     *  now woken on Contract state changes (via
+     *  {@link com.github.claudecodegui.session.pair.dispatcher.TransitionDispatcher})
+     *  and on urgent events (error / off_plan / etc.). The huge interval
+     *  exists as a safety-sweep fallback only — should never actually fire. */
+    public static final long DEADLOCK_FRIENDLY_INTERVAL_MS = 24L * 3600L * 1000L;
     // 2026-05-25 (FUNDAMENTAL FIX): wall-clock cap REMOVED. Monitor ticks
     // block until EventBus.forwardComposite resolves naturally — which now
     // happens when the daemon delivers the action OR the IPC layer fails OR
@@ -180,6 +190,18 @@ public class SupervisorMonitor {
     public long getLastTickEndMs() { return lastTickEndMs.get(); }
 
     /**
+     * Contract State Machine v3 (2026-05-25): bring the next tick forward to
+     * ~1ms. Used by {@link com.github.claudecodegui.session.pair.dispatcher.TransitionDispatcher}
+     * when the plan transitions to PENDING_DECISION so the supervisor sees the
+     * accumulated events promptly without waiting for the (now effectively
+     * disabled) 30s timer.
+     */
+    public void wakeForPlanTransition() {
+        if (stopped) return;
+        scheduleNextTick(1L);
+    }
+
+    /**
      * Phase 4: queue a one-shot banner that the next composite_summary will
      * carry. Used by {@code RotationCoordinator} so the new-generation
      * supervisor reads "you just inherited from gen N-1; here are the events
@@ -231,10 +253,15 @@ public class SupervisorMonitor {
         boolean caughtError = false;
         try {
             doTick(n);
+            // Stage C (2026-05-25): health-state mgmt now lives in HealthWatcher.
+            // Local consecutiveFailures + health state are kept as fall-back
+            // for legacy callers that haven't migrated to pair.getHealthWatcher().
             int prev = consecutiveFailures.getAndSet(0);
             if (prev > 0) {
                 transitionHealth(HealthState.HEALTHY);
             }
+            com.github.claudecodegui.session.pair.watcher.HealthWatcher hw = pair.getHealthWatcher();
+            if (hw != null) hw.recordSuccess();
             // Phase 2: signal "supervisor turn complete" so the status pusher
             // updates lastActivityAgoMs. Only on success — failures don't
             // count as activity.
@@ -252,6 +279,12 @@ public class SupervisorMonitor {
                     + e.getMessage());
             transitionHealth(f >= 2 ? HealthState.UNHEALTHY : HealthState.DEGRADED);
             if (f >= 2) coordinator.requestRotation();
+            // Stage C (2026-05-25): also tell HealthWatcher so the new owner
+            // sees the failure. transitionHealth above pushes to status pusher
+            // + L2 metrics; HealthWatcher does the same independently — slight
+            // double-write during the transition period, but cheap and harmless.
+            com.github.claudecodegui.session.pair.watcher.HealthWatcher hw = pair.getHealthWatcher();
+            if (hw != null) hw.recordFailure(e.getMessage());
         } finally {
             lastTickEndMs.set(System.currentTimeMillis());
             tickInProgress.set(false);

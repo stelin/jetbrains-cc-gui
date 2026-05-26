@@ -562,6 +562,16 @@ export const ChatInputBox = memo(forwardRef<ChatInputBoxHandle, ChatInputBoxProp
       <div
         className={`chat-input-box ${isResizingInputBox ? 'is-resizing' : ''}`}
         onClick={focusInput}
+        // Drop handling lives on the outer card so a drop anywhere on the
+        // box (header, toolbar, context bar, footer) lands in the input —
+        // not just on the narrow contenteditable strip. Without this, IDE
+        // drops that hit the chrome fall through to Java's AWT DropTarget
+        // and get routed by last-focus state, which feels random to users.
+        // The contenteditable still benefits because React bubbles drop
+        // events up, and `handleDrop` already inserts at the live caret /
+        // appends to the end when the caret is outside the editor.
+        onDragOver={handleDragOver}
+        onDrop={handleDrop}
         ref={containerRef}
         style={containerStyle}
       >
@@ -653,8 +663,9 @@ export const ChatInputBox = memo(forwardRef<ChatInputBoxHandle, ChatInputBoxProp
             onCompositionStart={handleCompositionStart}
             onCompositionEnd={handleCompositionEnd}
             onPaste={handlePaste}
-            onDragOver={handleDragOver}
-            onDrop={handleDrop}
+            // Drag/drop handlers live on the outer .chat-input-box — React
+            // bubbles drop events up, so any drop on the editable still
+            // reaches `handleDrop` through the outer handler.
             onContextMenu={ctxMenu.open}
             suppressContentEditableWarning
           />

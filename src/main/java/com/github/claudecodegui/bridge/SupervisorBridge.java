@@ -357,10 +357,29 @@ public class SupervisorBridge {
      * if the daemon returned no action line, e.g. on transport failure).
      */
     public CompletableFuture<JsonObject> postEvent(JsonObject event) {
+        return postEvent(event, "user");
+    }
+
+    /**
+     * Contract State Machine v3 (2026-05-25): same as {@link #postEvent(JsonObject)}
+     * but the daemon enqueues the message with the given {@code role}. Pass
+     * {@code "system"} for R3 DECISION_REQUEST and other framework-injected
+     * messages that should not appear as a user turn in the supervisor's
+     * conversation history. Pass {@code "user"} (or use the no-role overload)
+     * for normal event forwarding.
+     *
+     * <p>Daemon support: {@code supervisor-channel.js postEventToSupervisor}
+     * accepts the new {@code role} param and falls back to {@code "user"} if
+     * the SDK doesn't accept the requested role.
+     */
+    public CompletableFuture<JsonObject> postEvent(JsonObject event, String role) {
         JsonObject params = new JsonObject();
         params.addProperty("pairId", pairId);
         params.addProperty("supervisorId", supervisorId);
         params.add("event", event);
+        if (role != null && !role.isEmpty() && !"user".equals(role)) {
+            params.addProperty("role", role);
+        }
 
         AtomicReference<JsonObject> captured = new AtomicReference<>();
         AtomicReference<String> capturedError = new AtomicReference<>();

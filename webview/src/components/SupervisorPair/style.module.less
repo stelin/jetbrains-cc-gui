@@ -665,6 +665,187 @@
   }
 }
 
+// ─────────── 2026-05-25: CoordinatorEventStrip ───────────
+// Sits between AutonomyToggle and SessionCountStrip. Live log of coordinator
+// events (plan / contract / guard / dispatcher) so the user can see what the
+// Contract State Machine is doing in real time.
+
+.coordEventStrip {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border-secondary);
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  font-family: var(--font-mono, monospace);
+  min-height: 22px;
+}
+
+.coordEventTitle {
+  flex-shrink: 0;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-right: 4px;
+  padding-top: 2px;
+}
+
+.coordEventEmpty {
+  color: var(--text-muted);
+  opacity: 0.6;
+  font-style: italic;
+  align-self: center;
+}
+
+.coordEventScroll {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+  max-height: 110px;
+  overflow-y: auto;
+}
+
+.coordEventEntry {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.coordEventTime {
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+.coordEventSource {
+  font-weight: 600;
+  padding: 0 4px;
+  border-radius: 2px;
+  font-size: 10px;
+}
+
+.coordEventSourcePlan {
+  color: #3b82f6;
+  background: rgba(59, 130, 246, 0.12);
+}
+
+.coordEventSourceContract {
+  color: #10b981;
+  background: rgba(16, 185, 129, 0.12);
+}
+
+.coordEventSourceGuard {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.coordEventSourceDispatcher {
+  color: #a855f7;
+  background: rgba(168, 85, 247, 0.12);
+}
+
+.coordEventMessage {
+  color: var(--text-primary);
+  text-overflow: ellipsis;
+  overflow: hidden;
+  min-width: 0;
+  flex: 1;
+}
+
+.coordEventToggle {
+  align-self: flex-start;
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--border-secondary);
+  border-radius: 3px;
+  color: var(--text-muted);
+  font-size: 10px;
+  padding: 1px 6px;
+  cursor: pointer;
+
+  &:hover {
+    color: var(--text-primary);
+    border-color: var(--border-primary);
+  }
+}
+
+// ─────────── 2026-05-25: SessionCountStrip ───────────
+// Sits between AutonomyToggle and PeriodicNoticeStrip. Shows rotation
+// (new-session) count and SDK auto-compaction count for supervisor + main AI.
+
+.sessionCountStrip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border-secondary);
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  font-family: var(--font-mono, monospace);
+}
+
+.sessionCountRow {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.sessionCountLiveRow {
+  gap: 8px;
+  opacity: 0.95;
+}
+
+.sessionCountGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sessionCountSide {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.sessionCountValue {
+  color: var(--text-muted);
+}
+
+.sessionCountDot {
+  color: var(--text-muted);
+  opacity: 0.5;
+}
+
+.sessionCountLiveItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--text-muted);
+
+  strong {
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+}
+
+.sessionCountAccent strong,
+.sessionCountAccent {
+  color: #f59e0b;
+}
+
+.sessionCountAlert {
+  color: #ef4444;
+  font-weight: 600;
+}
+
+.sessionCountSpacer {
+  flex: 1;
+}
+
 // ─────────── PeriodicNoticeStrip ───────────
 // Sits between AutonomyToggle and DecisionTimeline. Shows non-actionable
 // system notices (supervisor monitor health-check heartbeats etc.) that used

@@ -10,8 +10,16 @@ public final class L2Schema {
 
     private L2Schema() { /* no instances */ }
 
-    /** Current on-disk schema version. */
-    public static final int CURRENT_VERSION = 2;
+    /** Current on-disk schema version.
+     *  v3 (2026-05-25): adds {@code L2State#plan} and {@code L2State#openContracts}
+     *  for the Pair Contract State Machine. v2 files auto-migrate (plan=null,
+     *  openContracts=[]). */
+    public static final int CURRENT_VERSION = 3;
+
+    /** Max open contracts per pair before issue() refuses + alerts UI. Bound
+     *  is defensive — DeadlockGuard's retry/escalate flow caps in-flight
+     *  contracts well below this in normal operation. */
+    public static final int MAX_OPEN_CONTRACTS_PER_PAIR = 50;
 
     /** Bounded ring cap for {@link L2State#recentDecisions}.
      *  Raised from 50 (v1) to 100 in Protocol v2 (2026-05-24) — autonomy mode

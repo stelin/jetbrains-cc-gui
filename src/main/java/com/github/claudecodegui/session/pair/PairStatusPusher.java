@@ -9,6 +9,11 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -60,7 +65,33 @@ public class PairStatusPusher {
     private volatile Long contextLimit;
     private volatile int compactCount;
     private volatile long lastSupervisorActivityMs = 0L;
+
+    /** Contract State Machine v3 (2026-05-25): HealthWatchdog threshold —
+     *  supervisor SDK silent for this long → mark CRITICAL alert. */
+    public static final long SDK_CRITICAL_SILENCE_MS = 30L * 60L * 1000L;
+
+    /** Latch tracking the last wall-clock ms a CRITICAL silence alert fired.
+     *  Reset to 0 whenever supervisor activity resumes so the next silence
+     *  window can alert again. */
+    private volatile long criticalHealthAlertFiredAt = 0L;
     private final Deque<PairStatusSnapshot.Alert> alertRing = new ArrayDeque<>();
+
+    /** Contract State Machine v3 (2026-05-25): ring for coordinator events
+     *  surfaced to the CoordinatorEventStrip UI. Cap kept small (15) so
+     *  the snapshot payload stays light. */
+    public static final int MAX_RECENT_COORDINATOR_EVENTS = 15;
+    private final Deque<PairStatusSnapshot.CoordinatorEvent> coordinatorEventRing = new ArrayDeque<>();
+
+    /** Contract State Machine v3 (2026-05-25): own periodic push, decoupled
+     *  from SupervisorMonitor.tick which after B.3.3 only runs on Contract
+     *  events (not on a fixed schedule). 30s matches the previous monitor
+     *  cadence — UI sees a fresh snapshot at least every 30s regardless of
+     *  whether the supervisor is active. */
+    public static final long PERIODIC_PUSH_INTERVAL_MS = 30_000L;
+
+    private volatile ScheduledExecutorService pushScheduler;
+    private volatile ScheduledFuture<?> periodicPushFuture;
+    private final AtomicBoolean periodicStarted = new AtomicBoolean(false);
 
     public PairStatusPusher(PairSession pair, ActionRouter router) {
         this(pair, router, null);
@@ -70,6 +101,48 @@ public class PairStatusPusher {
         this.pair = pair;
         this.router = router;
         this.l2Store = l2Store;
+    }
+
+    /**
+     * Contract State Machine v3 (2026-05-25): start the periodic 30s push
+     * that keeps the UI snapshot fresh independently of SupervisorMonitor's
+     * (now event-driven) tick. Idempotent — second call is a no-op.
+     *
+     * <p>Also fires an immediate {@link #pushHard()} so the UI sees an
+     * initial snapshot within seconds of pair start, instead of waiting for
+     * the first compaction / rotation / decision event.
+     */
+    public void startPeriodicPush() {
+        if (!periodicStarted.compareAndSet(false, true)) return;
+        pushScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "pair-status-pusher-" + pair.getPairId());
+            t.setDaemon(true);
+            return t;
+        });
+        // Seed the UI immediately.
+        try {
+            pushHard();
+        } catch (Exception e) {
+            LOG.warn("[PairStatusPusher] initial seed push failed: " + e.getMessage());
+        }
+        periodicPushFuture = pushScheduler.scheduleWithFixedDelay(() -> {
+            try { pushSoft(); }
+            catch (Exception e) { LOG.warn("[PairStatusPusher] periodic push failed: " + e.getMessage()); }
+        }, PERIODIC_PUSH_INTERVAL_MS, PERIODIC_PUSH_INTERVAL_MS, TimeUnit.MILLISECONDS);
+        LOG.info("[PairStatusPusher] " + pair.getPairId() + " periodic push started at "
+                + PERIODIC_PUSH_INTERVAL_MS + "ms");
+    }
+
+    public void stopPeriodicPush() {
+        if (!periodicStarted.compareAndSet(true, false)) return;
+        ScheduledFuture<?> f = periodicPushFuture;
+        if (f != null) f.cancel(false);
+        ScheduledExecutorService s = pushScheduler;
+        if (s != null) {
+            s.shutdownNow();
+            try { s.awaitTermination(2, TimeUnit.SECONDS); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        }
     }
 
     /**
@@ -165,7 +238,32 @@ public class PairStatusPusher {
         long now = System.currentTimeMillis();
         long last = lastPushedMs.get();
         if (now - last < MIN_PUSH_INTERVAL_MS) return;
+        checkSdkSilenceWatchdog(now);
         doPush(now);
+    }
+
+    /**
+     * Contract State Machine v3 (2026-05-25): HealthWatchdog inline rule.
+     * If supervisor SDK has been silent for >30 minutes, surface a CRITICAL
+     * alert so the UI can flag suspected process-level failure. Fires once
+     * per silence window (tracked by {@link #criticalHealthAlertFiredAt} so
+     * we don't spam every snapshot push).
+     */
+    private void checkSdkSilenceWatchdog(long now) {
+        if (lastSupervisorActivityMs <= 0) return;
+        long inactiveMs = now - lastSupervisorActivityMs;
+        if (inactiveMs < SDK_CRITICAL_SILENCE_MS) {
+            // Reset latch so the next silence window can alert again.
+            criticalHealthAlertFiredAt = 0L;
+            return;
+        }
+        // Already alerted within this silence window (lastSupervisorActivity
+        // hasn't moved since the last alert) — don't spam.
+        if (criticalHealthAlertFiredAt >= lastSupervisorActivityMs) return;
+        addAlert(PairStatusSnapshot.Alert.Severity.ERROR,
+                "Supervisor SDK silent for " + (inactiveMs / 60_000L)
+                        + "min — suspected process-level failure");
+        criticalHealthAlertFiredAt = now;
     }
 
     /** Unconditional snapshot push — used by health transitions, compaction, alerts. */
@@ -202,8 +300,19 @@ public class PairStatusPusher {
         synchronized (alertRing) {
             alerts = new ArrayList<>(alertRing);
         }
+        List<PairStatusSnapshot.CoordinatorEvent> coordEvents;
+        synchronized (coordinatorEventRing) {
+            coordEvents = new ArrayList<>(coordinatorEventRing);
+        }
 
         int generation = 0;
+        // 2026-05-25: rotation/compaction counts for both sides, surfaced in
+        // the SessionCountStrip UI. supervisor counts live at the top level
+        // of L2State; main AI counts are nested under l2.mainAI (nullable
+        // when the rotation/compaction subsystem hasn't initialised yet).
+        int supervisorRotationCount = 0;
+        int mainAiRotationCount = 0;
+        int mainAiCompactCount = 0;
         // Phase 5 (2026-05-24): pull recent decisions out of L2 for the
         // webview's DecisionTimeline. Last 20 entries (newest at end) keeps
         // payload small while giving enough scroll-back for a UI panel.
@@ -213,6 +322,11 @@ public class PairStatusPusher {
                 L2State s = l2Store.read(pair.getPairId());
                 if (s != null) {
                     generation = s.generation;
+                    supervisorRotationCount = s.rotationCount;
+                    if (s.mainAI != null) {
+                        mainAiRotationCount = s.mainAI.rotationCount;
+                        mainAiCompactCount = s.mainAI.compactCount;
+                    }
                     if (s.recentDecisions != null && !s.recentDecisions.isEmpty()) {
                         int from = Math.max(0, s.recentDecisions.size() - 20);
                         recentDecisions = new ArrayList<>(s.recentDecisions.subList(from, s.recentDecisions.size()));
@@ -240,6 +354,9 @@ public class PairStatusPusher {
                 .supervisorUsedTokens(usedTokens)
                 .supervisorContextLimit(contextLimit)
                 .compactCount(compactCount)
+                .supervisorRotationCount(supervisorRotationCount)
+                .mainAiRotationCount(mainAiRotationCount)
+                .mainAiCompactCount(mainAiCompactCount)
                 .lastActivityAgoMs(ago)
                 .pendingEvents(collector != null ? collector.currentSize() : 0)
                 .totalDroppedEvents(collector != null ? collector.totalDropped() : 0)
@@ -251,6 +368,17 @@ public class PairStatusPusher {
                 .autonomyMode(pair.getAutonomyMode())
                 .budgetStatus(budgetStatus)
                 .paused(pair.isPaused())
+                .recentCoordinatorEvents(coordEvents)
+                .openContractCount(pair.getContractRegistry() != null
+                        ? pair.getContractRegistry().openCount() : 0)
+                .totalIssuedContracts(pair.getContractRegistry() != null
+                        ? pair.getContractRegistry().getTotalIssued() : 0L)
+                .totalRetriedContracts(pair.getContractRegistry() != null
+                        ? pair.getContractRegistry().getTotalRetried() : 0L)
+                .totalDischargedContracts(pair.getContractRegistry() != null
+                        ? pair.getContractRegistry().getTotalDischarged() : 0L)
+                .totalEscalatedContracts(pair.getContractRegistry() != null
+                        ? pair.getContractRegistry().getTotalEscalated() : 0L)
                 .build();
     }
 
@@ -261,6 +389,27 @@ public class PairStatusPusher {
             while (alertRing.size() >= MAX_RECENT_ALERTS) alertRing.pollFirst();
             alertRing.offerLast(a);
         }
+    }
+
+    /**
+     * Contract State Machine v3 (2026-05-25): record a coordinator event
+     * (plan transition / contract issue / discharge / retry / etc.) for
+     * the CoordinatorEventStrip UI. Triggers a hard push so the strip
+     * updates without waiting for the periodic 30s tick — operators
+     * watching the strip want to see events land immediately.
+     */
+    public void recordCoordinatorEvent(PairStatusSnapshot.CoordinatorEvent.Source source,
+                                       String type, String message, String detail) {
+        PairStatusSnapshot.CoordinatorEvent e = new PairStatusSnapshot.CoordinatorEvent(
+                System.currentTimeMillis(), source, type, message, detail);
+        synchronized (coordinatorEventRing) {
+            while (coordinatorEventRing.size() >= MAX_RECENT_COORDINATOR_EVENTS) {
+                coordinatorEventRing.pollFirst();
+            }
+            coordinatorEventRing.offerLast(e);
+        }
+        try { pushHard(); }
+        catch (Exception ex) { LOG.debug("[PairStatusPusher] coord-event push failed: " + ex.getMessage()); }
     }
 
     /** Diagnostic getter. */

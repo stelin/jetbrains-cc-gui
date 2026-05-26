@@ -12,6 +12,10 @@ import AlertNotifier from './AlertNotifier';
 // autonomy controls and the decision timeline so non-actionable notices don't
 // pollute the supervisor chat.
 import PeriodicNoticeStrip from './PeriodicNoticeStrip';
+// 2026-05-25: rotation/compaction counters for both sides; sits between
+// AutonomyToggle and PeriodicNoticeStrip.
+import CoordinatorEventStrip from './CoordinatorEventStrip';
+import SessionCountStrip from './SessionCountStrip';
 // Q3 (2026-05-24): tabbed status panel mirroring main-AI StatusPanel (任务 / 子代理).
 import SupervisorStatusPanel from './SupervisorStatusPanel';
 // 2026-05-25 (FUNDAMENTAL FIX): manual interrupt button replaces wall-clock auto-cancel.
@@ -118,6 +122,8 @@ export default function SupervisorPane({
       <div className={styles.autonomyControls}>
         <AutonomyToggle />
       </div>
+      <CoordinatorEventStrip />
+      <SessionCountStrip />
       <PeriodicNoticeStrip />
       <DecisionTimeline />
 

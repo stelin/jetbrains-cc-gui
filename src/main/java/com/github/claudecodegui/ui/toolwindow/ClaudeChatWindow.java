@@ -140,7 +140,7 @@ public class ClaudeChatWindow {
                         || PairSessionManager.getInstance(project).hasActiveSupervisorTurn()
         );
 
-        this.session = new ClaudeSession(project, claudeSDKBridge, codexSDKBridge);
+        this.session = new ClaudeSession(project, claudeSDKBridge, codexSDKBridge, windowId);
 
         this.chatWindowDelegate = new ChatWindowDelegate(createDelegateHost());
         chatWindowDelegate.loadPermissionModeFromSettings();

@@ -43,6 +43,25 @@ public class SessionState {
     private volatile String runtimeSessionEpoch = UUID.randomUUID().toString();
 
     /**
+     * Per-tab window id, propagated from {@code ClaudeChatWindow} at construction.
+     * Used by {@code ClaudeMessageHandler.findAttachedPair} and
+     * {@code SessionSendService.prependPairContextMarker} to scope Pair lookup
+     * to pairs owned by the originating tab — fixes the 2026-05-25 cross-tab
+     * event leakage where Tab A's supervisor heard Tab B's main-AI events
+     * because the fallback picked the most-recently-started pair project-wide.
+     *
+     * <p>Volatile: set on the construction thread (EDT for live windows;
+     * arbitrary for SessionLifecycleManager rotation paths) and read on the
+     * SDK callback thread inside ClaudeMessageHandler with no other
+     * happens-before guarantee.
+     *
+     * <p>May be null for legacy / test callers that built ClaudeSession without
+     * a window id — in that case Pair attachment falls back to "no pair"
+     * (deliberately strict to prevent cross-tab routing).
+     */
+    private volatile String windowId;
+
+    /**
      * Phase 6c (2026-05-24): one-shot system-prompt append staged by
      * {@code ClaudeSession#swapInnerSession} for the next outgoing daemon send.
      * Cleared atomically by {@link #consumePendingSystemPromptAppend} once
@@ -90,6 +109,11 @@ public class SessionState {
 
     public String getChannelId() {
         return channelId;
+    }
+
+    /** Per-tab window id; see field doc. May be null. */
+    public String getWindowId() {
+        return windowId;
     }
 
     public boolean isBusy() {
@@ -161,6 +185,15 @@ public class SessionState {
 
     public void setChannelId(String channelId) {
         this.channelId = channelId;
+    }
+
+    /**
+     * Set the per-tab window id. Normally called once by {@link ClaudeSession}'s
+     * constructor; setter exists so rotation / history-load paths that pass
+     * windowId through can keep using the no-arg state slot.
+     */
+    public void setWindowId(String windowId) {
+        this.windowId = windowId;
     }
 
     public void setBusy(boolean busy) {

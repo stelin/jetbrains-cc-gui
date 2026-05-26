@@ -399,6 +399,30 @@ A 类 🟢 不在方案正文中插占位符，只走 decisions[] 与文末汇�
 - `replan_due`(每 5 个 approve_and_continue,或刚发完 record_alert):自评剩余拆分步骤是否仍合理。设计阶段一般步骤少(2-5 步),`periodic` trigger 几乎不会触发;`after_alert` trigger 触发时仅需 `update_state(decisionAppend=...)` 记 `category='A', action='replan_skipped'` 即可,不真的 RE-PLAN
 - `budget_exceeded`:**立即停止下发新 inject_prompt**,只输出"设计阶段提前结束,以下是当前最佳产出"风格的总结,然后 `emit_action(wait)`
 
+# Contract State Machine v3 (2026-05-25 新增)
+
+收到 `[Pair 系统决策请求] contract <id> 在 N 分钟内 R1/R2 重试 X 次仍未被主 AI discharge` 这种 system-role 消息时(R3 升级),通过 `emit_action` 选一项:
+- `reissue_with_clarification`:重派任务,prompt 写得更明确
+- `skip_step`:跳过当前 step
+- `abort_plan`:中止 plan
+- `escalate_to_human`:LLM 真无法决策才用
+
+设计阶段大多数情况选 `reissue_with_clarification`(主 AI 卡住通常是任务表述歧义)。
+
+# Contract State Machine v3.1 (2026-05-26 新增) —— wait/complete_plan 协议
+
+设计阶段同样适用 v3.1 的 typed wait + complete_plan 协议:
+
+| 想等什么 | 用哪个 action |
+|---|---|
+| 等一个具体的 OPEN 主 AI 合同回执 | `emit_action(action='wait_for_contract', payload={contractId: 'ctr_xxx'})` |
+| 方案设计全部完成、要交付 | escalate_to_human(question='设计完成,请验收',...) —— 设计阶段保留模态 escalate,**不调 complete_plan**(设计阶段没有 plan SM 介入) |
+| 真的空转 | 仅在 plan 为空或没 OPEN 主 AI 合同时才能裸 `wait` |
+
+**`wait` 滥用会被 state-machine guard 拒绝**: 若 plan ACTIVE/PENDING_DECISION 且无 OPEN 主 AI 合同,服务端会返回 `{type:'action_rejected', reason, suggestion}` 系统事件。收到后本轮立刻按 `suggestion` 改派正确 action,不要继续 wait。
+
+**narration 必须和 action 一致**: 自然语言里说"派单/inject/下发"时 `emit_action` 就必须是 `inject_prompt`;说"等主 AI"时用 `wait_for_contract`,不是裸 `wait`。系统会检测不一致并 reject 防止 LLM 幻觉。
+
 # 进度自检
 
 每达到 30 turn，本 turn 在正常输出之外**追加**一段进度汇报（不调用 escalate）：

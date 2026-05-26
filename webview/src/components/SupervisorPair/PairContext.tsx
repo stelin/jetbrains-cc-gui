@@ -42,12 +42,19 @@ export interface SupervisorUsage {
 export interface PairStatusSnapshot {
   pairId: string;
   generation: number;
-  state?: 'IDLE' | 'MAIN_TURN' | 'TICK' | 'ROTATING';
+  state?: 'IDLE' | 'MAIN_TURN' | 'TICK' | 'ROTATING' | 'PLAN_TRANSITIONING';
   health?: 'HEALTHY' | 'DEGRADED' | 'UNHEALTHY';
   supervisorContextRatio?: number;  // 0..1
   supervisorUsedTokens?: number;
   supervisorContextLimit?: number;
   compactCount: number;
+  /** 2026-05-25: cumulative supervisor rotations performed for this pair.
+   *  Optional because older Java builds (pre-2026-05-25) don't emit it. */
+  supervisorRotationCount?: number;
+  /** 2026-05-25: cumulative main-AI rotations performed for this pair. */
+  mainAiRotationCount?: number;
+  /** 2026-05-25: cumulative main-AI auto-compactions observed for this pair. */
+  mainAiCompactCount?: number;
   lastActivityAgoMs?: number;
   pendingEvents: number;
   totalDroppedEvents: number;
@@ -59,6 +66,26 @@ export interface PairStatusSnapshot {
     severity: 'INFO' | 'WARN' | 'ERROR';
     message: string;
   }>;
+  /** Contract State Machine v3 (2026-05-25): recent coordinator events
+   *  (plan transitions / contract issue/discharge/retry/escalate/cancel /
+   *  dispatcher wake). Surfaced to CoordinatorEventStrip. Capped at 15 by
+   *  the Java pusher; omitted entirely when empty. */
+  recentCoordinatorEvents?: Array<{
+    ts: number;
+    source: 'PLAN' | 'CONTRACT' | 'GUARD' | 'DISPATCHER';
+    type: string;
+    message: string;
+    detail?: string;
+  }>;
+  /** Contract State Machine v3 (2026-05-25): live activity counters from
+   *  ContractRegistry. Surfaced to SessionCountStrip second row so the
+   *  operator sees the system moving even when long-running counters
+   *  (rotation / compaction) stay at 0. */
+  openContractCount?: number;
+  totalIssuedContracts?: number;
+  totalRetriedContracts?: number;
+  totalDischargedContracts?: number;
+  totalEscalatedContracts?: number;
 }
 
 /**

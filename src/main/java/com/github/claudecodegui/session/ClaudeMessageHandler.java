@@ -240,6 +240,8 @@ public class ClaudeMessageHandler implements MessageCallback {
             turnRetryCount.set(0);
             // Phase 6a: main-AI monitor — same hook as handleStreamEnd, idempotent.
             notifyMainAIMonitorTurnEnd();
+            // Contract State Machine v3 (2026-05-25 fix): plan SM transition.
+            notifyPlanStateMachineTurnEnd();
             publishTurnEndIfPair();
             return;
         }
@@ -868,6 +870,9 @@ public class ClaudeMessageHandler implements MessageCallback {
         if (turnStartedAt == 0) turnStartedAt = System.currentTimeMillis();
         // Phase 6a (2026-05-24): main-AI observability monitor hook.
         notifyMainAIMonitorTurnStart();
+        // Contract State Machine v3 (2026-05-25 fix): plan SM transition into
+        // EXECUTING so TransitionDispatcher / DeadlockGuard see correct state.
+        notifyPlanStateMachineTurnStart();
         callbackHandler.notifyStreamStart();
     }
 
@@ -913,6 +918,12 @@ public class ClaudeMessageHandler implements MessageCallback {
         // publishTurnEndIfPair so the monitor's L2 update lands ahead of the
         // supervisor's event-bus dispatch (independent paths, but log order matters).
         notifyMainAIMonitorTurnEnd();
+        // Contract State Machine v3 (2026-05-25 fix): plan SM transition out of
+        // EXECUTING. When no MAIN_AI contracts are still open, plan moves to
+        // PENDING_DECISION → TransitionDispatcher wakes supervisor automatically.
+        // This is what was missing and caused the "supervisor 派单后主 AI 没收到
+        // Step 2" stall the user reported.
+        notifyPlanStateMachineTurnEnd();
         publishTurnEndIfPair();
     }
 
@@ -1229,13 +1240,20 @@ public class ClaudeMessageHandler implements MessageCallback {
      *
      * <p>Lookup order:
      * <ol>
-     *   <li>Exact match on {@code state.sessionId} (set after SDK assigns one)</li>
-     *   <li>Fallback to the project's single active pair — the SDK-assigned
-     *       sessionId only arrives on the first response, so a pair started
-     *       <em>before</em> the first turn would otherwise miss every event.
-     *       Since current iteration enforces 1 plan : 1 active pair, this is
-     *       safe.</li>
+     *   <li>Exact match on {@code state.sessionId} (set after SDK assigns one).</li>
+     *   <li>Fallback to the most-recently-started active pair <em>owned by
+     *       this tab</em>. The SDK-assigned sessionId only arrives on the
+     *       first response, so a pair started <em>before</em> the first turn
+     *       would otherwise miss its early events. The owner-window filter
+     *       keeps the fallback from picking up a pair created by a different
+     *       tab — see the 2026-05-25 cross-tab event leakage fix where
+     *       Tab A's supervisor was hearing Tab B's main-AI events.</li>
      * </ol>
+     *
+     * <p>If no tab windowId is available (legacy / test contexts that built
+     * the session without one), the fallback returns {@code null} rather than
+     * scanning project-wide — better to miss the first event than to route it
+     * to the wrong tab.
      */
     private PairSession findAttachedPair() {
         if (project == null) return null;
@@ -1246,8 +1264,12 @@ public class ClaudeMessageHandler implements MessageCallback {
                 PairSession exact = mgr.findByMainSession(sid);
                 if (exact != null) return exact;
             }
-            // Fallback: project has at most one active pair in this iteration.
-            return mgr.getActivePairs().stream()
+            // Window-scoped fallback: only consider pairs owned by THIS tab.
+            // Without a windowId we deliberately give up rather than guess —
+            // a missed first-turn event is better than a cross-tab miss-route.
+            String windowId = state != null ? state.getWindowId() : null;
+            if (windowId == null) return null;
+            return mgr.getActivePairsOwnedBy(windowId).stream()
                     .filter(p -> !p.isDisposed())
                     .reduce((a, b) -> a.getStartedAt() > b.getStartedAt() ? a : b)
                     .orElse(null);
@@ -1278,6 +1300,49 @@ public class ClaudeMessageHandler implements MessageCallback {
             if (pair == null) return;
             com.github.claudecodegui.session.pair.MainAIMonitor m = pair.getMainAIMonitor();
             if (m != null) m.onTurnEnd();
+        } catch (Throwable ignored) { /* never propagate */ }
+    }
+
+    /**
+     * Contract State Machine v3 (2026-05-25 fix): main-AI turn boundary needs
+     * to drive PlanStateMachine transitions too — without onTurnStarted /
+     * onTurnEnded, the plan stays in PENDING_DISCHARGE forever after the
+     * first contract is issued, which means TransitionDispatcher never sees
+     * a PENDING_DECISION transition → supervisor never gets auto-woken →
+     * Step 2+ never dispatched (the user-reported "supervisor 说派单了但主 AI 没收到").
+     */
+    private void notifyPlanStateMachineTurnStart() {
+        try {
+            com.github.claudecodegui.session.pair.PairSession pair = findAttachedPair();
+            if (pair == null) return;
+            com.github.claudecodegui.session.pair.plan.PlanStateMachine sm = pair.getPlanStateMachine();
+            if (sm != null) {
+                sm.onTurnStarted(com.github.claudecodegui.session.pair.contract.ContractAssignee.MAIN_AI);
+            }
+        } catch (Throwable ignored) { /* never propagate */ }
+    }
+
+    private void notifyPlanStateMachineTurnEnd() {
+        try {
+            com.github.claudecodegui.session.pair.PairSession pair = findAttachedPair();
+            if (pair == null) return;
+            com.github.claudecodegui.session.pair.plan.PlanStateMachine sm = pair.getPlanStateMachine();
+            if (sm == null) return;
+            // Recompute hasOpenContracts for the main-AI assignee. Discharge
+            // happens via ActionRouter.markDirectiveAcked BEFORE stream_end
+            // (report_turn_completion is typically the last tool call), so by
+            // now the registry reflects the new state.
+            com.github.claudecodegui.session.pair.contract.ContractRegistry r = pair.getContractRegistry();
+            boolean hasOpen = false;
+            if (r != null) {
+                for (com.github.claudecodegui.session.pair.contract.Contract c : r.getOpenContracts()) {
+                    if (c.assignedTo == com.github.claudecodegui.session.pair.contract.ContractAssignee.MAIN_AI) {
+                        hasOpen = true;
+                        break;
+                    }
+                }
+            }
+            sm.onTurnEnded(com.github.claudecodegui.session.pair.contract.ContractAssignee.MAIN_AI, hasOpen);
         } catch (Throwable ignored) { /* never propagate */ }
     }
 
@@ -1459,7 +1524,50 @@ public class ClaudeMessageHandler implements MessageCallback {
         } catch (Exception e) {
             LOG.debug("[Supervisor] publishTurnEnd failed: " + e.getMessage());
         }
+
+        // Contract State Machine v3 (2026-05-25): if this turn produced no
+        // tool_use AND there are still open MAIN_AI contracts that weren't
+        // discharged (i.e. main AI replied with prose only — conversational
+        // drift like "请发送下一步..."), trigger immediate retry instead of
+        // waiting for the 10min contract deadline. Targets the specific
+        // 2026-05-25 stall scenario from docs/plans/2026-05-25-...md §17.1.
+        checkContractDischargeOnTurnEnd(pair);
+
         resetTurnBuffer();
+    }
+
+    /**
+     * Contract State Machine v3 (2026-05-25): detect conversational drift.
+     * If turn ended with NO tool_use and there are open MAIN_AI contracts,
+     * the main AI clearly ignored its task — fire immediate retry per
+     * contract so the user doesn't wait the full deadline.
+     */
+    private void checkContractDischargeOnTurnEnd(PairSession pair) {
+        if (!turnToolUses.isEmpty()) {
+            return;  // Tool calls happened — main AI is working, even if not yet discharged.
+        }
+        com.github.claudecodegui.session.pair.contract.ContractRegistry registry =
+                pair.getContractRegistry();
+        if (registry == null) return;
+        java.util.List<com.github.claudecodegui.session.pair.contract.Contract> open =
+                registry.getOpenContracts();
+        for (com.github.claudecodegui.session.pair.contract.Contract c : open) {
+            if (c.assignedTo != com.github.claudecodegui.session.pair.contract.ContractAssignee.MAIN_AI) {
+                continue;
+            }
+            // Skip if already at max retries — DeadlockGuard will escalate.
+            if (c.retryCount >= c.maxRetries) continue;
+            try {
+                LOG.warn("[ClaudeMessageHandler] conversational drift detected — "
+                        + "auto-retry contract " + c.id + " (retryCount=" + c.retryCount + ")");
+                // Use SYSTEM_NUDGE type so the hint hammers home "you must tool_use".
+                registry.retry(c.id,
+                        com.github.claudecodegui.session.pair.contract.ContractType.SYSTEM_NUDGE,
+                        "main AI turn ended with no tool_use and no discharge — conversational drift");
+            } catch (Exception e) {
+                LOG.warn("[ClaudeMessageHandler] auto-retry failed for " + c.id + ": " + e.getMessage());
+            }
+        }
     }
 
     /**

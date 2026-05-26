@@ -363,46 +363,20 @@ public class PairHandler extends BaseMessageHandler {
 
             // Protocol v2 (2026-05-24): wire autonomy-mode trackers. Both are
             // always created — budget without limits is a no-op cost-wise but
-            // still tracks counters for the UI / completion report. Directive
-            // tracker callback routes timeouts to EventBus.publishDirectiveLost
-            // so the supervisor can choose to retry or skip the step.
-            com.github.claudecodegui.session.pair.DirectiveTracker dt =
-                    new com.github.claudecodegui.session.pair.DirectiveTracker(session.getPairId());
-            final PairSession dtSessionRef = session;
-            dt.setOnTimeout((directiveId, payload) -> {
-                if (dtSessionRef.isDisposed() || dtSessionRef.getEventBus() == null) return;
-                String lastObjective = (payload != null && payload.has("objective")
-                        && !payload.get("objective").isJsonNull())
-                        ? payload.get("objective").getAsString() : null;
-                dtSessionRef.getEventBus().publishDirectiveLost(
-                        directiveId, lastObjective,
-                        com.github.claudecodegui.session.pair.DirectiveTracker.DEFAULT_ACK_TIMEOUT_MS);
-                // Phase 6 (2026-05-24): F2 retry cap. Count consecutive timeouts;
-                // ActionRouter resets the counter when a step advances cleanly
-                // (approve_and_continue). At 3 in a row, hint the supervisor to
-                // skip the current step so we don't burn budget hammering a
-                // stuck main-AI runtime.
-                int fails = dtSessionRef.incrementDirectiveFailure();
-                if (fails >= 3) {
-                    dtSessionRef.getEventBus().publishStepBlocked(fails, lastObjective);
-                    dtSessionRef.resetDirectiveFailures();
-                }
-            });
-            // 2026-05-25: fast received-timeout (3s). Re-push the inject if the
-            // webview never ack'd "received" — covers the JBCef bridge drop
-            // intermittent failure that the user reported (sometimes works,
-            // sometimes doesn't). ActionRouter caps retries at MAX_RECEIVED_RETRIES.
-            dt.setOnReceivedTimeout((directiveId, payload) -> {
-                if (dtSessionRef.isDisposed()) return;
-                com.github.claudecodegui.session.pair.ActionRouter router = dtSessionRef.getActionRouter();
-                if (router == null) return;
-                router.retryInjectOnReceivedTimeout(directiveId, payload);
-            });
-            session.setDirectiveTracker(dt);
-
+            // still tracks counters for the UI / completion report.
+            // Contract State Machine v3 (2026-05-25): DirectiveTracker
+            // construction removed — ContractRegistry (wired in
+            // PairSessionManager) handles all directive timing, retry, and
+            // R1/R2/R3 escalation. The supervisor receives a structured
+            // DECISION_REQUEST contract instead of the old directive_lost
+            // event when a contract goes 3-strikes.
             com.github.claudecodegui.session.pair.PairBudgetTracker bt =
                     new com.github.claudecodegui.session.pair.PairBudgetTracker(session.getPairId(), budget);
             session.setBudgetTracker(bt);
+            // Stage C (2026-05-25): BudgetWatcher facade for uniform watcher
+            // access alongside HealthWatcher / RotationWatcher.
+            session.setBudgetWatcher(
+                    new com.github.claudecodegui.session.pair.watcher.BudgetWatcher(bt));
 
             // v4 unified pipeline: forward each raw SDK message streamed by the
             // daemon during a supervisor turn to the webview. The webview maps

@@ -187,6 +187,28 @@ public class RotationCoordinator {
         // ── 11. Atomic swap supervisorId on the pair ─────────────────────
         pair.swapSupervisorId(newSupervisorId);
 
+        // Contract State Machine v3 (2026-05-25): cancel SUPERVISOR-bound open
+        // contracts. The recipient changed — DECISION_REQUESTs that the old
+        // supervisor was supposed to handle would be ambiguous to the new
+        // supervisor; safer to drop them. MAIN_AI contracts stay intact
+        // (main AI is still working on whatever was assigned to it).
+        com.github.claudecodegui.session.pair.contract.ContractRegistry contractRegistry =
+                pair.getContractRegistry();
+        if (contractRegistry != null) {
+            int cancelled = 0;
+            for (com.github.claudecodegui.session.pair.contract.Contract c
+                    : contractRegistry.getOpenContracts()) {
+                if (c.assignedTo == com.github.claudecodegui.session.pair.contract.ContractAssignee.SUPERVISOR) {
+                    contractRegistry.cancel(c.id, "supervisor rotation: " + triggerReason);
+                    cancelled++;
+                }
+            }
+            if (cancelled > 0) {
+                LOG.info("[Rotation] " + pairId + " cancelled " + cancelled
+                        + " SUPERVISOR-bound contracts on rotation");
+            }
+        }
+
         // ── 12. Update L2: generation++, lastRotation, rotationCount++ ──
         final String handoffSource = degraded
                 ? (health == HealthState.UNHEALTHY ? "l2_unhealthy" : "l2_fallback")

@@ -102,6 +102,27 @@ public class RemotePermissionAdapter implements ControlMessageHandler {
             LOG.warn("[RemotePermissionAdapter] ask_user_question_request missing requestId");
             return;
         }
+
+        // Supervisor pair-mode intercept (remote mirror of
+        // PermissionService.handleAskUserQuestionRequest). When the
+        // originating tab has an active pair session, the user opted into
+        // autonomous (no-popup) operation, so we deny AskUserQuestion here
+        // instead of surfacing a dialog. The denial flows back through
+        // ai-bridge-server's permission-ipc.js as a {denied:true, reason}
+        // envelope, which permission-handler.canUseTool converts to SDK
+        // {@code behavior:'deny'}; main AI then continues from context.
+        String windowId = optString(req, "windowId");
+        if (isPairModeActive(windowId)) {
+            LOG.info("[RemotePermissionAdapter] Pair active for windowId="
+                    + (windowId == null ? "(none)" : windowId)
+                    + "; denying AskUserQuestion without popup");
+            replySender.accept(buildAskDeniedResponse(requestId,
+                    "AskUserQuestion is disabled in autonomous (supervisor) pair mode. "
+                            + "Do not retry this tool — make your best judgment from "
+                            + "existing context and continue."));
+            return;
+        }
+
         // Build the JSON passed to the React AskUserQuestionDialog. Must mirror
         // the local-mode request-file shape so the webview can read
         // request.requestId (it echoes that back on submit; without it the
@@ -140,6 +161,40 @@ public class RemotePermissionAdapter implements ControlMessageHandler {
         resp.addProperty("requestId", requestId);
         resp.add("answers", answers);
         return resp;
+    }
+
+    private JsonObject buildAskDeniedResponse(String requestId, String reason) {
+        JsonObject resp = new JsonObject();
+        resp.addProperty("type", "_ctrl");
+        resp.addProperty("action", "ask_user_question_response");
+        resp.addProperty("requestId", requestId);
+        resp.addProperty("denied", true);
+        resp.addProperty("reason", reason == null ? "" : reason);
+        resp.add("answers", new JsonObject());
+        return resp;
+    }
+
+    /**
+     * True if the originating tab (or project, when {@code windowId} is null)
+     * currently has an active (non-disposed) pair session. Best-effort: any
+     * unexpected exception falls back to "no pair", so a broken pair manager
+     * never blocks a popup.
+     */
+    private boolean isPairModeActive(String windowId) {
+        try {
+            if (project == null || project.isDisposed()) return false;
+            com.github.claudecodegui.session.pair.PairSessionManager mgr =
+                    com.github.claudecodegui.session.pair.PairSessionManager.getInstance(project);
+            if (mgr == null) return false;
+            if (windowId != null && !windowId.isEmpty()) {
+                return mgr.getActivePairsOwnedBy(windowId).stream()
+                        .anyMatch(p -> !p.isDisposed());
+            }
+            return mgr.getActivePairs().stream().anyMatch(p -> !p.isDisposed());
+        } catch (Throwable t) {
+            LOG.warn("[RemotePermissionAdapter] Pair-mode check failed: " + t.getMessage());
+            return false;
+        }
     }
 
     // =========================================================================

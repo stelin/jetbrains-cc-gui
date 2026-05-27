@@ -93,7 +93,13 @@ async function createRuntime(requestContext, callbacks) {
     activeTurnCount: 0,
     stderrLines: [],
     query: null,
-    inputStream: new AsyncStream()
+    inputStream: new AsyncStream(),
+    // Mutable cell holding the per-turn windowId. The PreToolUse hook closes
+    // over this ref (not the value) so each AskUserQuestion uses the
+    // CURRENT turn's windowId. Set by applyDynamicControls on every reuse;
+    // initialised from create-time request (often preconnect, which sends no
+    // windowId — that's why we MUST refresh on reuse).
+    windowIdRef: { value: requestContext.windowId || null }
   };
 
   const options = {
@@ -130,7 +136,7 @@ async function createRuntime(requestContext, callbacks) {
         // Always update local state to keep hook and runtime in sync
         runtime.currentPermissionMode = mode;
         runtime.permissionModeState.value = mode;
-      })]
+      }, runtime.windowIdRef)]
     }]
   };
 
@@ -150,6 +156,19 @@ async function createRuntime(requestContext, callbacks) {
 
 async function applyDynamicControls(runtime, requestContext) {
   if (!runtime || runtime.closed) return;
+
+  // Refresh windowId on every acquire so the PreToolUse hook's closure (which
+  // captured this same ref at createRuntime time) sees the CURRENT turn's
+  // windowId. Without this, a runtime created by preconnect (no windowId)
+  // would keep firing AskUserQuestion with windowId=null even after a real
+  // claude.send carrying a windowId arrived — causing cross-tab pair-mode
+  // misrouting (Tab A's pair denying Tab B's popup).
+  if (runtime.windowIdRef) {
+    const next = requestContext.windowId || null;
+    if (runtime.windowIdRef.value !== next) {
+      runtime.windowIdRef.value = next;
+    }
+  }
 
   const targetPermissionMode = normalizePermissionMode(requestContext.permissionMode);
   if (runtime.currentPermissionMode !== targetPermissionMode) {

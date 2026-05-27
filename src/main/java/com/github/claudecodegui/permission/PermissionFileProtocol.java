@@ -107,6 +107,23 @@ class PermissionFileProtocol {
         writeJson(resolveResponsePath(ASK_USER_QUESTION_RESPONSE_FILE_PREFIX, requestId), response, "ASK_RESPONSE");
     }
 
+    /**
+     * Write a denied AskUserQuestion response. Used by the supervisor pair mode
+     * intercept in {@link PermissionService#handleAskUserQuestionRequest}: when
+     * the request originates from a tab whose window already has an active pair
+     * session, we deny the tool call here instead of popping a dialog the user
+     * never agreed to see. ai-bridge translates {@code denied: true} into an
+     * SDK {@code behavior: 'deny'} so the main AI receives a tool error and
+     * continues autonomously.
+     */
+    void writeAskUserQuestionDenied(String requestId, String reason) {
+        JsonObject response = new JsonObject();
+        response.addProperty("denied", true);
+        response.addProperty("reason", reason == null ? "" : reason);
+        response.add("answers", new JsonObject());
+        writeJson(resolveResponsePath(ASK_USER_QUESTION_RESPONSE_FILE_PREFIX, requestId), response, "ASK_DENIED");
+    }
+
     void writePlanApprovalResponse(String requestId, boolean approved, String targetMode) {
         JsonObject response = new JsonObject();
         response.addProperty("approved", approved);

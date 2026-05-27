@@ -245,7 +245,9 @@ public class SessionSendService {
                 + ", epoch=" + runtimeSessionEpoch
                 + ", cwd=" + state.getCwd()
                 + ", model=" + currentModel
-                + ", appendBytes=" + (systemPromptAppend == null ? 0 : systemPromptAppend.length()));
+                + ", appendBytes=" + (systemPromptAppend == null ? 0 : systemPromptAppend.length())
+                + ", windowId=" + state.getWindowId()
+                + ", state@" + System.identityHashCode(state));
 
         return claudeSDKBridge.sendMessage(
                         channelId,
@@ -262,6 +264,7 @@ public class SessionSendService {
                         false,
                         state.getReasoningEffort(),
                         systemPromptAppend,
+                        state.getWindowId(),
                         handler
                 ).thenApply(result -> null);
     }
@@ -314,7 +317,17 @@ public class SessionSendService {
             // (turn still gets recorded, just not tied to a specific directive).
             // Future: track latest directiveId on PairSession.
             String marker = "<!--pair-context:" + gson.toJson(pc) + "-->\n";
-            return marker + existing;
+            // Autonomous-mode guidance — main AI runs unattended in pair mode,
+            // so AskUserQuestion would just deadlock. Tell the model up-front
+            // not to call it; the Java-side PermissionService still hard-denies
+            // as a tripwire if the model ignores this instruction. This text
+            // sits OUTSIDE the HTML comment so the model actually reads it.
+            String autonomyHint =
+                    "You are operating in autonomous (supervisor) pair mode — no human is available "
+                            + "to answer interactive prompts. Do NOT call the AskUserQuestion tool; "
+                            + "make your best judgment from existing context and continue. "
+                            + "If the supervisor needs clarification it will steer you via system messages.\n";
+            return marker + autonomyHint + existing;
         } catch (Throwable ignored) {
             return currentAppend;
         }

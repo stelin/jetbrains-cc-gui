@@ -40,11 +40,21 @@ try {
 /**
  * Request AskUserQuestion answers via file system communication with Java process.
  * @param {Object} input - AskUserQuestion tool parameters (contains questions array)
- * @returns {Promise<Object|null>} - User answers object, returns null on failure
+ * @param {Object} [ctx={}] - Per-turn context. ctx.windowId is the IDE tab id
+ *   stamped by Java (ClaudeRequestParamsBuilder) and threaded through
+ *   buildQueryOptions's canUseTool closure. Java's PermissionService uses it
+ *   to decide whether THIS tab is currently in supervisor pair mode (deny
+ *   without popup) vs. normal mode (popup). Null is acceptable — Java falls
+ *   back to a project-wide pair check.
+ * @returns {Promise<Object|null|{__denied:true,reason:string}>} - One of:
+ *   - User answers object on normal popup completion
+ *   - `null` on timeout / parse error / failure
+ *   - `{__denied:true, reason}` when Java intercepted the call (pair mode).
+ *     canUseTool translates this into SDK `behavior: 'deny'`.
  */
-export async function requestAskUserQuestionAnswers(input) {
+export async function requestAskUserQuestionAnswers(input, ctx = {}) {
   const requestStartTime = Date.now();
-  debugLog('ASK_USER_QUESTION_START', 'Requesting answers for questions', { input });
+  debugLog('ASK_USER_QUESTION_START', 'Requesting answers for questions', { input, ctx });
 
   try {
     const requestId = `ask-${Date.now()}-${Math.random().toString(36).substring(7)}`;
@@ -58,7 +68,11 @@ export async function requestAskUserQuestionAnswers(input) {
       toolName: 'AskUserQuestion',
       questions: input.questions || [],
       timestamp: new Date().toISOString(),
-      cwd: process.cwd()
+      cwd: process.cwd(),
+      // Stamp the originating tab. PermissionService uses this for tab-level
+      // pair-mode routing (multiple tabs on the same project may differ in
+      // pair state). Omit when not provided so legacy senders stay unchanged.
+      ...(ctx && ctx.windowId ? { windowId: ctx.windowId } : {})
     };
 
     debugLog('ASK_USER_QUESTION_FILE_WRITE', `Writing question request file`, { requestFile, responseFile });
@@ -99,8 +113,6 @@ export async function requestAskUserQuestionAnswers(input) {
           debugLog('ASK_USER_QUESTION_RESPONSE_CONTENT', `Raw response content: ${responseContent}`);
 
           const responseData = JSON.parse(responseContent);
-          const answers = responseData.answers;
-          debugLog('ASK_USER_QUESTION_RESPONSE_PARSED', `Parsed answers`, { answers, elapsed: `${Date.now() - requestStartTime}ms` });
 
           try {
             unlinkSync(responseFile);
@@ -109,6 +121,20 @@ export async function requestAskUserQuestionAnswers(input) {
             debugLog('ASK_USER_QUESTION_FILE_CLEANUP_ERROR', `Failed to delete response file: ${cleanupError.message}`);
           }
 
+          // Supervisor pair-mode intercept: Java's PermissionService writes
+          // `{denied:true, reason}` when the originating tab is in pair mode.
+          // Surface a structured sentinel so canUseTool can return SDK
+          // `behavior: 'deny'` with the supplied reason.
+          if (responseData.denied === true) {
+            debugLog('ASK_USER_QUESTION_DENIED', `Denied by Java (pair-mode)`, {
+              reason: responseData.reason,
+              elapsed: `${Date.now() - requestStartTime}ms`
+            });
+            return { __denied: true, reason: responseData.reason || 'AskUserQuestion denied' };
+          }
+
+          const answers = responseData.answers;
+          debugLog('ASK_USER_QUESTION_RESPONSE_PARSED', `Parsed answers`, { answers, elapsed: `${Date.now() - requestStartTime}ms` });
           return answers;
         } catch (e) {
           debugLog('ASK_USER_QUESTION_RESPONSE_ERROR', `Error reading/parsing response: ${e.message}`);

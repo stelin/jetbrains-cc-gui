@@ -50,6 +50,7 @@ class ClaudeDaemonRequestExecutor {
             Boolean disableThinking,
             String reasoningEffort,
             String systemPromptAppend,
+            String windowId,
             MessageCallback callback
     ) {
         return CompletableFuture.supplyAsync(() -> {
@@ -72,7 +73,8 @@ class ClaudeDaemonRequestExecutor {
                         streaming,
                         disableThinking,
                         reasoningEffort,
-                        systemPromptAppend
+                        systemPromptAppend,
+                        windowId
                 );
 
                 boolean hasAttachments = attachments != null && !attachments.isEmpty() && params.has("attachments");

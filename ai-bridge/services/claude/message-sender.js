@@ -61,7 +61,12 @@ function resolveThinkingConfig(settings) {
 /**
  * Build query options object shared by both send functions.
  */
-function buildQueryOptions({ workingDirectory, permissionMode, sdkModelName, maxThinkingTokens, streamingEnabled, systemPromptAppend, preToolUseHook, sdkStderrLines }) {
+function buildQueryOptions({ workingDirectory, permissionMode, sdkModelName, maxThinkingTokens, streamingEnabled, systemPromptAppend, preToolUseHook, sdkStderrLines, windowId }) {
+  // Mirror persistent-query-service: close over windowId so the AskUserQuestion
+  // file-IPC request carries the originating tab id, letting Java decide
+  // pair-mode interception per-tab. Null falls back to project-wide check.
+  const wrappedCanUseTool = (toolName, input, opts = {}) =>
+    canUseTool(toolName, input, { ...opts, _windowId: windowId || null });
   return {
     cwd: workingDirectory,
     permissionMode,
@@ -74,7 +79,7 @@ function buildQueryOptions({ workingDirectory, permissionMode, sdkModelName, max
     additionalDirectories: Array.from(
       new Set([workingDirectory, process.env.IDEA_PROJECT_PATH, process.env.PROJECT_PATH].filter(Boolean))
     ),
-    canUseTool,
+    canUseTool: wrappedCanUseTool,
     hooks: { PreToolUse: [{ hooks: [preToolUseHook] }] },
     settingSources: ['user', 'project', 'local'],
     systemPrompt: {
@@ -403,7 +408,7 @@ function handleSendError(error, streamState, sdkStderrLines) {
  * @param {string} agentPrompt - Agent prompt (optional)
  * @param {boolean} streaming - Whether to enable streaming (optional, defaults to config value)
  */
-export async function sendMessage(message, resumeSessionId = null, cwd = null, permissionMode = null, model = null, openedFiles = null, agentPrompt = null, streaming = null, disableThinking = false, reasoningEffort = null) {
+export async function sendMessage(message, resumeSessionId = null, cwd = null, permissionMode = null, model = null, openedFiles = null, agentPrompt = null, streaming = null, disableThinking = false, reasoningEffort = null, windowId = null) {
   console.log('[DIAG] ========== sendMessage() START ==========');
   console.log('[DIAG] params:', { msgLen: message ? message.length : 0, resumeSessionId: resumeSessionId || '(new)', cwd, permissionMode, model, reasoningEffort });
 
@@ -438,8 +443,8 @@ export async function sendMessage(message, resumeSessionId = null, cwd = null, p
     streamingEnabled = streaming != null ? streaming : (settings?.streamingEnabled ?? false);
     console.log('[DEBUG] Config:', { effectivePermissionMode, alwaysThinkingEnabled, maxThinkingTokens, streamingEnabled, reasoningEffort: normalizedReasoningEffort, disableThinking });
 
-    const preToolUseHook = createPreToolUseHook(effectivePermissionMode, workingDirectory);
-    const options = buildQueryOptions({ workingDirectory, permissionMode: effectivePermissionMode, sdkModelName, maxThinkingTokens, streamingEnabled, systemPromptAppend, preToolUseHook, sdkStderrLines });
+    const preToolUseHook = createPreToolUseHook(effectivePermissionMode, workingDirectory, null, windowId);
+    const options = buildQueryOptions({ workingDirectory, permissionMode: effectivePermissionMode, sdkModelName, maxThinkingTokens, streamingEnabled, systemPromptAppend, preToolUseHook, sdkStderrLines, windowId });
 
     if (normalizedReasoningEffort) {
       options.effort = normalizedReasoningEffort;
@@ -505,7 +510,7 @@ export async function sendMessageWithAttachments(message, resumeSessionId = null
     setModelEnvironmentVariables(resolvedAttachModel, model);
 
     const normalizedPermissionMode = (!permissionMode || permissionMode === '') ? 'default' : permissionMode;
-    const preToolUseHook = createPreToolUseHook(normalizedPermissionMode, workingDirectory);
+    const preToolUseHook = createPreToolUseHook(normalizedPermissionMode, workingDirectory, null, stdinData?.windowId || null);
 
     const normalizedReasoningEffort = normalizeReasoningEffort(stdinData?.reasoningEffort || null);
     const { alwaysThinkingEnabled, maxThinkingTokens: resolvedMaxThinkingTokens } = resolveThinkingConfig(settings);
@@ -514,7 +519,7 @@ export async function sendMessageWithAttachments(message, resumeSessionId = null
     streamingEnabled = streamingParam != null ? streamingParam : (settings?.streamingEnabled ?? false);
     console.log('[DEBUG] (withAttachments) Config:', { normalizedPermissionMode, alwaysThinkingEnabled, maxThinkingTokens, streamingEnabled, reasoningEffort: normalizedReasoningEffort });
 
-    const options = buildQueryOptions({ workingDirectory, permissionMode: normalizedPermissionMode, sdkModelName, maxThinkingTokens, streamingEnabled, systemPromptAppend, preToolUseHook, sdkStderrLines });
+    const options = buildQueryOptions({ workingDirectory, permissionMode: normalizedPermissionMode, sdkModelName, maxThinkingTokens, streamingEnabled, systemPromptAppend, preToolUseHook, sdkStderrLines, windowId: stdinData?.windowId || null });
 
     if (normalizedReasoningEffort) {
       options.effort = normalizedReasoningEffort;

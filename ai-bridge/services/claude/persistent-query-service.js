@@ -86,7 +86,14 @@ function buildSystemPromptAppend(params) {
   return buildIDEContextPrompt(openedFiles, agentPrompt);
 }
 
-function buildQueryOptions(workingDirectory, sdkModelName, permissionMode, maxThinkingTokens, streamingEnabled, systemPromptAppend, requestedSessionId, reasoningEffort) {
+function buildQueryOptions(workingDirectory, sdkModelName, permissionMode, maxThinkingTokens, streamingEnabled, systemPromptAppend, requestedSessionId, reasoningEffort, windowId) {
+  // Close over windowId so AskUserQuestion's file-IPC request can be tagged
+  // with the originating tab. The Java-side PermissionService uses this to
+  // decide whether the tab is currently in supervisor pair mode (no popup)
+  // or normal mode (popup). When windowId is null, the Java side falls back
+  // to a project-wide pair check.
+  const wrappedCanUseTool = (toolName, input, opts = {}) =>
+    canUseTool(toolName, input, { ...opts, _windowId: windowId || null });
   return {
     cwd: workingDirectory,
     permissionMode,
@@ -102,7 +109,7 @@ function buildQueryOptions(workingDirectory, sdkModelName, permissionMode, maxTh
         [workingDirectory, process.env.IDEA_PROJECT_PATH, process.env.PROJECT_PATH].filter(Boolean)
       )
     ),
-    canUseTool,
+    canUseTool: wrappedCanUseTool,
     settingSources: ['user', 'project', 'local'],
     systemPrompt: {
       type: 'preset',
@@ -177,10 +184,17 @@ async function buildRequestContext(params, withAttachments) {
     console.log(`[REASONING_EFFORT] ⊝ persistent buildRequestContext: no effort set (model=${sdkModelName ?? modelId ?? 'default'}, maxThinkingTokens=${maxThinkingTokens ?? 'undefined'}, raw=${JSON.stringify(params.reasoningEffort ?? null)})`);
   }
 
+  // Tab identity stamped by Java (ClaudeRequestParamsBuilder). When absent
+  // (e.g. system-level senders like GitCommitMessageService) we pass null
+  // and Java's PermissionService falls back to a project-wide pair check.
+  const windowId = (typeof params.windowId === 'string' && params.windowId.trim() !== '')
+    ? params.windowId.trim()
+    : null;
+
   const options = buildQueryOptions(
     workingDirectory, sdkModelName, permissionMode,
     maxThinkingTokens, streamingEnabled, systemPromptAppend, requestedSessionId,
-    normalizedReasoningEffort
+    normalizedReasoningEffort, windowId
   );
 
   const userMessage = await buildUserMessage(params, withAttachments, requestedSessionId);
@@ -199,7 +213,8 @@ async function buildRequestContext(params, withAttachments) {
     sdkModelName,
     permissionMode,
     maxThinkingTokens,
-    runtimeSignature
+    runtimeSignature,
+    windowId,
   };
 }
 

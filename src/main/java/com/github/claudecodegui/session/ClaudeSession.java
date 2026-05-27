@@ -166,6 +166,8 @@ public class ClaudeSession {
         // Initialize managers
         this.state = new com.github.claudecodegui.session.SessionState();
         this.state.setWindowId(windowId);
+        LOG.warn("[WINDOWID_DEBUG] new ClaudeSession state@"
+                + System.identityHashCode(state) + " windowId=" + windowId);
         this.messageParser = new com.github.claudecodegui.session.MessageParser();
         this.messageMerger = new com.github.claudecodegui.session.MessageMerger();
         this.contextCollector = new com.github.claudecodegui.session.EditorContextCollector(project);

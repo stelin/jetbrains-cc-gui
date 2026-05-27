@@ -34,7 +34,8 @@ class ClaudeRequestParamsBuilder {
             Boolean streaming,
             Boolean disableThinking,
             String reasoningEffort,
-            String systemPromptAppend
+            String systemPromptAppend,
+            String windowId
     ) {
         JsonObject params = new JsonObject();
         params.addProperty("message", message);
@@ -43,6 +44,15 @@ class ClaudeRequestParamsBuilder {
         params.addProperty("cwd", cwd != null ? cwd : "");
         params.addProperty("permissionMode", permissionMode != null ? permissionMode : "");
         params.addProperty("model", model != null ? model : "");
+        // Tab identity. ai-bridge closes this over the per-turn canUseTool
+        // callback so that when the main AI calls AskUserQuestion, the
+        // ask-user-question-*.json request can be tagged with the originating
+        // tab. PermissionService uses this to route the pair-mode intercept
+        // at tab granularity (multiple tabs on the same project may have
+        // different pair states).
+        if (windowId != null && !windowId.isEmpty()) {
+            params.addProperty("windowId", windowId);
+        }
 
         JsonArray attachmentArray = serializeAttachments(attachments);
         if (attachmentArray != null && attachmentArray.size() > 0) {

@@ -543,6 +543,31 @@ public class PermissionService {
         }
 
         String requestId = request.get("requestId").getAsString();
+
+        // Supervisor pair-mode intercept: when the originating tab has an
+        // active PairSession, the user explicitly opted into autonomous
+        // (no-popup) operation — so we deny AskUserQuestion here instead of
+        // surfacing a dialog. The denial flows back through ai-bridge as an
+        // SDK {@code behavior: 'deny'}, and the main AI continues from
+        // existing context. Tab-level granularity uses the {@code windowId}
+        // the ai-bridge stamps into the request file; if it is absent
+        // (legacy senders) we fall back to a project-wide check, which is
+        // safe but coarser.
+        String windowId = request.has("windowId") && !request.get("windowId").isJsonNull()
+                ? request.get("windowId").getAsString()
+                : null;
+        if (isPairModeActiveForRequest(request, windowId)) {
+            debugLog("ASK_PAIR_BLOCKED",
+                    "Pair active for windowId=" + (windowId == null ? "(none)" : windowId)
+                            + "; denying AskUserQuestion without popup");
+            fileProtocol.writeAskUserQuestionDenied(requestId,
+                    "AskUserQuestion is disabled in autonomous (supervisor) pair mode. "
+                            + "Do not retry this tool — make your best judgment from "
+                            + "existing context and continue.");
+            processingRequests.remove(fileName);
+            return;
+        }
+
         AskUserQuestionDialogShower shower = dialogRouter.findAskUserQuestionDialogShower(request);
 
         if (shower != null) {
@@ -551,6 +576,31 @@ public class PermissionService {
             debugLog("ASK_NO_DIALOG", "No dialog shower, denying");
             fileProtocol.writeAskUserQuestionResponse(requestId, new JsonObject());
             processingRequests.remove(fileName);
+        }
+    }
+
+    /**
+     * True if the tab/project the request originated from currently has an
+     * active (non-disposed) pair session. Tab-level when {@code windowId} is
+     * present; project-wide fallback when null (legacy ai-bridge senders).
+     * Best-effort: any unexpected exception falls back to "no pair", so a
+     * broken pair manager never blocks a popup.
+     */
+    private boolean isPairModeActiveForRequest(JsonObject request, String windowId) {
+        try {
+            com.intellij.openapi.project.Project targetProject = dialogRouter.findProjectByCwd(request);
+            if (targetProject == null || targetProject.isDisposed()) return false;
+            com.github.claudecodegui.session.pair.PairSessionManager mgr =
+                    com.github.claudecodegui.session.pair.PairSessionManager.getInstance(targetProject);
+            if (mgr == null) return false;
+            if (windowId != null && !windowId.isEmpty()) {
+                return mgr.getActivePairsOwnedBy(windowId).stream()
+                        .anyMatch(p -> !p.isDisposed());
+            }
+            return mgr.getActivePairs().stream().anyMatch(p -> !p.isDisposed());
+        } catch (Throwable t) {
+            debugLog("ASK_PAIR_CHECK_ERROR", "Pair-mode check failed: " + t.getMessage());
+            return false;
         }
     }
 

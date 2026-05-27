@@ -103,6 +103,16 @@ function writeRawLine(obj) {
   _originalStdoutWrite(JSON.stringify(obj) + '\n', 'utf8');
 }
 
+// Expose raw stdout writer to modules that need to emit _ctrl envelopes
+// (permission-ipc, etc) without going through the request-tagging wrapper
+// installed below. Without this, _ctrl messages get wrapped in {id, line}
+// envelopes — RemoteBridge on the IDE side sees msg.type === undefined and
+// routes them to handleRequestOutput instead of handleCtrl, so dialog
+// requests (ask_user_question, permission, plan_approval) silently disappear.
+globalThis.__rawStdoutWrite = function (line) {
+  _originalStdoutWrite(line, 'utf8');
+};
+
 /**
  * Send a daemon lifecycle event.
  */

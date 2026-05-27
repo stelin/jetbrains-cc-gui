@@ -75,6 +75,7 @@ class ClaudeProcessInvoker {
             Boolean disableThinking,
             String reasoningEffort,
             String systemPromptAppend,
+            String windowId,
             MessageCallback callback
     ) {
         final boolean[] errorAlreadyReported = {false};
@@ -113,7 +114,8 @@ class ClaudeProcessInvoker {
                         streaming,
                         disableThinking,
                         reasoningEffort,
-                        systemPromptAppend
+                        systemPromptAppend,
+                        windowId
                 );
                 String stdinJson = gson.toJson(stdinInput);
                 String preview = logSanitizer.buildPreview(stdinJson, 500);

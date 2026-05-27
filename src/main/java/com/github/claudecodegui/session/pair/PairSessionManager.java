@@ -721,6 +721,20 @@ public final class PairSessionManager implements Disposable {
     /**
      * Stop and clean up a Pair. Removes mapping; calls daemon stop; marks
      * progress.json status=stopped.
+     *
+     * <p>Split into two phases to avoid EDT freezes on tab close:
+     * <ol>
+     *   <li><b>Synchronous (callers see immediately):</b> remove from maps,
+     *       markDisposed, stop in-memory monitors. After this the pair is no
+     *       longer discoverable via {@code findByMainSession} / {@code get}
+     *       and any cross-tab fallback ignores it.</li>
+     *   <li><b>Async (background):</b> daemon {@code supervisor.stop} round-trip
+     *       (up to 5s) and {@code progress.json} write. These do not affect
+     *       in-process pair state and would otherwise block the EDT — which
+     *       is exactly what happened when {@code ClaudeChatWindow.dispose}
+     *       called this on tab close (5s freeze observed when the daemon
+     *       was busy retrying a contract).</li>
+     * </ol>
      */
     public void stopPair(String pairId) {
         PairSession session = pairs.remove(pairId);
@@ -748,26 +762,31 @@ public final class PairSessionManager implements Disposable {
             LOG.warn("[PairSessionManager] MainAIMonitor.dispose failed: " + e.getMessage());
         }
 
-        try {
-            session.getSupervisorBridge().stop().get(5, TimeUnit.SECONDS);
-        } catch (Exception e) {
-            LOG.warn("[PairSessionManager] Supervisor stop did not complete cleanly: " + e.getMessage());
-        }
+        // Phase 2: offload daemon round-trip + file IO to a background thread
+        // so EDT callers (tab close in particular) don't freeze the UI for
+        // up to 5 seconds waiting on supervisor.stop.
+        com.intellij.openapi.application.ApplicationManager.getApplication().executeOnPooledThread(() -> {
+            try {
+                session.getSupervisorBridge().stop().get(5, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                LOG.warn("[PairSessionManager] Supervisor stop did not complete cleanly: " + e.getMessage());
+            }
 
-        // Drain + stop the message batcher scheduler so its daemon thread
-        // doesn't linger across project sessions.
-        try {
-            com.github.claudecodegui.bridge.SupervisorMessageBatcher batcher = session.getMessageBatcher();
-            if (batcher != null) batcher.shutdown();
-        } catch (Exception e) {
-            LOG.warn("[PairSessionManager] message batcher shutdown failed: " + e.getMessage());
-        }
+            // Drain + stop the message batcher scheduler so its daemon thread
+            // doesn't linger across project sessions.
+            try {
+                com.github.claudecodegui.bridge.SupervisorMessageBatcher batcher = session.getMessageBatcher();
+                if (batcher != null) batcher.shutdown();
+            } catch (Exception e) {
+                LOG.warn("[PairSessionManager] message batcher shutdown failed: " + e.getMessage());
+            }
 
-        try {
-            session.getProgressManager().markStatus("stopped");
-        } catch (Exception ignored) { /* best-effort */ }
+            try {
+                session.getProgressManager().markStatus("stopped");
+            } catch (Exception ignored) { /* best-effort */ }
 
-        LOG.info("[PairSessionManager] Stopped pair " + pairId);
+            LOG.info("[PairSessionManager] Stopped pair " + pairId);
+        });
     }
 
     @Override

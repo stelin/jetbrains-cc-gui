@@ -102,8 +102,28 @@ export async function canUseTool(toolName, input, options = {}) {
   if (toolName === 'AskUserQuestion') {
     debugLog('ASK_USER_QUESTION', 'Handling AskUserQuestion tool', { input });
 
-    const answers = await requestAskUserQuestionAnswers(input);
+    // _windowId is threaded in from buildQueryOptions's canUseTool closure
+    // (persistent-query-service.js). Forward it to the file-IPC layer so the
+    // Java PermissionService can route the pair-mode intercept at tab
+    // granularity. Null is acceptable — Java falls back to project-wide.
+    const answers = await requestAskUserQuestionAnswers(input, {
+      windowId: options && options._windowId ? options._windowId : null
+    });
     const elapsed = Date.now() - callStartTime;
+
+    // Pair-mode denial from Java: surface as SDK deny with the supplied reason
+    // so the main AI sees a tool error and continues autonomously without
+    // looping. See PermissionService.handleAskUserQuestionRequest.
+    if (answers && typeof answers === 'object' && answers.__denied === true) {
+      debugLog('ASK_USER_QUESTION_PAIR_DENIED', 'Pair-mode denial from Java', {
+        reason: answers.reason,
+        elapsed: `${elapsed}ms`
+      });
+      return {
+        behavior: 'deny',
+        message: answers.reason || 'AskUserQuestion denied'
+      };
+    }
 
     if (answers !== null) {
       debugLog('ASK_USER_QUESTION_SUCCESS', 'User provided answers', { answers, elapsed: `${elapsed}ms` });

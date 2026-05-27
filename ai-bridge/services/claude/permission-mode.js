@@ -149,8 +149,21 @@ export function shouldAcceptEditsTool(toolName, toolInput, cwd) {
   return isAcceptEditsAllowed(filePath, cwd);
 }
 
-export function createPreToolUseHook(permissionModeState, cwd = null, onModeChange = null) {
+/**
+ * @param windowIdOrRef A literal string/null (legacy callers) OR a mutable
+ *   ref of shape `{value: string|null}`. The ref form lets runtime-lifecycle
+ *   patch the windowId per-turn without rebuilding the hook (preconnect
+ *   creates the runtime with windowId=null; the first real claude.send
+ *   updates the ref via applyDynamicControls).
+ */
+export function createPreToolUseHook(permissionModeState, cwd = null, onModeChange = null, windowIdOrRef = null) {
   const workingDirectory = cwd || process.cwd();
+  const getWindowId = () => {
+    if (windowIdOrRef && typeof windowIdOrRef === 'object' && 'value' in windowIdOrRef) {
+      return windowIdOrRef.value || null;
+    }
+    return windowIdOrRef || null;
+  };
   const readPermissionMode = () => {
     if (permissionModeState && typeof permissionModeState === 'object') {
       const normalized = normalizePermissionMode(permissionModeState.value);
@@ -177,6 +190,49 @@ export function createPreToolUseHook(permissionModeState, cwd = null, onModeChan
     const toolName = input?.tool_name;
 
     debugLog('PERMISSION_HOOK', `Called for tool: ${toolName}, mode: ${currentPermissionMode}`);
+
+    // INTERACTIVE_TOOLS (AskUserQuestion) must always go through canUseTool so
+    // the special branch in permission-handler.canUseTool fires the Java-side
+    // file-IPC dialog (requestAskUserQuestionAnswers). The PreToolUse auto-allow
+    // path below would skip canUseTool entirely, leaving the SDK to run the
+    // tool natively without UI — which is why the dialog stopped showing in
+    // non-supervisor chats. Applies to all permission modes.
+    if (INTERACTIVE_TOOLS.has(toolName)) {
+      try {
+        // Thread windowId through so canUseTool → requestAskUserQuestionAnswers
+        // can tag the file IPC request with the originating IDE tab. SDK calls
+        // this PreToolUse hook directly (not via options.canUseTool), so the
+        // wrappedCanUseTool closure in buildQueryOptions never runs for this
+        // early-out — we have to pass _windowId by hand. Read from the live
+        // ref so we get the CURRENT turn's windowId rather than whatever was
+        // captured at createRuntime time.
+        const result = await canUseTool(toolName, input?.tool_input, { _windowId: getWindowId() });
+        if (result?.behavior === 'allow') {
+          return {
+            hookSpecificOutput: {
+              hookEventName: 'PreToolUse',
+              permissionDecision: 'allow',
+              updatedInput: result.updatedInput ?? input?.tool_input
+            }
+          };
+        }
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'deny'
+          },
+          reason: result?.message || 'User did not provide answers'
+        };
+      } catch (error) {
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse',
+            permissionDecision: 'deny'
+          },
+          reason: 'AskUserQuestion failed: ' + (error?.message || String(error))
+        };
+      }
+    }
 
     // ======== HANDLE EnterPlanMode - update permissionModeState ========
     // When EnterPlanMode is called, we need to switch to plan mode for subsequent tools

@@ -27,7 +27,7 @@ export async function handleClaudeCommand(command, args, stdinData) {
   switch (command) {
     case 'send': {
       if (stdinData && stdinData.message !== undefined) {
-        const { message, sessionId, cwd, permissionMode, model, openedFiles, agentPrompt, streaming, disableThinking, reasoningEffort } = stdinData;
+        const { message, sessionId, cwd, permissionMode, model, openedFiles, agentPrompt, streaming, disableThinking, reasoningEffort, windowId } = stdinData;
         console.log(`[REASONING_EFFORT] claude-channel.send received: ${JSON.stringify({ reasoningEffort: reasoningEffort ?? null, model: model ?? null })}`);
         await claudeSendMessage(
           message,
@@ -39,7 +39,8 @@ export async function handleClaudeCommand(command, args, stdinData) {
           agentPrompt || null,
           streaming,
           disableThinking || false,
-          reasoningEffort || null
+          reasoningEffort || null,
+          windowId || null
         );
       } else {
         await claudeSendMessage(args[0], args[1], args[2], args[3], args[4]);

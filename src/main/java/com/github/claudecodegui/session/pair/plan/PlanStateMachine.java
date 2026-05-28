@@ -216,6 +216,62 @@ public class PlanStateMachine {
         notifyListeners(oldState, oldSub, current);
     }
 
+    /**
+     * 2026-05-28: user clicked the supervisor Stop button. Distinct from
+     * {@link #onEscalatedToHuman} (supervisor gave up, needs a human decision):
+     * this is the user proactively pausing an otherwise-healthy plan to inject
+     * context. Reuses the {@code WAITING} state — which {@code DeadlockGuard}
+     * and {@code TransitionDispatcher} already treat as "no decision owed, do
+     * not nudge / do not arm a wake" — but marks {@code pauseReason="user"} so
+     * {@link #onUserResumed} only resumes user-initiated pauses and never
+     * collides with a future escalate-to-human WAITING.
+     *
+     * <p>No-op unless the plan is currently {@code ACTIVE} (a DONE/ABORTED/
+     * already-WAITING plan has nothing to pause).
+     */
+    public synchronized void onUserPaused() {
+        if (current == null || current.isTerminal()) return;
+        if (current.state != Plan.PlanState.ACTIVE) return;
+
+        Plan.PlanState oldState = current.state;
+        Plan.ActiveSubState oldSub = current.subState;
+        current.state = Plan.PlanState.WAITING;
+        current.subState = null;
+        current.lastTransitionAt = System.currentTimeMillis();
+        current.metadata.put("pauseReason", "user");
+
+        logTransition(PlanTransition.USER_PAUSED, oldState, oldSub, current);
+        notifyListeners(oldState, oldSub, current);
+    }
+
+    /**
+     * 2026-05-28: counterpart to {@link #onUserPaused}. Fired right before the
+     * user's supplementary {@code user_input} is forwarded to the supervisor,
+     * so the supervisor's resulting action is routed while the plan is ACTIVE
+     * again. Guarded so it only un-pauses a user-initiated pause — a no-op if
+     * the plan isn't WAITING, or is WAITING for some other reason (e.g. a real
+     * escalation), in which case the dedicated resume path owns the transition.
+     *
+     * @return true if a user-pause was actually lifted (caller may want to push
+     *         a fresh status snapshot); false on the no-op paths.
+     */
+    public synchronized boolean onUserResumed() {
+        if (current == null) return false;
+        if (current.state != Plan.PlanState.WAITING) return false;
+        if (!"user".equals(current.metadata.get("pauseReason"))) return false;
+
+        Plan.PlanState oldState = current.state;
+        Plan.ActiveSubState oldSub = current.subState;
+        current.state = Plan.PlanState.ACTIVE;
+        current.subState = Plan.ActiveSubState.PENDING_DECISION;
+        current.lastTransitionAt = System.currentTimeMillis();
+        current.metadata.remove("pauseReason");
+
+        logTransition(PlanTransition.USER_RESUMED, oldState, oldSub, current);
+        notifyListeners(oldState, oldSub, current);
+        return true;
+    }
+
     public synchronized void onUserCancel(String reason) {
         if (current == null) return;
         if (current.isTerminal()) return;

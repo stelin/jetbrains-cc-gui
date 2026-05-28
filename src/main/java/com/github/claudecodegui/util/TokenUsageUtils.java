@@ -42,6 +42,18 @@ public final class TokenUsageUtils {
     }
 
     /**
+     * Extract just the generated-output token count from a usage JSON object.
+     * 2026-05-28: used to surface the CLI-style live "↓ N tokens" counter on the
+     * WaitingIndicator during streaming — distinct from {@link #extractUsedTokens}
+     * which sums the whole context window (input + cache + output).
+     */
+    public static int extractOutputTokens(JsonObject usage) {
+        if (usage == null) return 0;
+        return usage.has("output_tokens") && !usage.get("output_tokens").isJsonNull()
+                ? usage.get("output_tokens").getAsInt() : 0;
+    }
+
+    /**
      * Find the last usage JSON from a list of raw server messages (JsonObject).
      * Scans from end to find the last assistant message with usage data.
      */

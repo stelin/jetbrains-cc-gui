@@ -92,6 +92,18 @@ public final class PairStatusSnapshot {
     /** Session-lifetime cumulative R3-escalated contracts. */
     public final long totalEscalatedContracts;
 
+    /**
+     * 2026-05-28: authoritative {@link com.github.claudecodegui.session.pair.plan.Plan.PlanState}
+     * name (INIT/ACTIVE/WAITING/DONE/ABORTED), or null when no plan exists yet.
+     * Distinct from {@link #state} (the coordinator runtime state). The webview
+     * gates the supervisor Stop button on this — enabled only while ACTIVE, so
+     * the user can interrupt during the "output ended but Liveness guard still
+     * counting down" window that the thinking/streaming flags miss.
+     */
+    public final String planState;
+    /** 2026-05-28: active sub-state (EXECUTING/PENDING_DISCHARGE/PENDING_DECISION) or null. */
+    public final String planSubState;
+
     private PairStatusSnapshot(Builder b) {
         this.pairId = b.pairId;
         this.generation = b.generation;
@@ -125,6 +137,8 @@ public final class PairStatusSnapshot {
         this.totalRetriedContracts = b.totalRetriedContracts;
         this.totalDischargedContracts = b.totalDischargedContracts;
         this.totalEscalatedContracts = b.totalEscalatedContracts;
+        this.planState = b.planState;
+        this.planSubState = b.planSubState;
     }
 
     public JsonObject toJson() {
@@ -178,6 +192,8 @@ public final class PairStatusSnapshot {
         o.addProperty("totalRetriedContracts", totalRetriedContracts);
         o.addProperty("totalDischargedContracts", totalDischargedContracts);
         o.addProperty("totalEscalatedContracts", totalEscalatedContracts);
+        if (planState != null) o.addProperty("planState", planState);
+        if (planSubState != null) o.addProperty("planSubState", planSubState);
         return o;
     }
 
@@ -293,6 +309,8 @@ public final class PairStatusSnapshot {
         private long totalRetriedContracts;
         private long totalDischargedContracts;
         private long totalEscalatedContracts;
+        private String planState;
+        private String planSubState;
 
         private Builder(String pairId) { this.pairId = pairId; }
 
@@ -327,6 +345,8 @@ public final class PairStatusSnapshot {
         public Builder totalRetriedContracts(long v) { this.totalRetriedContracts = v; return this; }
         public Builder totalDischargedContracts(long v) { this.totalDischargedContracts = v; return this; }
         public Builder totalEscalatedContracts(long v) { this.totalEscalatedContracts = v; return this; }
+        public Builder planState(String v) { this.planState = v; return this; }
+        public Builder planSubState(String v) { this.planSubState = v; return this; }
 
         public PairStatusSnapshot build() {
             return new PairStatusSnapshot(this);

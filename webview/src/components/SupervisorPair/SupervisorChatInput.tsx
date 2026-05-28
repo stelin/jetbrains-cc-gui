@@ -18,12 +18,14 @@ import { TokenIndicator } from '../ChatInputBox/TokenIndicator';
 import { useCompletionDropdown } from '../ChatInputBox/hooks';
 import { fileReferenceProvider, fileToDropdownItem } from '../ChatInputBox/providers';
 import { CompletionDropdown } from '../ChatInputBox/Dropdown';
+import { MessageQueue } from '../ChatInputBox/MessageQueue';
 import { SUPERVISOR_MODELS } from '../settings/SupervisorSection/templates';
 import SupervisorAgentSelect from './SupervisorAgentSelect';
 import { usePairContext } from './PairContext';
 import {
   markChatInputFocused,
   registerChatInputDropHandler,
+  registerChatInputFocusHandler,
 } from '../../utils/chatInputDropRouter';
 import styles from './style.module.less';
 
@@ -127,8 +129,17 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
     usageByAgentId,
     startSupervisorPair,
     openManager,
+    thinkingByAgentId,
+    queueByAgentId,
+    enqueueSupervisorMessage,
+    dequeueSupervisorMessage,
   } = usePairContext();
   const usage = usageByAgentId[supervisor.agentId];
+  // Busy iff the supervisor for THIS pane is mid-turn. Drives both the
+  // enqueue branch in handleSubmit and the queue UI's visibility (queue is
+  // hidden when length is 0 anyway, so no explicit guard needed).
+  const isSupervisorBusy = thinkingByAgentId[supervisor.agentId] ?? false;
+  const supervisorQueue = queueByAgentId[supervisor.agentId] ?? [];
 
   const [draft, setDraft] = useState('');
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -208,11 +219,27 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
     // Pull out @-tagged absolute paths so the Java side can translate them
     // local→remote before forwarding to the daemon Supervisor.
     const attachments = extractAtPathAttachments(text);
-    sendUserInputToSupervisor(text, attachments);
+    // Mid-turn: queue rather than send. The PairContext effect auto-flushes
+    // the head when thinkingByAgentId flips back to false. The daemon's
+    // EventCollector would buffer a direct send anyway, but the explicit UI
+    // queue lets the user see / cancel pending messages and preserves the
+    // typed order across overlapping submits.
+    if (isSupervisorBusy) {
+      enqueueSupervisorMessage(supervisor.agentId, text, attachments);
+    } else {
+      sendUserInputToSupervisor(text, attachments);
+    }
     setDraft('');
     fileCompletion.close();
     requestAnimationFrame(() => textareaRef.current?.focus());
-  }, [draft, sendUserInputToSupervisor, fileCompletion]);
+  }, [
+    draft,
+    sendUserInputToSupervisor,
+    fileCompletion,
+    isSupervisorBusy,
+    enqueueSupervisorMessage,
+    supervisor.agentId,
+  ]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -315,6 +342,14 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
     return registerChatInputDropHandler('supervisor', insertFilePaths);
   }, [insertFilePaths]);
 
+  // 2026-05-28: let the supervisor pane's Stop button pull focus into this
+  // composer after a pause, so the user can type their supplement immediately.
+  useEffect(() => {
+    return registerChatInputFocusHandler('supervisor', () => {
+      textareaRef.current?.focus();
+    });
+  }, []);
+
   // Switch which supervisor is active. Mirrors SupervisorToggle.handleConfirm:
   // stop the running pair on the daemon, then start a fresh pair with the new
   // agent via startSupervisorPair — that helper resolves the right-pane
@@ -410,6 +445,19 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
           />
         </div>
       </div>
+      {/* Queue strip — only renders when supervisorQueue.length > 0. Reuses
+          the main AI's <MessageQueue> by adapting our {text} shape onto its
+          expected {content} field. Remove button calls dequeueSupervisorMessage
+          for the current agent. */}
+      <MessageQueue
+        queue={supervisorQueue.map((m) => ({
+          id: m.id,
+          content: m.text,
+          attachments: undefined,
+          queuedAt: m.queuedAt,
+        }))}
+        onRemove={(id) => dequeueSupervisorMessage(supervisor.agentId, id)}
+      />
       <div className="input-editable-wrapper">
         <textarea
           ref={textareaRef}

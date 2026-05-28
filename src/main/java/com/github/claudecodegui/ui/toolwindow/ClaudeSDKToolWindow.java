@@ -283,6 +283,30 @@ public class ClaudeSDKToolWindow implements ToolWindowFactory, DumbAware {
             }
 
             @Override
+            public void selectionChanged(@NotNull ContentManagerEvent event) {
+                // JCEF doesn't fire DOM visibilitychange when its Swing parent
+                // tab is deselected, so the frontend zoom/layout recovery in
+                // jNt() never runs after tab switching — leading to shrunken
+                // content that doesn't fill the tab. Dispatch pageshow + resize
+                // ourselves so the existing recovery path kicks in; jNt is
+                // throttled at 1.5s so duplicate fires are harmless.
+                if (event.getOperation() != ContentManagerEvent.ContentOperation.add) {
+                    return;
+                }
+                Content selected = event.getContent();
+                ClaudeChatWindow window = contentToWindowMap.get(selected);
+                if (window == null || window.isDisposed()) {
+                    return;
+                }
+                window.executeJavaScriptCode(
+                    "if (typeof window !== 'undefined') {" +
+                    "  window.dispatchEvent(new Event('pageshow'));" +
+                    "  window.dispatchEvent(new Event('resize'));" +
+                    "}"
+                );
+            }
+
+            @Override
             public void contentRemoved(@NotNull ContentManagerEvent event) {
                 updateTabCloseableState(contentManager);
 

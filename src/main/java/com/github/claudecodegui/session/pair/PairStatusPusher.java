@@ -292,6 +292,9 @@ public class PairStatusPusher {
         SupervisorMonitor monitor = pair.getSupervisorMonitor();
         EventCollector collector = pair.getEventCollector();
         PairCoordinator coordinator = pair.getCoordinator();
+        // 2026-05-28: authoritative plan state for the webview Stop-button gate.
+        com.github.claudecodegui.session.pair.plan.PlanStateMachine planSm = pair.getPlanStateMachine();
+        com.github.claudecodegui.session.pair.plan.Plan plan = planSm != null ? planSm.getCurrent() : null;
 
         Long ago = lastSupervisorActivityMs > 0
                 ? Math.max(0L, now - lastSupervisorActivityMs) : null;
@@ -379,6 +382,8 @@ public class PairStatusPusher {
                         ? pair.getContractRegistry().getTotalDischarged() : 0L)
                 .totalEscalatedContracts(pair.getContractRegistry() != null
                         ? pair.getContractRegistry().getTotalEscalated() : 0L)
+                .planState(plan != null && plan.state != null ? plan.state.name() : null)
+                .planSubState(plan != null && plan.subState != null ? plan.subState.name() : null)
                 .build();
     }
 

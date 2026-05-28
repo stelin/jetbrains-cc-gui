@@ -179,6 +179,16 @@ public class PairHandler extends BaseMessageHandler {
             }
             LOG.info("[PairHandler] pair " + session.getPairId() + " supervisor interrupt requested by user");
             session.getSupervisorBridge().interrupt(); // fire-and-forget
+            // 2026-05-28: the user is pausing to add context — the supervisor
+            // owes no decision right now. Move the plan to WAITING so the
+            // DeadlockGuard liveness countdown stops; otherwise the 60s/90s
+            // timer keeps running and can still fire a system_takeover despite
+            // the user having intervened. Push a fresh status snapshot so the
+            // Stop button's enabled state updates on the webview immediately.
+            com.github.claudecodegui.session.pair.plan.PlanStateMachine sm = session.getPlanStateMachine();
+            if (sm != null) sm.onUserPaused();
+            PairStatusPusher sp = session.getStatusPusher();
+            if (sp != null) sp.pushHard();
         } catch (Exception e) {
             LOG.warn("[PairHandler] pair_supervisor_interrupt failed: "
                     + (e.getMessage() != null ? e.getMessage() : e.getClass().getName()));
@@ -416,6 +426,13 @@ public class PairHandler extends BaseMessageHandler {
                 }
                 batcher.enqueue(rawMsg);
             });
+
+            // 2026-05-28: live per-turn output-token estimate → supervisor pane's
+            // WaitingIndicator "↓ N tokens". Separate channel from the usage
+            // broadcast above (which drives the context %) so the ticker can
+            // update on every stream tick without recomputing the context window.
+            session.getSupervisorBridge().setLiveUsageHandler(usage ->
+                    pushToWebview("window.onSupervisorLiveUsage", gson.toJson(usage)));
 
             JsonObject result = new JsonObject();
             result.addProperty("pairId", session.getPairId());

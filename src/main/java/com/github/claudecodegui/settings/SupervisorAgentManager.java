@@ -438,6 +438,20 @@ public class SupervisorAgentManager {
                 DEFAULT_MODEL,
                 now);
 
+        // v1: third built-in persona — bug supervisor. Takes a bug
+        // description from the user's first message (plain text / URL / both)
+        // and drives main AI through: diagnose (read-only) → branch decision
+        // (auto-pick or escalate based on candidates count + complexity + risk
+        // + scope) → apply_fix → three-layer verification (scope check +
+        // regression reviewer + compile, with sandbox-aware fallback).
+        // Standalone — no upstream/downstream supervisor coupling; produces
+        // its own fix summary via complete_plan for Java-side archival.
+        dirty |= ensureOrRefresh(agents, "bug-supervisor",
+                "缺陷监督者 / Bug Supervisor",
+                loadPreset("bug-supervisor"),
+                DEFAULT_MODEL,
+                now);
+
         // Default points at code-supervisor unless the user picked something
         // else that still exists. If the previous default referenced a removed
         // legacy id, redirect.

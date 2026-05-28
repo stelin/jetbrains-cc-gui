@@ -338,6 +338,14 @@ public class ActionRouter {
         // something different this turn".
         if (!"wait".equals(type)) {
             consecutiveWaitRejections = 0;
+            // 2026-05-28: a decisive (non-wait) action means the supervisor took
+            // its turn and answered whatever woke it — including a Liveness/R3
+            // DECISION_REQUEST. Discharge any open SUPERVISOR-assigned contract
+            // now so a nudge the supervisor DID respond to can't later hit its
+            // deadline and fire a spurious system_takeover (the dangling-contract
+            // mis-escalation). Bare `wait` deliberately does NOT discharge — that
+            // preserves the takeover safety net for a genuine wait-loop hang.
+            dischargeOpenSupervisorContracts("supervisor emitted " + type);
         }
 
         // Route C (2026-05-26): dispatch-type actions get their payload
@@ -482,6 +490,31 @@ public class ActionRouter {
             default:
                 // intentionally no-op
                 break;
+        }
+    }
+
+    /**
+     * 2026-05-28: discharge every OPEN contract assigned to the SUPERVISOR.
+     * Called when the supervisor emits a decisive (non-wait) action — the turn
+     * that just happened IS the response to whatever woke it (a Liveness or R3
+     * {@code DECISION_REQUEST}), so the contract is answered and must be closed.
+     * Without this, a DECISION_REQUEST the supervisor actually responded to
+     * stays OPEN and the DeadlockGuard escalates it on deadline → spurious
+     * {@code system_takeover}. {@link ContractRegistry#discharge} no-ops on
+     * unknown/closed ids, and {@code getOpenContracts()} returns a copy, so
+     * iterating-then-discharging is safe.
+     */
+    private void dischargeOpenSupervisorContracts(String reason) {
+        ContractRegistry registry = pair.getContractRegistry();
+        if (registry == null) return;
+        for (Contract c : registry.getOpenContracts()) {
+            if (c.assignedTo != ContractAssignee.SUPERVISOR) continue;
+            try {
+                registry.discharge(c.id, reason);
+            } catch (Exception e) {
+                LOG.warn("[ActionRouter] discharge supervisor contract " + c.id
+                        + " failed: " + e.getMessage());
+            }
         }
     }
 

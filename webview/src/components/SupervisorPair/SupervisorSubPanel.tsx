@@ -4,6 +4,7 @@ import type { ClaudeMessage } from '../../types';
 import type { SelectedSupervisor } from '../../types/supervisorAgent';
 import { MessageList } from '../MessageList';
 import { useSupervisorMessageHelpers } from './useSupervisorMessageHelpers';
+import { usePairContext } from './PairContext';
 import styles from './style.module.less';
 
 interface SupervisorSubPanelProps {
@@ -40,6 +41,7 @@ export default function SupervisorSubPanel({
   defaultExpanded = true,
 }: SupervisorSubPanelProps) {
   const { t } = useTranslation();
+  const { liveOutputTokensByAgentId, reasoningByAgentId } = usePairContext();
   const [expanded, setExpanded] = useState(defaultExpanded);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -95,6 +97,8 @@ export default function SupervisorSubPanel({
               isThinking={thinking}
               loading={thinking}
               loadingStartTime={loadingStartTime}
+              turnOutputTokens={liveOutputTokensByAgentId[supervisor.agentId]}
+              turnEffort={reasoningByAgentId[supervisor.agentId]}
               t={t}
               getMessageText={helpers.getMessageText}
               getContentBlocks={helpers.getContentBlocks}

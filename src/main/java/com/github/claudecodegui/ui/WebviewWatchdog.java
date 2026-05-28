@@ -32,6 +32,7 @@ public class WebviewWatchdog {
     private volatile int stallCount = 0;
     private volatile long lastRecoveryAtMs = 0L;
     private volatile ScheduledFuture<?> watchdogFuture = null;
+    private volatile boolean wasShowing = false;
 
     private final JPanel mainPanel;
     private final BrowserProvider browserProvider;
@@ -158,7 +159,25 @@ public class WebviewWatchdog {
 
     private void checkHealth() {
         if (disposedCheck.isDisposed()) return;
-        if (!mainPanel.isShowing()) return;
+        if (!mainPanel.isShowing()) {
+            wasShowing = false;
+            return;
+        }
+
+        // Tab just transitioned from hidden to visible. Chromium throttles rAF
+        // for hidden documents, so lastRafAtMs can be arbitrarily stale even
+        // though setInterval-based heartbeats kept arriving. Without this reset
+        // the next tick would compare stale rafAge against the timeout and
+        // trigger a false-positive reload — wiping React state for what looked
+        // to the user like a routine tab switch.
+        if (!wasShowing) {
+            long now = System.currentTimeMillis();
+            lastHeartbeatAtMs = now;
+            lastRafAtMs = now;
+            stallCount = 0;
+            wasShowing = true;
+            return;
+        }
 
         long now = System.currentTimeMillis();
         long heartbeatAgeMs = now - lastHeartbeatAtMs;

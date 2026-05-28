@@ -20,6 +20,7 @@ import SessionCountStrip from './SessionCountStrip';
 import SupervisorStatusPanel from './SupervisorStatusPanel';
 // 2026-05-25 (FUNDAMENTAL FIX): manual interrupt button replaces wall-clock auto-cancel.
 import { sendBridgeEvent } from '../../utils/bridge';
+import { focusChatInput } from '../../utils/chatInputDropRouter';
 import styles from './style.module.less';
 // Global StatusPanel chrome (tabs + popover container) re-used by the
 // supervisor side so the visual treatment matches main AI's pane exactly.
@@ -46,7 +47,7 @@ export default function SupervisorPane({
   status,
 }: SupervisorPaneProps) {
   const { t } = useTranslation();
-  const { selected, setSelected, thinkingByAgentId, streamingByAgentId, pairId } = usePairContext();
+  const { selected, setSelected, thinkingByAgentId, streamingByAgentId, pairId, pairStatus } = usePairContext();
 
   if (selected.length === 0) return null;
 
@@ -63,9 +64,23 @@ export default function SupervisorPane({
       || streamingByAgentId[coordinator.agentId])
   );
 
+  // 2026-05-28: the Stop button must be enabled across the whole window where a
+  // pause is meaningful — including "the supervisor finished its turn but the
+  // Liveness guard is still counting down toward a system_takeover", which the
+  // thinking/streaming flags miss. The authoritative signal is the plan state:
+  // while ACTIVE the supervisor may act OR the guard may fire, so interrupting
+  // is meaningful; WAITING (already paused) / DONE / ABORTED have nothing to
+  // stop. Fall back to the old thinking||streaming heuristic when planState is
+  // unknown (no plan yet, or a pre-2026-05-28 Java build that doesn't push it).
+  const planState = pairStatus?.planState;
+  const interruptible = planState !== undefined ? planState === 'ACTIVE' : coordinatorBusy;
+
   const handleInterruptSupervisor = () => {
     if (!pairId) return;
     sendBridgeEvent('pair_supervisor_interrupt', JSON.stringify({ pairId }));
+    // Pausing means "stop so I can add context" — pull focus into the composer
+    // so the user can start typing their supplement right away.
+    requestAnimationFrame(() => focusChatInput('supervisor'));
   };
 
   return (
@@ -76,15 +91,16 @@ export default function SupervisorPane({
           <span>{t('pairLayout.paneTitle')}</span>
         </div>
         <div className={styles.headerActions}>
-          {/* 2026-05-25 (FUNDAMENTAL FIX): manual interrupt. Disabled when the
-              supervisor isn't producing — clicking when idle is a no-op anyway
-              but the disabled state signals "nothing to stop right now". */}
+          {/* 2026-05-25 (FUNDAMENTAL FIX): manual interrupt. 2026-05-28: gated on
+              plan ACTIVE (see `interruptible`) so the user can also pause during
+              the post-turn Liveness-guard countdown, not just while the
+              supervisor is visibly thinking/streaming. */}
           <button
             className={styles.iconButton}
             title={t('pairLayout.interruptSupervisor',
               { defaultValue: '中断 Supervisor 当前轮' })}
             onClick={handleInterruptSupervisor}
-            disabled={!coordinatorBusy || !pairId}
+            disabled={!interruptible || !pairId}
           >
             <span className="codicon codicon-debug-stop" />
           </button>

@@ -19,6 +19,7 @@ export function registerUsageModeCallbacks(options: UseWindowCallbacksOptions): 
     setUsagePercentage,
     setUsageUsedTokens,
     setUsageMaxTokens,
+    setUsageOutputTokens,
     setPermissionMode,
     setClaudePermissionMode,
     setCodexPermissionMode,
@@ -80,6 +81,12 @@ export function registerUsageModeCallbacks(options: UseWindowCallbacksOptions): 
         setUsagePercentage(safePercentage);
         setUsageUsedTokens(used);
         setUsageMaxTokens(max);
+        // 2026-05-28: live per-turn generated-output count for the WaitingIndicator's
+        // "↓ N tokens". Present only on streaming [USAGE] pushes from the main AI;
+        // absent on model-change / non-streaming pushes (left untouched then).
+        if (typeof data.outputTokens === 'number') {
+          setUsageOutputTokens(data.outputTokens);
+        }
       }
     } catch (error) {
       console.error('[Frontend] Failed to parse usage update:', error);

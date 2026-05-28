@@ -537,6 +537,13 @@ interface Window {
   onSupervisorMessageBatch?: (json: string) => void;
 
   /**
+   * 2026-05-28: live per-turn output-token estimate for a supervisor, driving
+   * the supervisor pane's WaitingIndicator "↓ N tokens" counter while it thinks.
+   * Payload: {@code { pairId, supervisorId, turnId, outputTokens }}.
+   */
+  onSupervisorLiveUsage?: (json: string) => void;
+
+  /**
    * Re-emitted by Java after the webview reloads (e.g. WebviewWatchdog
    * triggered) so the supervisor pane can rebind to a pair that is still
    * alive on the Java/daemon side. Payload mirrors the SelectedSupervisor

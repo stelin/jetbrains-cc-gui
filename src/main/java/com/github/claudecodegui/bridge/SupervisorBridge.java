@@ -45,6 +45,14 @@ public class SupervisorBridge {
     public static final String MSG_LINE_PREFIX = "[SUPERVISOR_MSG]";
 
     /**
+     * 2026-05-28: live per-turn output-token estimate emitted by the daemon on
+     * partial-message stream events, so the supervisor pane's WaitingIndicator
+     * can show a CLI-style "↓ N tokens" counter that ticks during the turn.
+     * Envelope: {@code { pairId, supervisorId, turnId, outputTokens }}.
+     */
+    public static final String LIVE_USAGE_PREFIX = "[SUPERVISOR_USAGE]";
+
+    /**
      * Phase 2 (2026-05-24): emitted by the daemon when the SDK reports a
      * mid-turn auto-compaction event. Counted into per-Pair metrics for
      * Phase 5 rotation triggers.
@@ -119,6 +127,15 @@ public class SupervisorBridge {
      * the pair is created; null means stream messages are dropped (e.g. tests).
      */
     private volatile Consumer<JsonObject> messageHandler;
+
+    /**
+     * 2026-05-28: consumer of {@code [SUPERVISOR_USAGE]} live output-token lines.
+     * Wired by PairHandler to push {@code window.onSupervisorLiveUsage}. Null
+     * means the lines are dropped (e.g. tests). Kept separate from the turn-end
+     * context-% usage push so the live ticker and the context indicator don't
+     * fight over one payload.
+     */
+    private volatile Consumer<JsonObject> liveUsageHandler;
 
     /**
      * Phase 0 (2026-05-23): bounded buffer for `[SUPERVISOR_MSG]` lines that
@@ -228,6 +245,11 @@ public class SupervisorBridge {
     /** Phase 3: register a callback for {@code [STATE_UPDATE]} lines. See field doc. */
     public void setStateUpdateHandler(Consumer<JsonObject> handler) {
         this.stateUpdateHandler = handler;
+    }
+
+    /** 2026-05-28: register a callback for {@code [SUPERVISOR_USAGE]} live-usage lines. */
+    public void setLiveUsageHandler(Consumer<JsonObject> handler) {
+        this.liveUsageHandler = handler;
     }
 
     /** Phase 3: register a callback for {@code [PRE_COMPACT]} lines. See field doc. */
@@ -467,6 +489,29 @@ public class SupervisorBridge {
                                 }
                             } catch (Exception e) {
                                 LOG.warn("[SupervisorBridge] Failed to parse PRE_COMPACT line: "
+                                        + e.getMessage() + " | line=" + trimmed);
+                            }
+                            return;
+                        }
+
+                        // 2026-05-28: live output-token estimate. Peek before the
+                        // MSG/ACTION checks (same discipline as the other side
+                        // channels) so a usage tick interleaved with stream
+                        // messages is never swallowed by a more common prefix.
+                        int usageIdx = trimmed.indexOf(LIVE_USAGE_PREFIX);
+                        if (usageIdx >= 0) {
+                            String jsonText = trimmed.substring(usageIdx + LIVE_USAGE_PREFIX.length()).trim();
+                            try {
+                                JsonObject parsed = JsonParser.parseString(jsonText).getAsJsonObject();
+                                Consumer<JsonObject> uh = liveUsageHandler;
+                                if (uh != null) {
+                                    try { uh.accept(parsed); }
+                                    catch (Exception e) {
+                                        LOG.warn("[SupervisorBridge] live-usage handler failed: " + e.getMessage());
+                                    }
+                                }
+                            } catch (Exception e) {
+                                LOG.warn("[SupervisorBridge] Failed to parse SUPERVISOR_USAGE line: "
                                         + e.getMessage() + " | line=" + trimmed);
                             }
                             return;

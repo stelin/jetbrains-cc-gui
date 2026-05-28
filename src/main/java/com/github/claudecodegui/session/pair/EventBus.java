@@ -258,6 +258,19 @@ public class EventBus {
      * Sent when the user types into the right-pane composer.
      */
     public CompletableFuture<Void> publishUserInput(String text) {
+        // 2026-05-28: if the user paused the supervisor (plan WAITING with
+        // pauseReason=user), this follow-up message is the resume signal. Flip
+        // the plan back to ACTIVE BEFORE forwarding, so the supervisor's
+        // resulting emit_action is routed against an ACTIVE plan rather than a
+        // WAITING one. No-op when the plan wasn't user-paused.
+        com.github.claudecodegui.session.pair.plan.PlanStateMachine sm = pair.getPlanStateMachine();
+        if (sm != null && sm.onUserResumed()) {
+            // Resume actually flipped WAITING→ACTIVE — push a fresh snapshot so
+            // the webview re-enables the Stop button without waiting for the
+            // 30s periodic push.
+            PairStatusPusher pusher = pair.getStatusPusher();
+            if (pusher != null) pusher.pushHard();
+        }
         JsonObject payload = new JsonObject();
         if (text != null) payload.addProperty("text", text);
         return publish(makeEvent("user_input", payload));

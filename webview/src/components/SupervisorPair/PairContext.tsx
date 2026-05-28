@@ -14,6 +14,18 @@ import type { ReasoningEffort } from '../ChatInputBox/types';
 import { apply1MContextSuffix, strip1MContextSuffix } from '../ChatInputBox/types';
 
 /**
+ * One queued user message for a supervisor. Holds raw text + the structured
+ * @-path attachments the composer extracted so the auto-flush effect can
+ * re-emit the original send via sendUserInputToSupervisor unchanged.
+ */
+export interface QueuedSupervisorMessage {
+  id: string;
+  text: string;
+  attachments?: Array<{ path: string }>;
+  queuedAt: number;
+}
+
+/**
  * Token usage snapshot for the supervisor's TokenIndicator. Computed by Java
  * (UsagePushService.broadcast) using the same formula and context-limit table
  * as the main AI, then forwarded to PairContext via the
@@ -86,6 +98,12 @@ export interface PairStatusSnapshot {
   totalRetriedContracts?: number;
   totalDischargedContracts?: number;
   totalEscalatedContracts?: number;
+  /** 2026-05-28: authoritative Plan.PlanState name. Drives the supervisor
+   *  Stop-button gate (enabled only while 'ACTIVE'). Omitted when no plan
+   *  exists yet or on pre-2026-05-28 Java builds. */
+  planState?: 'INIT' | 'ACTIVE' | 'WAITING' | 'DONE' | 'ABORTED';
+  /** 2026-05-28: active sub-state when planState === 'ACTIVE'. */
+  planSubState?: 'EXECUTING' | 'PENDING_DISCHARGE' | 'PENDING_DECISION';
 }
 
 /**
@@ -163,6 +181,12 @@ interface PairContextValue {
    * the auto-expanded thinking block and streaming cursor.
    */
   streamingByAgentId: Record<string, boolean>;
+  /**
+   * 2026-05-28: live per-turn generated-output token count keyed by supervisor
+   * agentId, fed by the daemon's [SUPERVISOR_USAGE] stream. Drives the
+   * supervisor pane's WaitingIndicator "↓ N tokens"; reset when the turn ends.
+   */
+  liveOutputTokensByAgentId: Record<string, number>;
   modelOverrideByAgentId: Record<string, string>;
   setSupervisorModel: (agentId: string, model: string | null) => void;
   reasoningByAgentId: Record<string, ReasoningEffort>;
@@ -191,6 +215,20 @@ interface PairContextValue {
     text: string,
     attachments?: Array<{ path: string }>
   ) => void;
+  /**
+   * Per-agent user-input queue. Populated when the user submits while the
+   * supervisor is mid-turn (thinkingByAgentId[id] === true); auto-flushed
+   * head-first on the true→false transition by an effect inside the
+   * provider. Cleared whole on pair stop / no agents selected so a stopped
+   * pair never resurrects a stale queue.
+   */
+  queueByAgentId: Record<string, QueuedSupervisorMessage[]>;
+  enqueueSupervisorMessage: (
+    agentId: string,
+    text: string,
+    attachments?: Array<{ path: string }>
+  ) => void;
+  dequeueSupervisorMessage: (agentId: string, id: string) => void;
   // Phase 5 (2026-05-24): autonomy-mode toggle. Read from pairStatus when
   // present; locally cached so the AutonomyToggle has an optimistic value
   // before the next status push round-trip.
@@ -280,6 +318,11 @@ export function PairProvider({ children }: PairProviderProps) {
   const [pairId, setPairId] = useState<string | null>(null);
   const [pendingEscalate, setPendingEscalate] = useState<EscalateRequest | null>(null);
   const [thinkingByAgentId, setThinkingByAgentId] = useState<Record<string, boolean>>({});
+  // 2026-05-28: live per-turn output-token count per supervisor (CLI-style ticker).
+  const [liveOutputTokensByAgentId, setLiveOutputTokensByAgentId] = useState<Record<string, number>>({});
+  // Per-agent user-input queue. Populated while thinking=true; auto-drained
+  // head-first on thinking true→false. See enqueue/dequeue/flush below.
+  const [queueByAgentId, setQueueByAgentId] = useState<Record<string, QueuedSupervisorMessage[]>>({});
   const [modelOverrideByAgentId, setModelOverrideByAgentId] = useState<Record<string, string>>({});
   const [usageByAgentId, setUsageByAgentId] = useState<Record<string, SupervisorUsage>>({});
   const [longContextEnabled, setLongContextEnabledState] = useState<boolean>(() => {
@@ -337,6 +380,7 @@ export function PairProvider({ children }: PairProviderProps) {
       setThinkingByAgentId({});
       setModelOverrideByAgentId({});
       setReasoningByAgentId({});
+      setQueueByAgentId({});
       return;
     }
     // Seed per-agent defaults on activation:
@@ -642,6 +686,93 @@ export function PairProvider({ children }: PairProviderProps) {
     [selected, appendMessage]
   );
 
+  // Refs used by the auto-flush effect:
+  //   - prevThinkingRef: detects the true→false transition without a render
+  //     between the two reads (state setters and the effect both update on
+  //     each tick, so a plain capture would miss back-to-back transitions).
+  //   - flushingAgentsRef: guard against re-entrant flushes if the effect
+  //     fires repeatedly while the dequeued message is still being sent (the
+  //     setTimeout below lets thinking flip back to true before we clear
+  //     this set).
+  const prevThinkingRef = useRef<Record<string, boolean>>({});
+  const flushingAgentsRef = useRef<Set<string>>(new Set());
+  const sendUserInputRef = useRef(sendUserInputToSupervisor);
+  useEffect(() => { sendUserInputRef.current = sendUserInputToSupervisor; }, [sendUserInputToSupervisor]);
+
+  const enqueueSupervisorMessage = useCallback(
+    (agentId: string, text: string, attachments?: Array<{ path: string }>) => {
+      const trimmed = text.trim();
+      if (!trimmed || !agentId) return;
+      const entry: QueuedSupervisorMessage = {
+        id: `sup-queue-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`,
+        text: trimmed,
+        attachments: attachments && attachments.length > 0 ? attachments : undefined,
+        queuedAt: Date.now(),
+      };
+      setQueueByAgentId((prev) => {
+        const list = prev[agentId] ?? [];
+        return { ...prev, [agentId]: [...list, entry] };
+      });
+    },
+    []
+  );
+
+  const dequeueSupervisorMessage = useCallback(
+    (agentId: string, id: string) => {
+      setQueueByAgentId((prev) => {
+        const list = prev[agentId];
+        if (!list || list.length === 0) return prev;
+        const next = list.filter((item) => item.id !== id);
+        if (next.length === list.length) return prev;
+        return { ...prev, [agentId]: next };
+      });
+    },
+    []
+  );
+
+  // Auto-flush: when an agent's thinking flag flips true→false and its queue
+  // is non-empty, pop the head and re-emit via sendUserInputToSupervisor. A
+  // tiny setTimeout lets React commit the dequeue + lets the daemon receive
+  // the previous turn's completion before we kick off the next one (otherwise
+  // the EventCollector may glue the dequeued message onto the just-finished
+  // tick instead of starting a fresh one).
+  useEffect(() => {
+    const prev = prevThinkingRef.current;
+    for (const agentId of Object.keys(thinkingByAgentId)) {
+      const was = prev[agentId] ?? false;
+      const now = thinkingByAgentId[agentId] ?? false;
+      // 2026-05-28: turn ended → clear the live output-token count so the next
+      // turn's WaitingIndicator starts from a clean slate (no stale "↓ N").
+      if (was && !now) {
+        setLiveOutputTokensByAgentId((curr) => {
+          if (curr[agentId] === undefined) return curr;
+          const next = { ...curr };
+          delete next[agentId];
+          return next;
+        });
+      }
+      if (was && !now && !flushingAgentsRef.current.has(agentId)) {
+        const head = queueByAgentId[agentId]?.[0];
+        if (head) {
+          flushingAgentsRef.current.add(agentId);
+          setQueueByAgentId((curr) => {
+            const list = curr[agentId];
+            if (!list || list.length === 0) return curr;
+            return { ...curr, [agentId]: list.slice(1) };
+          });
+          setTimeout(() => {
+            try {
+              sendUserInputRef.current(head.text, head.attachments);
+            } finally {
+              flushingAgentsRef.current.delete(agentId);
+            }
+          }, 50);
+        }
+      }
+    }
+    prevThinkingRef.current = { ...thinkingByAgentId };
+  }, [thinkingByAgentId, queueByAgentId]);
+
   // Subscribe to Java callbacks for Pair lifecycle and action stream.
   useEffect(() => {
     const prevStarted = window.onPairStarted;
@@ -653,6 +784,7 @@ export function PairProvider({ children }: PairProviderProps) {
     const prevThinking = window.onPairThinking;
     const prevSupervisorMessage = window.onSupervisorMessage;
     const prevSupervisorMessageBatch = window.onSupervisorMessageBatch;
+    const prevSupervisorLiveUsage = window.onSupervisorLiveUsage;
     const prevPairStatus = window.onPairStatusUpdate;
     const prevPairResume = window.onPairResume;
     // Protocol v2 (2026-05-24): non-blocking alert from record_alert.
@@ -703,6 +835,11 @@ export function PairProvider({ children }: PairProviderProps) {
       setUsageByAgentId({});
       setPairStatus(null);
       setNotices([]);
+      // pair_stop is also how the SupervisorChatInput.handleSwitchAgent
+      // transitions between agents, so clearing the whole queue dict here
+      // covers both "supervisor restart" and "agent switch" — per design:
+      // queued messages do not survive either event.
+      setQueueByAgentId({});
     };
 
     /**
@@ -1068,6 +1205,17 @@ export function PairProvider({ children }: PairProviderProps) {
       } catch { /* ignore */ }
     };
 
+    window.onSupervisorLiveUsage = (json: string) => {
+      try {
+        const o = JSON.parse(json) as { supervisorId?: string; outputTokens?: number };
+        if (!o || !o.supervisorId || typeof o.outputTokens !== 'number') return;
+        const agentId = o.supervisorId;
+        const tokens = o.outputTokens;
+        setLiveOutputTokensByAgentId((prev) =>
+          prev[agentId] === tokens ? prev : { ...prev, [agentId]: tokens });
+      } catch { /* ignore malformed */ }
+    };
+
     return () => {
       window.onSupervisorMessage = prevSupervisorMessage;
       window.onSupervisorMessageBatch = prevSupervisorMessageBatch;
@@ -1082,6 +1230,7 @@ export function PairProvider({ children }: PairProviderProps) {
       window.onPairResume = prevPairResume;
       window.onPairAlert = prevAlert;
       window.onPairNotice = prevNotice;
+      window.onSupervisorLiveUsage = prevSupervisorLiveUsage;
     };
   }, [appendAssistantBlocks, attachToolResults, endStreaming]);
 
@@ -1143,6 +1292,7 @@ export function PairProvider({ children }: PairProviderProps) {
       pendingEscalate,
       thinkingByAgentId,
       streamingByAgentId,
+      liveOutputTokensByAgentId,
       modelOverrideByAgentId,
       setSupervisorModel,
       reasoningByAgentId,
@@ -1156,6 +1306,9 @@ export function PairProvider({ children }: PairProviderProps) {
       dismissEscalate,
       registerInjectPromptHandler,
       sendUserInputToSupervisor,
+      queueByAgentId,
+      enqueueSupervisorMessage,
+      dequeueSupervisorMessage,
       autonomyMode,
       setAutonomyMode,
     }),
@@ -1170,6 +1323,7 @@ export function PairProvider({ children }: PairProviderProps) {
       pendingEscalate,
       thinkingByAgentId,
       streamingByAgentId,
+      liveOutputTokensByAgentId,
       modelOverrideByAgentId,
       setSupervisorModel,
       reasoningByAgentId,
@@ -1183,6 +1337,9 @@ export function PairProvider({ children }: PairProviderProps) {
       dismissEscalate,
       registerInjectPromptHandler,
       sendUserInputToSupervisor,
+      queueByAgentId,
+      enqueueSupervisorMessage,
+      dequeueSupervisorMessage,
       autonomyMode,
       setAutonomyMode,
     ]
@@ -1209,6 +1366,7 @@ export function usePairContext(): PairContextValue {
     pendingEscalate: null,
     thinkingByAgentId: {},
     streamingByAgentId: {},
+    liveOutputTokensByAgentId: {},
     modelOverrideByAgentId: {},
     setSupervisorModel: () => { /* no-op */ },
     reasoningByAgentId: {},
@@ -1225,6 +1383,9 @@ export function usePairContext(): PairContextValue {
       _text: string,
       _attachments?: Array<{ path: string }>
     ) => { /* no-op */ },
+    queueByAgentId: {},
+    enqueueSupervisorMessage: () => { /* no-op */ },
+    dequeueSupervisorMessage: () => { /* no-op */ },
     // Phase 5 (2026-05-24): autonomy defaults — fall back to "full" (matches
     // Java's 2026-05-25 default) so the UI doesn't show a confusing "unset"
     // state outside a Provider.

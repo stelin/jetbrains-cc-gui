@@ -413,7 +413,7 @@ public class ClaudeMessageHandler implements MessageCallback {
                     int usedTokens = TokenUsageUtils.extractUsedTokens(usage, state.getProvider());
                     int maxTokens = SettingsHandler.getModelContextLimit(state.getModel());
                     ClaudeNotifier.setTokenUsage(project, usedTokens, maxTokens);
-                    callbackHandler.notifyUsageUpdate(usedTokens, maxTokens);
+                    callbackHandler.notifyUsageUpdate(usedTokens, maxTokens, TokenUsageUtils.extractOutputTokens(usage));
                     LOG.debug("Updated token usage from assistant message: " + usedTokens);
                 }
             }
@@ -785,7 +785,7 @@ public class ClaudeMessageHandler implements MessageCallback {
                     int usedTokens = TokenUsageUtils.extractUsedTokens(usageJson, state.getProvider());
                     int maxTokens = SettingsHandler.getModelContextLimit(state.getModel());
                     ClaudeNotifier.setTokenUsage(project, usedTokens, maxTokens);
-                    callbackHandler.notifyUsageUpdate(usedTokens, maxTokens);
+                    callbackHandler.notifyUsageUpdate(usedTokens, maxTokens, TokenUsageUtils.extractOutputTokens(usageJson));
                     LOG.debug("Fallback: updated token usage from result message: " + usedTokens);
                 }
             }
@@ -1121,8 +1121,8 @@ public class ClaudeMessageHandler implements MessageCallback {
             int usedTokens = TokenUsageUtils.extractUsedTokens(usageJson, state.getProvider());
             int maxTokens = SettingsHandler.getModelContextLimit(state.getModel());
             ClaudeNotifier.setTokenUsage(project, usedTokens, maxTokens);
-            // Notify webview of usage update
-            callbackHandler.notifyUsageUpdate(usedTokens, maxTokens);
+            // Notify webview of usage update (outputTokens drives the live "↓ N tokens" counter)
+            callbackHandler.notifyUsageUpdate(usedTokens, maxTokens, TokenUsageUtils.extractOutputTokens(usageJson));
             // Ensure assistant message exists before backfilling usage
             ensureCurrentAssistantMessageExists();
             backfillUsageToAssistantMessage(usageJson);

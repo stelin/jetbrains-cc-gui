@@ -25,6 +25,7 @@
 
 import { loadClaudeSdk, loadZod, isClaudeSdkAvailable } from '../utils/sdk-loader.js';
 import { AsyncStream } from '../utils/async-stream.js';
+import { estimateTokensFromChars } from '../utils/usage-utils.js';
 import { summarizeEvent } from '../services/supervisor/event-summarizer.js';
 import {
     buildSupervisorMcpServer,
@@ -202,14 +203,17 @@ function buildSystemPrompt({ name, description, planContent, specContent }) {
         '3) **必须调用 `emit_action` 工具**结束本轮。一轮只能调用一次；调用成功后立即结束本轮。',
         '',
         '`emit_action` 字段说明：',
-        '- action: 必填，枚举 inject_prompt / retry_with_hint / approve_and_continue / escalate_to_human / request_amendment / wait',
+        '- action: 必填，枚举 inject_prompt / retry_with_hint / approve_and_continue / escalate_to_human / request_amendment / wait / complete_plan / wait_for_contract',
         '- reason: 强烈建议，1-2 句决策原因',
         '- inject_prompt / retry_with_hint 需要 prompt（注入给主 AI 的内容）',
         '- retry_with_hint 可选 wait_seconds（延迟秒数）',
         '- escalate_to_human 需要 question，可选 choices / context_files',
         '- request_amendment 建议带 proposal',
-        '- approve_and_continue 可选 mark_step_complete（步骤序号）',
-        '- wait 无额外字段',
+        '- approve_and_continue 可选 mark_step_complete（步骤序号）——仅用于**非最后一步**通过 review；',
+        '- complete_plan: 当**所有 step 都完成、整个 plan 收尾**时用，可选 summary。系统据此把 plan 转入 DONE 并生成 COMPLETION_REPORT.md。',
+        '  ⚠️ 不要再用「写一个收尾 inject_prompt 等系统检测」的老做法——那条检测路径已废弃，会导致系统误判你卡死并代派任务给主 AI。',
+        '- wait_for_contract: 你在等某个已派出、仍 OPEN 的 inject_prompt 回执时用，需要 contractId。',
+        '- wait 无额外字段（仅当确有 OPEN 主 AI 合同在跑、纯等待时用）',
         '',
         '若不确定下一步，调用 `emit_action(action="wait")`——**绝不可以只输出文字不调用工具**。',
         '',
@@ -310,6 +314,13 @@ export async function startSupervisorSession(params) {
             cwd,
             model: runtime.model,
             maxTurns: 100,
+            // 2026-05-28: emit partial-message stream_event frames so the
+            // supervisor's WaitingIndicator can show a live "↓ N tokens" counter
+            // during the turn (incl. the thinking phase). collectAssistantTurn
+            // consumes these frames for the live estimate ONLY — rendering stays
+            // driven by the complete assistant messages, so there's no
+            // double-render. See the stream_event branch + emitSupervisorLiveUsage.
+            includePartialMessages: true,
             // The SDK accepts a string-or-object systemPrompt. Use a string here so the
             // claude_code preset is NOT activated — Supervisor must obey OUR persona,
             // not Claude Code's default agent instructions.
@@ -522,6 +533,13 @@ async function collectAssistantTurn(runtime) {
     let lastFrameMs = turnStartMs;
     let prevFrameKind = 'init';
     let lastToolUseName = null;
+    // Live output-token estimate (2026-05-28): chars streamed this turn (text +
+    // thinking) and last-emit timestamp for throttling, plus the authoritative
+    // running output_tokens from message_delta. Drives the supervisor pane's
+    // live "↓ N tokens" via [SUPERVISOR_USAGE].
+    let streamedOutputChars = 0;
+    let lastLiveUsageEmitMs = 0;
+    let liveRealOutputTokens = 0;
     while (true) {
         if (runtime.disposed) {
             throw new Error('Supervisor runtime disposed mid-turn');
@@ -562,6 +580,35 @@ async function collectAssistantTurn(runtime) {
 
         const msg = next.value;
         if (!msg) continue;
+
+        // Live-usage path (2026-05-28): with includePartialMessages on, the SDK
+        // yields stream_event frames. Consume them ONLY for the live output-token
+        // ticker — accumulate streamed chars + track the authoritative output
+        // count from message_delta, emit a throttled [SUPERVISOR_USAGE], then
+        // skip the rest (no streamSdkMessage / no content extraction) so
+        // rendering stays driven by the complete assistant messages below.
+        if (msg.type === 'stream_event' && msg.event) {
+            const ev = msg.event;
+            if (ev.type === 'message_delta' && ev.usage
+                    && typeof ev.usage.output_tokens === 'number') {
+                liveRealOutputTokens = ev.usage.output_tokens;
+            }
+            if (ev.type === 'content_block_delta' && ev.delta) {
+                const chunk = ev.delta.type === 'text_delta' ? (ev.delta.text || '')
+                    : ev.delta.type === 'thinking_delta' ? (ev.delta.thinking || '')
+                    : '';
+                if (chunk) {
+                    streamedOutputChars += chunk.length;
+                    const now = Date.now();
+                    if (now - lastLiveUsageEmitMs >= 150) {
+                        lastLiveUsageEmitMs = now;
+                        const est = estimateTokensFromChars(streamedOutputChars);
+                        emitSupervisorLiveUsage(runtime, Math.max(liveRealOutputTokens, est));
+                    }
+                }
+            }
+            continue;
+        }
 
         // Record this message's shape so we can debug usage extraction later.
         // Cheap (constant string concat); the dump happens once per turn.
@@ -693,6 +740,29 @@ async function collectAssistantTurn(runtime) {
  * If JSON.stringify fails (e.g. circular ref in a future SDK shape), we log
  * and drop — losing a stream message must not break the turn.
  */
+/**
+ * 2026-05-28: emit a live output-token estimate for the supervisor turn, tagged
+ * like {@link streamSdkMessage} so Java can route it by pairId/supervisorId. The
+ * count is the larger of the authoritative message_delta output and the streamed
+ * char estimate (never moves backward); reconciles to the real total when the
+ * complete assistant message lands. Best-effort — a dropped line just skips one
+ * tick of the counter, never breaks the turn.
+ */
+function emitSupervisorLiveUsage(runtime, outputTokens) {
+    try {
+        const envelope = {
+            pairId: runtime.pairId,
+            supervisorId: runtime.supervisorId,
+            turnId: runtime.currentTurnId,
+            outputTokens,
+        };
+        process.stdout.write('[SUPERVISOR_USAGE] ' + JSON.stringify(envelope) + '\n');
+    } catch (e) {
+        console.error('[supervisor-stream] failed to emit live usage: '
+            + (e?.message || String(e)));
+    }
+}
+
 function streamSdkMessage(runtime, msg) {
     try {
         // Tool_result blocks can be huge (a Read on a multi-MB file). Cap the

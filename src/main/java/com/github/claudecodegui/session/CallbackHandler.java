@@ -132,11 +132,13 @@ public class CallbackHandler {
     }
 
     /**
-     * Notify of a usage update.
+     * Notify of a usage update. {@code outputTokens} is the generated-output
+     * count for the in-flight turn (for the CLI-style live "↓ N tokens" counter);
+     * {@code usedTokens} remains the whole-context total driving the % indicator.
      */
-    public void notifyUsageUpdate(int usedTokens, int maxTokens) {
+    public void notifyUsageUpdate(int usedTokens, int maxTokens, int outputTokens) {
         if (callback != null) {
-            callback.onUsageUpdate(usedTokens, maxTokens);
+            callback.onUsageUpdate(usedTokens, maxTokens, outputTokens);
         }
     }
 

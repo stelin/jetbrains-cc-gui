@@ -39,6 +39,13 @@ const ACTION_TYPES = [
     'escalate_to_human',
     'request_amendment',
     'wait',
+    // v3.1 (2026-05-26): typed completion + typed wait. The Java ActionRouter
+    // has handled these since the Contract State Machine v3 refactor, but the
+    // schema never exposed them — so the supervisor was forced to fake
+    // completion via `approve_and_continue + mark_step_complete=last`, which
+    // never transitions the plan to DONE and trips the Liveness takeover.
+    'complete_plan',
+    'wait_for_contract',
 ];
 
 /**
@@ -74,7 +81,17 @@ function buildEmitActionSchema(z) {
             'Used when action is request_amendment. The proposed plan change.'
         ),
         mark_step_complete: z.number().optional().describe(
-            'Used when action is approve_and_continue. Step index to mark as done.'
+            'Used when action is approve_and_continue. Step index to mark as done. '
+            + 'NOTE: this is for a NON-FINAL step passing review. When the LAST step '
+            + 'is done and the whole plan is complete, use action=complete_plan instead.'
+        ),
+        summary: z.string().optional().describe(
+            'Used when action is complete_plan. A short wrap-up of what the plan accomplished; '
+            + 'becomes the COMPLETION_REPORT.md header.'
+        ),
+        contractId: z.string().optional().describe(
+            'Required when action is wait_for_contract. The id of the OPEN contract you are '
+            + 'waiting on (e.g. a previously-issued inject_prompt still in flight).'
         ),
         // v3 self-decision log. Can be attached to any action when supervisor
         // made A/B-level adjustments this turn. C-level must escalate, NOT be
@@ -144,6 +161,18 @@ export function normalizeAction(args) {
         case 'approve_and_continue':
             if (typeof args.mark_step_complete === 'number') {
                 payload.mark_step_complete = args.mark_step_complete;
+            }
+            break;
+        case 'complete_plan':
+            // summary is optional — the Java side classifies completion severity
+            // from Plan.steps[] regardless, so a missing summary is not an error.
+            if (typeof args.summary === 'string') payload.summary = args.summary;
+            break;
+        case 'wait_for_contract':
+            if (typeof args.contractId === 'string' && args.contractId.length > 0) {
+                payload.contractId = args.contractId;
+            } else {
+                error = 'wait_for_contract requires non-empty `contractId`';
             }
             break;
         case 'wait':

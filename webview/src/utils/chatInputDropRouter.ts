@@ -23,9 +23,11 @@
 export type ChatInputId = 'main' | 'supervisor';
 
 type DropHandler = (paths: string[]) => void;
+type FocusHandler = () => void;
 
 let lastFocusedId: ChatInputId = 'main';
 const handlers = new Map<ChatInputId, DropHandler>();
+const focusHandlers = new Map<ChatInputId, FocusHandler>();
 
 /**
  * Mark a chat input as the most-recently focused. Call from each input's
@@ -71,8 +73,36 @@ export function tryDispatchExternalDrop(paths: string[]): boolean {
   }
 }
 
+/**
+ * Register an imperative focus handler for {@code id}. Returns the unregister
+ * cleanup — call from a {@code useEffect} return. Lets siblings (e.g. the
+ * supervisor pane's Stop button) move keyboard focus into a composer they
+ * don't hold a ref to.
+ */
+export function registerChatInputFocusHandler(
+  id: ChatInputId,
+  handler: FocusHandler
+): () => void {
+  focusHandlers.set(id, handler);
+  return () => {
+    if (focusHandlers.get(id) === handler) focusHandlers.delete(id);
+  };
+}
+
+/** Move keyboard focus into the named chat input, if it registered a handler. */
+export function focusChatInput(id: ChatInputId): void {
+  const handler = focusHandlers.get(id);
+  if (!handler) return;
+  try {
+    handler();
+  } catch (e) {
+    console.error('[chatInputDropRouter] focus handler failed:', e);
+  }
+}
+
 /** Test-only helper. Reset module state between tests. */
 export function __resetChatInputDropRouterForTest(): void {
   lastFocusedId = 'main';
   handlers.clear();
+  focusHandlers.clear();
 }

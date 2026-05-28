@@ -315,7 +315,7 @@ const App = () => {
     activeProviderConfig, claudeSettingsAlwaysThinkingEnabled,
     reasoningEffort, streamingEnabledSetting, sendShortcut, autoOpenFileEnabled,
     longContextEnabled,
-    usagePercentage, usageUsedTokens, usageMaxTokens,
+    usagePercentage, usageUsedTokens, usageMaxTokens, usageOutputTokens,
     setPermissionMode,
     setClaudePermissionMode, setCodexPermissionMode,
     setSelectedClaudeModel, setSelectedCodexModel,
@@ -323,7 +323,7 @@ const App = () => {
     setClaudeSettingsAlwaysThinkingEnabled, setStreamingEnabledSetting,
     setSendShortcut, setAutoOpenFileEnabled,
     setSdkStatus, setSdkStatusLoaded, setSelectedAgent,
-    setUsagePercentage, setUsageUsedTokens, setUsageMaxTokens,
+    setUsagePercentage, setUsageUsedTokens, setUsageMaxTokens, setUsageOutputTokens,
     syncActiveProviderModelMapping,
     handleModeSelect, handleModelSelect, handleProviderSelect,
     handleReasoningChange, handleAgentSelect, handleToggleThinking,
@@ -381,7 +381,7 @@ const App = () => {
     t, addToast, clearToasts,
     setMessages, setStatus, setLoading, setLoadingStartTime,
     setIsThinking, setStreamingActive, setHistoryData,
-    setCurrentSessionId, setUsagePercentage, setUsageUsedTokens, setUsageMaxTokens,
+    setCurrentSessionId, setUsagePercentage, setUsageUsedTokens, setUsageMaxTokens, setUsageOutputTokens,
     setPermissionMode, setClaudePermissionMode, setCodexPermissionMode,
     setSelectedClaudeModel, setSelectedCodexModel,
     setProviderConfigVersion, setActiveProviderConfig,
@@ -513,12 +513,16 @@ const App = () => {
     hookHandleSubmit(content, attachments);
   }, [loading, enqueueMessage, hookHandleSubmit, forceCreateNewSession, currentProvider, handleModeSelect, setCurrentView, addToast, t, reasoningEffort]);
 
-  // Clear effort snapshot when the turn ends (loading goes false).
+  // Clear effort snapshot + live output-token count when the turn ends (loading
+  // goes false). Resetting the output count here means the next turn starts from
+  // a clean slate (the WaitingIndicator shows no stale "↓ N" during the new
+  // turn's initial thinking, before its first [USAGE] arrives).
   useEffect(() => {
-    if (!loading && turnEffort !== null) {
-      setTurnEffort(null);
+    if (!loading) {
+      if (turnEffort !== null) setTurnEffort(null);
+      if (usageOutputTokens !== undefined) setUsageOutputTokens(undefined);
     }
-  }, [loading, turnEffort]);
+  }, [loading, turnEffort, usageOutputTokens, setUsageOutputTokens]);
 
   // Bridge callback: server echoes the effort tier it actually applied to the SDK
   // (parsed from the daemon's "[REASONING_EFFORT] ✓ ... applied options.effort=xxx" log).
@@ -536,10 +540,15 @@ const App = () => {
     };
   }, []);
 
-  // Live output-token count for the in-flight turn: read usage.output_tokens from
-  // the latest assistant message that has it. Returns undefined when no usage yet.
+  // Live output-token count for the in-flight turn. Prefer the streaming [USAGE]
+  // value (usageOutputTokens) — it ticks during the thinking phase too, matching
+  // the CLI. Fall back to scanning the latest assistant message's raw usage for
+  // non-streaming mode (or before the first [USAGE] of the turn lands).
   const turnOutputTokens = useMemo<number | undefined>(() => {
     if (!loading) return undefined;
+    if (typeof usageOutputTokens === 'number' && usageOutputTokens > 0) {
+      return usageOutputTokens;
+    }
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       const m = messages[i];
       if (!m || m.type !== 'assistant') continue;
@@ -549,7 +558,7 @@ const App = () => {
       if (typeof usage?.output_tokens === 'number') return usage.output_tokens;
     }
     return undefined;
-  }, [loading, messages]);
+  }, [loading, usageOutputTokens, messages]);
 
   // ── File changes management ──
   const {

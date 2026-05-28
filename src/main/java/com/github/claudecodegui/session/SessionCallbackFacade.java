@@ -82,8 +82,8 @@ public class SessionCallbackFacade {
         callbackHandler.notifyThinkingDelta(delta);
     }
 
-    public void notifyUsageUpdate(int usedTokens, int maxTokens) {
-        callbackHandler.notifyUsageUpdate(usedTokens, maxTokens);
+    public void notifyUsageUpdate(int usedTokens, int maxTokens, int outputTokens) {
+        callbackHandler.notifyUsageUpdate(usedTokens, maxTokens, outputTokens);
     }
 
     public void notifyUserMessageUuidPatched(String content, String uuid) {

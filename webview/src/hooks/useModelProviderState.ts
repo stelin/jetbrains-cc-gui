@@ -38,6 +38,10 @@ export function useModelProviderState({ addToast, t }: UseModelProviderStateOpti
   const [usagePercentage, setUsagePercentage] = useState(0);
   const [usageUsedTokens, setUsageUsedTokens] = useState<number | undefined>(undefined);
   const [usageMaxTokens, setUsageMaxTokens] = useState<number | undefined>(undefined);
+  // 2026-05-28: live generated-output token count for the in-flight turn, fed by
+  // the streaming [USAGE] tag. Drives the CLI-style "↓ N tokens" on the
+  // WaitingIndicator; reset per turn (distinct from the cumulative context %).
+  const [usageOutputTokens, setUsageOutputTokens] = useState<number | undefined>(undefined);
   const [, setProviderConfigVersion] = useState(0);
   const [activeProviderConfig, setActiveProviderConfig] = useState<ProviderConfig | null>(null);
   const [claudeSettingsAlwaysThinkingEnabled, setClaudeSettingsAlwaysThinkingEnabled] = useState(true);
@@ -381,6 +385,7 @@ export function useModelProviderState({ addToast, t }: UseModelProviderStateOpti
     usagePercentage, setUsagePercentage,
     usageUsedTokens, setUsageUsedTokens,
     usageMaxTokens, setUsageMaxTokens,
+    usageOutputTokens, setUsageOutputTokens,
     setProviderConfigVersion,
     activeProviderConfig, setActiveProviderConfig,
     claudeSettingsAlwaysThinkingEnabled, setClaudeSettingsAlwaysThinkingEnabled,

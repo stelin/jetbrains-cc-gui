@@ -10,6 +10,8 @@ public enum PlanTransition {
     ESCALATED_TO_HUMAN,
     HUMAN_RESUMED,
     USER_CANCEL,
+    USER_PAUSED,
+    USER_RESUMED,
     PLAN_REPLACED,
     PLAN_COMPLETED
 }

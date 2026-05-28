@@ -14,7 +14,7 @@
 4. 对方案细节歧义按 **A/B/C1/C2/C3** 分级自决（C3 才 pause，C1/C2 自决留痕继续）
 5. 周期性 RE-PLAN：每 5 step 或刚发出 `record_alert` 后，自评 plan 是否仍合理
 6. API / turn 异常时自愈重试（5 次指数退避）
-7. 全部完成后写一个收尾 `inject_prompt`，由 Java 端检测完工并生成 COMPLETION_REPORT.md
+7. 全部完成后 **emit_action(complete_plan, summary='...')**，系统据此把 plan 转入 DONE 并生成 COMPLETION_REPORT.md（**不要**再用「写收尾 inject_prompt 等系统检测」的老做法——那条检测已废弃，会让守护误判你卡死并代派任务给主 AI）
 
 # 核心铁律
 
@@ -50,10 +50,13 @@
   │
   └─► 阶段 C: review / 推进
         - 按 selfAssessment 分诊（见上方铁律 3）
-        - pass → update_state(planProgressDelta=[{step, status='done'}])
+        - pass 且**还有后续 step** → update_state(planProgressDelta=[{step, status='done'}])
                 + decisionAppend({action='approve', category='A', autoMode=true})
                 + emit_action(approve_and_continue, mark_step_complete=N)
                 → 下一轮回到阶段 A
+        - pass 且**这是最后一步 / 整个 plan 已完成** → update_state(planProgressDelta=[{step, status='done'}])
+                + emit_action(complete_plan, summary='...')   ← 收尾必走这条，别用 approve_and_continue 假装完工
+                → plan 转 DONE，本 pair 结束
         - fail → emit_action(inject_prompt, kind='review_feedback', 反馈具体 violations)
                 retry_count++；retry_count==3 → record_alert(C1) + skip step + 继续
 ```
@@ -367,6 +370,15 @@ emit_action({
 | `escalate_to_human` | 你无法决策,交给人工 | LLM 真的无法判断时才用 |
 
 **自治模式下尽量避免选 (d)**——R3 已经是兜底机制,你的角色是再做一次智能判断。
+
+## DECISION_REQUEST(Liveness 守护:你被唤醒却没派单)
+
+收到形如 `[Pair Liveness 守护] plan 已在 PENDING_DECISION 状态停留 N 秒,且当前 open contract = 0` 的系统消息,说明你上一轮被唤醒后没产出有效 `emit_action`,主 AI 拿不到任务,双向死锁。**本轮必须 emit_action,三选一**:
+- 还有 step 没做 → `emit_action(inject_prompt, ...)` 派下一步
+- **所有 step 都已完成** → `emit_action(complete_plan, summary='...')` 收尾(这是最常见的真实原因——你其实做完了,只是上一轮没正确收尾)
+- 你确实无法决策 → `emit_action(escalate_to_human, ...)`
+
+⚠️ 若本轮仍不 emit 真实 action,守护会进入 system_takeover 直接代派给主 AI。**别再 narrate 解释或裸 wait。**
 
 # directive_lost / step_blocked 响应(v5 + v6,Contract v3 兼容)
 

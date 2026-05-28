@@ -331,7 +331,7 @@ public class SessionCallbackAdapter implements ClaudeSession.SessionCallback {
     }
 
     @Override
-    public void onUsageUpdate(int usedTokens, int maxTokens) {
+    public void onUsageUpdate(int usedTokens, int maxTokens, int outputTokens) {
         if (isInactive()) {
             return;
         }
@@ -340,10 +340,14 @@ public class SessionCallbackAdapter implements ClaudeSession.SessionCallback {
                 return;
             }
             double percentage = maxTokens > 0 ? (usedTokens * 100.0 / maxTokens) : 0.0;
-            String json = String.format("{\"percentage\":%.2f,\"usedTokens\":%d,\"maxTokens\":%d}",
-                    percentage, usedTokens, maxTokens);
+            // outputTokens drives the live "↓ N tokens" counter on the
+            // WaitingIndicator; usedTokens/percentage still drive the context %.
+            String json = String.format(
+                    "{\"percentage\":%.2f,\"usedTokens\":%d,\"maxTokens\":%d,\"outputTokens\":%d}",
+                    percentage, usedTokens, maxTokens, outputTokens);
             jsTarget.callJavaScript("onUsageUpdate", JsUtils.escapeJs(json));
-            LOG.debug("Usage update sent to frontend: " + usedTokens + "/" + maxTokens);
+            LOG.debug("Usage update sent to frontend: " + usedTokens + "/" + maxTokens
+                    + " (output=" + outputTokens + ")");
         });
     }
 

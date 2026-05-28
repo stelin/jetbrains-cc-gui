@@ -115,7 +115,7 @@ public class ClaudeSession {
         default void onThinkingDelta(String delta) {
         }
 
-        default void onUsageUpdate(int usedTokens, int maxTokens) {
+        default void onUsageUpdate(int usedTokens, int maxTokens, int outputTokens) {
         }
 
         default void onUserMessageUuidPatched(String content, String uuid) {

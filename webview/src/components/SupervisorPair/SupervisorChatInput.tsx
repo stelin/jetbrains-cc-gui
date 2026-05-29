@@ -27,6 +27,7 @@ import {
   registerChatInputDropHandler,
   registerChatInputFocusHandler,
 } from '../../utils/chatInputDropRouter';
+import { sendBridgeEvent } from '../../utils/bridge';
 import styles from './style.module.less';
 
 const sendToJava = (message: string) => {
@@ -133,6 +134,7 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
     queueByAgentId,
     enqueueSupervisorMessage,
     dequeueSupervisorMessage,
+    pairId,
   } = usePairContext();
   const usage = usageByAgentId[supervisor.agentId];
   // Busy iff the supervisor for THIS pane is mid-turn. Drives both the
@@ -240,6 +242,17 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
     enqueueSupervisorMessage,
     supervisor.agentId,
   ]);
+
+  // Interrupt the supervisor's in-flight turn so the user can pause to add
+  // context. Mirrors SupervisorPane's header Stop button — the Java side moves
+  // the plan to WAITING (onUserPaused) and the next user_input resumes it. The
+  // daemon-side supervisor.interrupt bypasses the command queue so it can settle
+  // a turn that is itself holding the queue.
+  const handleStop = useCallback(() => {
+    if (!pairId) return;
+    sendBridgeEvent('pair_supervisor_interrupt', JSON.stringify({ pairId }));
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [pairId]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -510,14 +523,25 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
         </div>
 
         <div className="button-area-right">
-          <button
-            className="submit-button"
-            onClick={handleSubmit}
-            disabled={draft.trim().length === 0}
-            title={t('pairLayout.composer.send')}
-          >
-            <span className="codicon codicon-send" />
-          </button>
+          {isSupervisorBusy ? (
+            <button
+              className="submit-button stop-button"
+              onClick={handleStop}
+              disabled={!pairId}
+              title={t('pairLayout.interruptSupervisor', { defaultValue: '中断 Supervisor 当前轮' })}
+            >
+              <span className="codicon codicon-debug-stop" />
+            </button>
+          ) : (
+            <button
+              className="submit-button"
+              onClick={handleSubmit}
+              disabled={draft.trim().length === 0}
+              title={t('pairLayout.composer.send')}
+            >
+              <span className="codicon codicon-send" />
+            </button>
+          )}
         </div>
       </div>
 

@@ -606,6 +606,24 @@ public class SupervisorBridge {
     }
 
     /**
+     * 2026-05-28 (daemon split): tear down the supervisor's DEDICATED daemon
+     * session. Each pair now owns its own {@link ClaudeSDKBridge} → its own
+     * ai-bridge-server session → its own daemon child process (so the supervisor
+     * channel no longer shares the main AI's command queue). {@link #stop()}
+     * only disposes the in-daemon SDK runtime; this kills the transport itself
+     * (RemoteBridge.stop → DELETE /session) so the daemon process exits instead
+     * of leaking until the server reaps it. Idempotent / best-effort.
+     */
+    public void shutdownTransport() {
+        try {
+            sdkBridge.shutdownDaemon();
+        } catch (Exception e) {
+            LOG.warn("[SupervisorBridge] shutdownTransport failed: "
+                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName()));
+        }
+    }
+
+    /**
      * Phase 4: stop a specific supervisor session by id (rather than the
      * bridge's current one). Used by {@code RotationCoordinator} to retire
      * the OLD daemon runtime after the new one is alive.

@@ -45,6 +45,15 @@ public final class PairSessionManager implements Disposable {
 
     private static final Logger LOG = Logger.getInstance(PairSessionManager.class);
     private static final long START_DAEMON_TIMEOUT_SEC = 20;
+    /**
+     * 2026-05-28 (daemon split): the supervisor now spawns its OWN daemon
+     * session on first start (no longer piggy-backing the already-warm main-AI
+     * daemon). The first {@code supervisor.start} therefore has to wait for a
+     * cold {@code POST /session} + SDK preload (RemoteBridge readyLatch is 30s)
+     * before the turn even runs, so this start uses a longer cap than the
+     * shared-daemon path did.
+     */
+    private static final long START_SUPERVISOR_DAEMON_TIMEOUT_SEC = 60;
 
     private final Project project;
     private final ConcurrentHashMap<String, PairSession> pairs = new ConcurrentHashMap<>();
@@ -275,7 +284,17 @@ public final class PairSessionManager implements Disposable {
         }
 
         // Build bridge and persistent session shell.
-        SupervisorBridge bridge = new SupervisorBridge(sdkBridge, pairId, params.agentId);
+        // 2026-05-28 (daemon split): the supervisor gets its OWN ClaudeSDKBridge
+        // → its own ai-bridge-server session → its own daemon child process.
+        // Previously it shared the main AI's `sdkBridge`, which funneled both
+        // channels through one daemon `commandQueue` (so a slow/stuck main-AI
+        // turn starved the supervisor — the cross-AI deadlock) and coupled their
+        // abort paths (main-AI abort failAllPending also tore down supervisor
+        // requests). A dedicated transport gives independent queues + independent
+        // abort. The main AI's `sdkBridge` is still used for MainAIBridge below
+        // (mainAi.* rotation commands stay on the main-AI daemon).
+        ClaudeSDKBridge supervisorSdkBridge = new ClaudeSDKBridge(project);
+        SupervisorBridge bridge = new SupervisorBridge(supervisorSdkBridge, pairId, params.agentId);
         PairSession session = new PairSession(
                 pairId,
                 params.mainSessionId,
@@ -319,7 +338,7 @@ public final class PairSessionManager implements Disposable {
                     params.agentId, // generation-0 supervisorId == agentId
                     bootstrapAppend,
                     0
-            ).get(START_DAEMON_TIMEOUT_SEC, TimeUnit.SECONDS);
+            ).get(START_SUPERVISOR_DAEMON_TIMEOUT_SEC, TimeUnit.SECONDS);
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             throw new IOException("Interrupted while starting supervisor", ie);
@@ -770,6 +789,17 @@ public final class PairSessionManager implements Disposable {
                 session.getSupervisorBridge().stop().get(5, TimeUnit.SECONDS);
             } catch (Exception e) {
                 LOG.warn("[PairSessionManager] Supervisor stop did not complete cleanly: " + e.getMessage());
+            }
+
+            // 2026-05-28 (daemon split): the supervisor owns a DEDICATED daemon
+            // session now, so we must kill it explicitly (DELETE /session →
+            // remote daemon child exits). supervisor.stop above only disposes
+            // the in-daemon SDK runtime; without this the daemon process itself
+            // would linger until the server's idle reaper collects it.
+            try {
+                session.getSupervisorBridge().shutdownTransport();
+            } catch (Exception e) {
+                LOG.warn("[PairSessionManager] Supervisor transport shutdown failed: " + e.getMessage());
             }
 
             // Drain + stop the message batcher scheduler so its daemon thread

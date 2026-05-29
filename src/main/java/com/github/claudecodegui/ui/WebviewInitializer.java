@@ -37,6 +37,7 @@ import java.awt.dnd.DnDConstants;
 import java.awt.dnd.DropTarget;
 import java.awt.dnd.DropTargetAdapter;
 import java.awt.dnd.DropTargetDropEvent;
+import java.awt.event.HierarchyEvent;
 import java.io.File;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -72,6 +73,28 @@ public class WebviewInitializer {
 
     public WebviewInitializer(WebviewHost host) {
         this.host = host;
+    }
+
+    /**
+     * 2026-05-28: force the OSR Chromium surface to repaint after a hidden→shown
+     * transition (tool-window tab switch), WITHOUT changing the view size — a
+     * manual {@code wasResized()} here passed an unscaled (HiDPI) size and shrank
+     * the content, and {@code CefBrowser.invalidate()} isn't on the bundled JCEF
+     * interface. We reflectively call whichever size-free repaint primitive the
+     * runtime browser actually exposes ({@code invalidate()}, else
+     * {@code wasHidden(false)}); reflection also reaches methods present on the
+     * concrete OSR impl but absent from the {@link CefBrowser} interface. If
+     * neither exists we silently fall back to the Swing repaint at the call site.
+     */
+    private static void forceCefRepaint(CefBrowser cef) {
+        if (cef == null) return;
+        try {
+            cef.getClass().getMethod("invalidate").invoke(cef);
+            return;
+        } catch (Throwable ignored) { /* not in this JCEF build */ }
+        try {
+            cef.getClass().getMethod("wasHidden", boolean.class).invoke(cef, false);
+        } catch (Throwable ignored) { /* neither available — Swing repaint only */ }
     }
 
     /**
@@ -347,6 +370,33 @@ public class WebviewInitializer {
             });
 
             mainPanel.add(browserComponent, BorderLayout.CENTER);
+
+            // 2026-05-28: JCEF blank-screen-on-reshow fix for tool-window tab
+            // switching. When a tab is deselected its browserComponent goes
+            // hidden; on re-select it goes showing again, and the native Chromium
+            // (OSR) surface frequently fails to repaint on that hidden→showing
+            // transition — leaving a white screen, more often on slow machines.
+            // We force a CEF repaint via invalidate() — which only schedules an
+            // OnPaint, it does NOT change the view size, so JBCef keeps owning
+            // sizing (an earlier wasResized() attempt here passed a too-early,
+            // too-small size and shrank the content). revalidate()/repaint()
+            // refreshes the Swing wrapper. The page LAYOUT recovery is handled
+            // separately by the JS pageshow/resize in
+            // ClaudeSDKToolWindow.selectionChanged.
+            browserComponent.addHierarchyListener(e -> {
+                if ((e.getChangeFlags() & HierarchyEvent.SHOWING_CHANGED) == 0) return;
+                if (!browserComponent.isShowing()) return;
+                ApplicationManager.getApplication().invokeLater(() -> {
+                    if (host.isDisposed()) return;
+                    if (!browserComponent.isShowing()) return;
+                    JBCefBrowser b = host.getBrowser();
+                    if (b != null) {
+                        forceCefRepaint(b.getCefBrowser());
+                    }
+                    browserComponent.revalidate();
+                    browserComponent.repaint();
+                });
+            });
 
         } catch (IllegalStateException e) {
             if (e.getMessage() != null && e.getMessage().contains("JCEF")) {

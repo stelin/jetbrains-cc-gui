@@ -136,10 +136,12 @@ function setupScaleRecovery() {
     return String(fontSizeMap[fontSizeLevel] || 1.0);
   };
 
-  let hiddenAt: number | null = null;
   let lastRecoveryAt = 0;
   let scheduled = false;
-  const RECOVERY_COOLDOWN_MS = 1500;
+  // 2026-05-28: lowered from 1500ms so rapid tab switches on low-end machines
+  // (especially with several streaming tabs saturating the EDT) still get their
+  // scale re-asserted instead of being swallowed by the cooldown.
+  const RECOVERY_COOLDOWN_MS = 400;
 
   const forceReapply = (reason: string) => {
     const app = document.getElementById('app') as HTMLElement | null;
@@ -199,17 +201,12 @@ function setupScaleRecovery() {
   };
 
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-      hiddenAt = Date.now();
-      return;
-    }
-
-    const elapsed = hiddenAt ? Date.now() - hiddenAt : 0;
-    hiddenAt = null;
-    // Only nudge after a meaningful pause to avoid unnecessary work during normal tab switches.
-    if (elapsed > 1500) {
-      schedule('visibilitychange-resume');
-    }
+    if (document.hidden) return;
+    // Became visible — always re-assert scale. A JCEF tab switch can leave the
+    // zoom/layout wrong (shrunk or enlarged); the old `elapsed > 1500` gate
+    // skipped quick switches, which is exactly the common failure case on
+    // low-end machines with several streaming tabs.
+    schedule('visibilitychange-resume');
   });
 
   window.addEventListener('focus', () => {
@@ -221,6 +218,32 @@ function setupScaleRecovery() {
     // Helps if the page is restored from bfcache-like behavior.
     schedule('pageshow');
   });
+
+  // 2026-05-28: re-assert scale whenever the viewport actually settles to a new
+  // size. On a tab switch the CEF surface can resize late — more so on low-end
+  // machines with several streaming tabs saturating the EDT — so a single
+  // rAF/event recovery may run BEFORE the surface settles and lock in the wrong
+  // (shrunk/enlarged) size. A debounced ResizeObserver fires exactly when the
+  // size lands, however late, so recovery always uses the final dimensions.
+  // It stays quiet during streaming (content growth doesn't change the viewport)
+  // so there's no extra load on the hot path.
+  if (typeof ResizeObserver !== 'undefined') {
+    let roTimer: number | undefined;
+    let lastW = document.documentElement.clientWidth;
+    let lastH = document.documentElement.clientHeight;
+    const ro = new ResizeObserver(() => {
+      const w = document.documentElement.clientWidth;
+      const h = document.documentElement.clientHeight;
+      if (w === lastW && h === lastH) return;
+      lastW = w;
+      lastH = h;
+      if (roTimer !== undefined) clearTimeout(roTimer);
+      // Bypass the schedule() cooldown — a real settle must always be honored —
+      // but debounce so a window resize-drag doesn't thrash the zoom toggle.
+      roTimer = window.setTimeout(() => forceReapply('resize-observed'), 120);
+    });
+    ro.observe(document.documentElement);
+  }
 }
 
 let latestEditorFontConfig: {

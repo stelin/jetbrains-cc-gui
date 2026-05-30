@@ -556,6 +556,7 @@ public class SupervisorAgentManager {
         return DEFAULT_MODEL.equals(m)
                 || LEGACY_HAIKU_MODEL_ID.equals(m)
                 || "claude-sonnet-4-6".equals(m)
+                || "claude-opus-4-8".equals(m)
                 || "claude-opus-4-7".equals(m)
                 || "claude-opus-4-6".equals(m)
                 || "gpt-5.5".equals(m);

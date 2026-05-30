@@ -54,8 +54,16 @@ export const ReasoningSelect = ({ value, onChange, disabled, selectedModel, curr
     return true;
   });
 
+  // Fallback chain when the persisted `value` isn't available on the current
+  // model: prefer 'max' first so the default 'xhigh' degrades to 'max' (not
+  // 'high') on models without xhigh support like Opus 4.6 / Sonnet 4.6.
+  // 'xhigh' is the secondary preference for Codex (no max but xhigh exists);
+  // [length-2] keeps the historical "one notch below the top" behaviour as
+  // the last resort.
   const currentLevel =
     availableLevels.find(l => l.id === value) ||
+    availableLevels.find(l => l.id === 'max') ||
+    availableLevels.find(l => l.id === 'xhigh') ||
     availableLevels[availableLevels.length - 2] ||
     availableLevels[0];
 

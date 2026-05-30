@@ -33,8 +33,10 @@ export function useModelProviderState({ addToast, t }: UseModelProviderStateOpti
   const [claudePermissionMode, setClaudePermissionMode] = useState<PermissionMode>('bypassPermissions');
   const [codexPermissionMode, setCodexPermissionMode] = useState<PermissionMode>('default');
   const [permissionMode, setPermissionMode] = useState<PermissionMode>('bypassPermissions');
-  // Codex reasoning effort (thinking depth)
-  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>('max');
+  // Reasoning effort (thinking depth) — default 'xhigh' so Opus 4.7/4.8 land
+  // on extra-high out of the box; models that don't expose xhigh (Opus 4.6 /
+  // Sonnet 4.6) cleanly downgrade to 'max' via the ReasoningSelect fallback.
+  const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>('xhigh');
   const [usagePercentage, setUsagePercentage] = useState(0);
   const [usageUsedTokens, setUsageUsedTokens] = useState<number | undefined>(undefined);
   const [usageMaxTokens, setUsageMaxTokens] = useState<number | undefined>(undefined);
@@ -114,7 +116,7 @@ export function useModelProviderState({ addToast, t }: UseModelProviderStateOpti
       let restoredCodexPermissionMode: PermissionMode = 'default';
       let initialPermissionMode: PermissionMode = 'bypassPermissions';
       let restoredLongContextEnabled = false;  // Default disabled (avoid 1M billing trap)
-      let restoredReasoningEffort: ReasoningEffort = 'max';
+      let restoredReasoningEffort: ReasoningEffort = 'xhigh';
 
       if (saved) {
         const state = JSON.parse(saved);
@@ -139,7 +141,7 @@ export function useModelProviderState({ addToast, t }: UseModelProviderStateOpti
           setLongContextEnabled(state.longContextEnabled);
         }
 
-        // Load reasoning effort (default 'max' if not present or invalid)
+        // Load reasoning effort (default 'xhigh' if not present or invalid)
         const validEfforts: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
         if (validEfforts.includes(state.reasoningEffort)) {
           restoredReasoningEffort = state.reasoningEffort;

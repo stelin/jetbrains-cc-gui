@@ -319,9 +319,14 @@ export const CLAUDE_MODELS: ModelInfo[] = [
     description: 'Sonnet 4.6 · Use the default model',
   },
   {
+    id: 'claude-opus-4-8',
+    label: 'Opus 4.8',
+    description: 'Opus 4.8 · Latest and most capable',
+  },
+  {
     id: 'claude-opus-4-7',
     label: 'Opus 4.7',
-    description: 'Opus 4.7 · Latest and most capable',
+    description: 'Opus 4.7 · Strong reasoning, balanced choice',
   },
   {
     id: 'claude-opus-4-6',
@@ -417,16 +422,18 @@ export const AVAILABLE_PROVIDERS: ProviderInfo[] = [
  * 参考: https://code.claude.com/docs/en/model-config#adjust-effort-level
  */
 export const EFFORT_SUPPORTED_CLAUDE_MODELS = new Set([
+  'claude-opus-4-8',
   'claude-opus-4-7',
   'claude-opus-4-6',
   'claude-sonnet-4-6',
 ]);
 
 /**
- * Claude 模型 → 额外支持 'xhigh' 档位的模型(目前仅 Opus 4.7)。
+ * Claude 模型 → 额外支持 'xhigh' 档位的模型(Opus 4.7+)。
  * 仅列基础 id。
  */
 export const XHIGH_EFFORT_CLAUDE_MODELS = new Set([
+  'claude-opus-4-8',
   'claude-opus-4-7',
 ]);
 
@@ -434,6 +441,7 @@ export const XHIGH_EFFORT_CLAUDE_MODELS = new Set([
  * Claude 模型 → 支持 'max' 档位的模型。仅列基础 id。
  */
 export const MAX_EFFORT_CLAUDE_MODELS = new Set([
+  'claude-opus-4-8',
   'claude-opus-4-7',
   'claude-opus-4-6',
   'claude-sonnet-4-6',

@@ -1140,9 +1140,13 @@
         "label": "Sonnet 4.6",
         "description": "Sonnet 4.6 · Modelo recomendado por defecto"
       },
+      "opus48": {
+        "label": "Opus 4.8",
+        "description": "Opus 4.8 · El más reciente y capaz"
+      },
       "opus46": {
         "label": "Opus 4.7",
-        "description": "Opus 4.7 · El más reciente y capaz"
+        "description": "Opus 4.7 · Razonamiento sólido, opción equilibrada"
       },
       "opus46_1m": {
         "label": "Opus 4.6",

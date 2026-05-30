@@ -92,9 +92,11 @@ public class SessionState {
     private volatile String model = "claude-sonnet-4-6";
     private volatile String provider = "claude";
     // Reasoning effort (thinking depth) — must stay in sync with webview default in
-    // useModelProviderState.ts (currently 'max'). The webview doesn't auto-push its
+    // useModelProviderState.ts (currently 'xhigh'). The webview doesn't auto-push its
     // initial state to Java, so this default applies until the user clicks the selector.
-    private volatile String reasoningEffort = "max";
+    // 'xhigh' is the Opus 4.7/4.8 sweet spot; models without xhigh support get
+    // downgraded by ReasoningSelect to 'max' on render.
+    private volatile String reasoningEffort = "xhigh";
 
     // Slash commands — volatile for cross-thread visibility (same reason as permissionMode/model/provider)
     private volatile List<String> slashCommands = new ArrayList<>();

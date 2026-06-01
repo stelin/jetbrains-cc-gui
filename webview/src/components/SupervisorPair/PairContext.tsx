@@ -133,6 +133,12 @@ export interface EscalateRequest {
   contextFiles?: string[];
   kind?: 'amendment_request';
   proposal?: string;
+  /**
+   * 2026-05-31: whether the escalate modal blocks dismissal (user must answer).
+   * Java only routes genuinely-blocking escalations to the modal, so this is
+   * true unless a payload explicitly opts out with {@code blocking: false}.
+   */
+  blocking?: boolean;
   stats?: {
     auto_recover_count?: number;
     escalate_count?: number;
@@ -142,6 +148,22 @@ export interface EscalateRequest {
     verify_fail_count?: number;
   };
   steps?: Array<{ index?: number; status?: string }>;
+}
+
+/**
+ * 2026-05-31: a non-blocking supervisor alert (autonomy-mode C1/C2 fallback,
+ * or an informational escalation). Surfaced as an auto-dismissing toast — the
+ * supervisor does NOT pause for it; it's an audit affordance the user can read
+ * or ignore. Distinct from {@link EscalateRequest}, which blocks.
+ */
+export interface PairAlert {
+  id: string;
+  ts: number;
+  severity?: string;   // 'warn' (C1) | 'alert' (C2)
+  category?: string;   // 'C1' | 'C2'
+  reason?: string;
+  question?: string;
+  fallbackChoice?: string;
 }
 
 interface PairContextValue {
@@ -206,6 +228,12 @@ interface PairContextValue {
    * PeriodicNoticeStrip. Capped at MAX_NOTICES in-memory; not persisted.
    */
   notices: PairNotice[];
+  /**
+   * 2026-05-31: non-blocking supervisor alerts (C1/C2). Rendered as
+   * auto-dismissing toasts by SupervisorAlertToast.
+   */
+  alerts: PairAlert[];
+  dismissAlert: (id: string) => void;
   respondToEscalate: (choice: string, note?: string) => void;
   dismissEscalate: () => void;
   registerInjectPromptHandler: (
@@ -253,6 +281,9 @@ const MAX_MESSAGES_PER_AGENT = 500;
 
 /** Cap the periodic-notice strip's in-memory history. Notices are not persisted. */
 const MAX_NOTICES = 200;
+
+/** Cap concurrent non-blocking alert toasts on screen. */
+const MAX_ALERTS = 5;
 
 /**
  * Stable numeric hash for a string turn id, so messages can carry the
@@ -341,6 +372,11 @@ export function PairProvider({ children }: PairProviderProps) {
   // Periodic-event strip history (e.g. health-check heartbeats). Cleared on
   // pair stop; capped at MAX_NOTICES.
   const [notices, setNotices] = useState<PairNotice[]>([]);
+  // 2026-05-31: non-blocking supervisor alerts (C1/C2). Capped; cleared on stop.
+  const [alerts, setAlerts] = useState<PairAlert[]>([]);
+  const dismissAlert = useCallback((id: string) => {
+    setAlerts((curr) => curr.filter((a) => a.id !== id));
+  }, []);
   // Phase 5 (2026-05-24): optimistic autonomy mode (canonical comes from
   // pairStatus.autonomyMode each push). Initial undefined; AutonomyToggle
   // falls back to "full" (matches Java's 2026-05-25 default).
@@ -791,14 +827,24 @@ export function PairProvider({ children }: PairProviderProps) {
     const prevAlert = window.onPairAlert;
     const prevNotice = window.onPairNotice;
     window.onPairAlert = (json: string) => {
-      // Phase 3 stub — Phase 5 will replace with a real toast/banner UI.
-      // For now, log to console so devs can verify the daemon→Java→webview
-      // path is wired; production users would not see anything from this.
+      // 2026-05-31: non-blocking record_alert (C1/C2) → auto-dismissing toast.
+      // Replaces the old console-only stub. The supervisor does NOT pause for
+      // this; blocking decisions go through onPairEscalate (modal) instead.
       try {
         const o = JSON.parse(json);
-        console.info('[Pair] record_alert',
-          o.severity || 'warn', o.category || '?',
-          o.fallback_choice || o.reason || '(no fallback)');
+        const alert: PairAlert = {
+          id: `alert_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          ts: typeof o.ts === 'number' ? o.ts : Date.now(),
+          severity: typeof o.severity === 'string' ? o.severity : undefined,
+          category: typeof o.category === 'string' ? o.category : undefined,
+          reason: typeof o.reason === 'string' ? o.reason : undefined,
+          question: typeof o.question === 'string' ? o.question : undefined,
+          fallbackChoice: typeof o.fallback_choice === 'string' ? o.fallback_choice : undefined,
+        };
+        setAlerts((curr) => {
+          const next = [...curr, alert];
+          return next.length > MAX_ALERTS ? next.slice(next.length - MAX_ALERTS) : next;
+        });
       } catch { /* ignore malformed */ }
     };
 
@@ -835,6 +881,7 @@ export function PairProvider({ children }: PairProviderProps) {
       setUsageByAgentId({});
       setPairStatus(null);
       setNotices([]);
+      setAlerts([]);
       // pair_stop is also how the SupervisorChatInput.handleSwitchAgent
       // transitions between agents, so clearing the whole queue dict here
       // covers both "supervisor restart" and "agent switch" — per design:
@@ -1147,6 +1194,9 @@ export function PairProvider({ children }: PairProviderProps) {
           proposal: payload.proposal,
           stats: o?.stats && typeof o.stats === 'object' ? o.stats : undefined,
           steps: Array.isArray(o?.steps) ? o.steps : undefined,
+          // Java only routes blocking escalations to the modal, so default to
+          // blocking unless the payload explicitly opts out.
+          blocking: payload.blocking !== false,
         });
       } catch { /* ignore */ }
     };
@@ -1302,6 +1352,8 @@ export function PairProvider({ children }: PairProviderProps) {
       usageByAgentId,
       pairStatus,
       notices,
+      alerts,
+      dismissAlert,
       respondToEscalate,
       dismissEscalate,
       registerInjectPromptHandler,
@@ -1333,6 +1385,8 @@ export function PairProvider({ children }: PairProviderProps) {
       usageByAgentId,
       pairStatus,
       notices,
+      alerts,
+      dismissAlert,
       respondToEscalate,
       dismissEscalate,
       registerInjectPromptHandler,
@@ -1376,6 +1430,8 @@ export function usePairContext(): PairContextValue {
     usageByAgentId: {},
     pairStatus: null,
     notices: [],
+    alerts: [],
+    dismissAlert: () => { /* no-op */ },
     respondToEscalate: () => { /* no-op */ },
     dismissEscalate: () => { /* no-op */ },
     registerInjectPromptHandler: () => { /* no-op */ },

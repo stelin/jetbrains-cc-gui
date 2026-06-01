@@ -1500,6 +1500,10 @@
     "max": {
       "label": "Máximo",
       "description": "Profundidade máxima de raciocínio"
+    },
+    "ultra": {
+      "label": "Ultra",
+      "description": "Ultracode: profundidade máxima com orquestração dinâmica de fluxos de trabalho (apenas Opus 4.8)"
     }
   },
   "errorBoundary": {

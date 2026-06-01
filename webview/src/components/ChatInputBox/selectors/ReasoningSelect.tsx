@@ -5,6 +5,7 @@ import {
   EFFORT_SUPPORTED_CLAUDE_MODELS,
   MAX_EFFORT_CLAUDE_MODELS,
   XHIGH_EFFORT_CLAUDE_MODELS,
+  ULTRA_EFFORT_CLAUDE_MODELS,
   strip1MContextSuffix,
   type ReasoningEffort,
 } from '../types';
@@ -21,8 +22,8 @@ interface ReasoningSelectProps {
  * ReasoningSelect - Reasoning Effort Selector
  * Visibility and available levels depend on the selected model:
  * - Codex: low/medium/high/xhigh
- * - Claude Opus 4.7: low/medium/high/xhigh/max
- * - Claude Opus 4.6 / Sonnet 4.6: low/medium/high/max
+ * - Claude Opus 4.8: low/medium/high/xhigh/max/ultra
+ * - Claude Sonnet 4.6: low/medium/high/max
  * - Claude Haiku 4.5 / legacy models: hidden
  */
 export const ReasoningSelect = ({ value, onChange, disabled, selectedModel, currentProvider }: ReasoningSelectProps) => {
@@ -46,11 +47,13 @@ export const ReasoningSelect = ({ value, onChange, disabled, selectedModel, curr
 
   const availableLevels = REASONING_LEVELS.filter(level => {
     if (currentProvider !== 'claude') {
-      return level.id !== 'max';
+      // Codex: low/medium/high/xhigh — no 'max', no Claude-only 'ultra'.
+      return level.id !== 'max' && level.id !== 'ultra';
     }
     if (!normalizedModel) return true;
     if (level.id === 'xhigh') return XHIGH_EFFORT_CLAUDE_MODELS.has(normalizedModel);
     if (level.id === 'max') return MAX_EFFORT_CLAUDE_MODELS.has(normalizedModel);
+    if (level.id === 'ultra') return ULTRA_EFFORT_CLAUDE_MODELS.has(normalizedModel);
     return true;
   });
 

@@ -505,6 +505,209 @@
   color: var(--text-muted);
 }
 
+// 2026-05-31: selection model (choices are now select-then-submit, not
+// instant-fire), an always-present "Other" option, a free-text box and a
+// footer with submit/cancel.
+.escalateChoiceSelected {
+  background: var(--color-notice-info-bg);
+  border-color: var(--accent-primary);
+  box-shadow: inset 0 0 0 1px var(--accent-primary);
+
+  // Keep the selected highlight even when it happens to be the first child
+  // (whose default rule paints a softer accent).
+  &:first-child {
+    border-color: var(--accent-primary);
+  }
+}
+
+.escalateRadio {
+  flex-shrink: 0;
+  font-size: 15px;
+  color: var(--text-muted);
+
+  .escalateChoiceSelected & {
+    color: var(--accent-primary);
+  }
+}
+
+.escalateInput {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 64px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border-secondary);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+
+  &:focus {
+    outline: none;
+    border-color: var(--accent-primary);
+  }
+
+  &::placeholder {
+    color: var(--text-muted);
+  }
+}
+
+.escalateActions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.escalateSubmit {
+  padding: 7px 18px;
+  border-radius: 6px;
+  border: 1px solid var(--accent-primary);
+  background: var(--accent-primary);
+  color: var(--color-button-text);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: opacity 0.15s ease, background 0.15s ease;
+
+  &:hover:not(:disabled) {
+    opacity: 0.9;
+  }
+
+  &:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+}
+
+.escalateCancel {
+  padding: 7px 16px;
+  border-radius: 6px;
+  border: 1px solid var(--border-secondary);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease;
+
+  &:hover {
+    background: var(--bg-hover);
+  }
+}
+
+// ─────────── Non-blocking alert toasts (record_alert C1/C2) ───────────
+.alertToastStack {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 1090; // below the escalate modal (1100), above normal content
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 360px;
+  pointer-events: none; // stack is passthrough; individual toasts re-enable
+}
+
+.alertToast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-secondary);
+  border-left: 4px solid var(--color-notice-info-border, var(--accent-primary));
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-lg);
+  animation: alertToastIn 0.18s ease-out;
+}
+
+.alertToastHard {
+  border-left-color: var(--color-warning);
+}
+
+@keyframes alertToastIn {
+  from { transform: translateX(12px); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+
+.alertToastIcon {
+  flex-shrink: 0;
+  font-size: 15px;
+  margin-top: 1px;
+  color: var(--accent-primary);
+
+  .alertToastHard & {
+    color: var(--color-warning);
+  }
+}
+
+.alertToastContent {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.alertToastTitleRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.alertToastTitle {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.alertToastBadge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-secondary);
+  color: var(--text-muted);
+}
+
+.alertToastHeadline {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+.alertToastDetail {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  word-break: break-word;
+}
+
+.alertToastClose {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px;
+  font-size: 13px;
+  line-height: 1;
+  border-radius: 4px;
+
+  &:hover {
+    color: var(--text-primary);
+    background: var(--bg-hover);
+  }
+}
+
 // ─────────── Input wrapper (right-pane chat input) ───────────
 // Hosts the SupervisorChatInput, which reuses the main `.chat-input-box`
 // chrome so both columns look identical. The wrapper only adds the outer

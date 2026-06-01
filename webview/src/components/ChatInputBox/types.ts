@@ -295,8 +295,12 @@ export function strip1MContextSuffix(modelId: string | undefined | null): string
   return modelId.replace(/\[1m\]$/i, '');
 }
 
+// Opus 4.7 / 4.6 were retired from the picker; migrate any persisted selection
+// to the surviving Opus 4.8. The [1m] suffix is stripped before this lookup, so
+// only base ids are keyed here.
 const LEGACY_CLAUDE_MODEL_ID_ALIASES: Record<string, string> = {
-  'claude-opus-4-6[1m]': 'claude-opus-4-6',
+  'claude-opus-4-7': 'claude-opus-4-8',
+  'claude-opus-4-6': 'claude-opus-4-8',
 };
 
 export function normalizeClaudeModelId(modelId: string | undefined | null): string {
@@ -322,16 +326,6 @@ export const CLAUDE_MODELS: ModelInfo[] = [
     id: 'claude-opus-4-8',
     label: 'Opus 4.8',
     description: 'Opus 4.8 · Latest and most capable',
-  },
-  {
-    id: 'claude-opus-4-7',
-    label: 'Opus 4.7',
-    description: 'Opus 4.7 · Strong reasoning, balanced choice',
-  },
-  {
-    id: 'claude-opus-4-6',
-    label: 'Opus 4.6',
-    description: 'Opus 4.6 for long sessions',
   },
   {
     id: 'claude-haiku-4-5',
@@ -423,18 +417,15 @@ export const AVAILABLE_PROVIDERS: ProviderInfo[] = [
  */
 export const EFFORT_SUPPORTED_CLAUDE_MODELS = new Set([
   'claude-opus-4-8',
-  'claude-opus-4-7',
-  'claude-opus-4-6',
   'claude-sonnet-4-6',
 ]);
 
 /**
- * Claude 模型 → 额外支持 'xhigh' 档位的模型(Opus 4.7+)。
+ * Claude 模型 → 额外支持 'xhigh' 档位的模型。
  * 仅列基础 id。
  */
 export const XHIGH_EFFORT_CLAUDE_MODELS = new Set([
   'claude-opus-4-8',
-  'claude-opus-4-7',
 ]);
 
 /**
@@ -442,17 +433,30 @@ export const XHIGH_EFFORT_CLAUDE_MODELS = new Set([
  */
 export const MAX_EFFORT_CLAUDE_MODELS = new Set([
   'claude-opus-4-8',
-  'claude-opus-4-7',
-  'claude-opus-4-6',
   'claude-sonnet-4-6',
 ]);
 
 /**
- * Reasoning Effort (thinking depth)
- * Claude: low/medium/high/xhigh/max
- * Codex: low/medium/high/xhigh
+ * Claude 模型 → 支持 'ultra' 档位(Claude Code "ultracode")的模型。
+ * 最高档,仅 Opus 4.8 专属:发送 xhigh 给模型 + 启用动态工作流编排。
+ * 参考: https://code.claude.com/docs/en/model-config#adjust-effort-level
  */
-export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export const ULTRA_EFFORT_CLAUDE_MODELS = new Set([
+  'claude-opus-4-8',
+]);
+
+/**
+ * Reasoning Effort (thinking depth)
+ * Claude Opus 4.8: low/medium/high/xhigh/max/ultra
+ * Claude Sonnet 4.6: low/medium/high/max
+ * Codex: low/medium/high/xhigh
+ *
+ * 'ultra' is Claude Code's "ultracode" session setting (not an SDK effort
+ * level): it sends xhigh to the model AND enables dynamic workflow
+ * orchestration. Opus 4.8 only. The daemon translates it to
+ * effort:'xhigh' + settings:{ ultracode:true, enableWorkflows:true }.
+ */
+export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
 
 /**
  * Reasoning level information
@@ -497,6 +501,12 @@ export const REASONING_LEVELS: ReasoningInfo[] = [
     label: 'Max',
     icon: 'codicon-flame',
     description: 'Maximum reasoning depth',
+  },
+  {
+    id: 'ultra',
+    label: 'Ultra',
+    icon: 'codicon-star-full',
+    description: 'Ultracode: maximum depth with dynamic workflow orchestration (Opus 4.8 only)',
   },
 ];
 

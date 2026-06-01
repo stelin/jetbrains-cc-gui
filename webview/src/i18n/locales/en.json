@@ -1677,6 +1677,11 @@
     "escalate": {
       "title": "{{name}} requests a decision",
       "defaultReason": "Decision required",
+      "otherOption": "Other",
+      "otherOptionDesc": "Type a custom reply",
+      "inputPlaceholder": "Type your reply…",
+      "submit": "Submit",
+      "cancel": "Cancel",
       "summary": {
         "stepsCompleted": "Steps completed: {{done}} / {{total}}",
         "decisionTotal": "Self-decisions: {{count}}",
@@ -1684,6 +1689,12 @@
         "autoRecover": "API auto-recoveries: {{count}}",
         "reviewReject": "Review fixes: {{count}}"
       }
+    },
+    "alert": {
+      "title": "Supervisor notice",
+      "defaultHeadline": "The supervisor recorded a self-decision",
+      "fallback": "Fallback taken: {{choice}}",
+      "dismiss": "Dismiss"
     },
     "composer": {
       "placeholder": "Tell the Supervisor what to coordinate — design doc path, coding rules, success criteria...\nExample: Plan is at docs/plans/get-user.md, follow Go layering rules, ping me when done.\n\nTip: drop a file here to insert its @path.",
@@ -1745,6 +1756,10 @@
     "max": {
       "label": "Max",
       "description": "Maximum reasoning depth"
+    },
+    "ultra": {
+      "label": "Ultra",
+      "description": "Ultracode: maximum depth with dynamic workflow orchestration (Opus 4.8 only)"
     }
   },
   "errorBoundary": {

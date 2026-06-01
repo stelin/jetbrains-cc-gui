@@ -424,26 +424,18 @@ public class ActionRouter {
                 }
                 break;
             case "escalate_to_human":
-                // Protocol v2 + Phase 5 (2026-05-24): autonomy-aware dispatch.
-                // - strict mode  → modal escalate (legacy behaviour, even if daemon aliased)
-                // - mixed/full   → toast alert (daemon already aliased it; we trust the marker)
-                // - daemon-pre-alias (no legacyEscalate flag): modal in strict, toast otherwise
+                // 2026-05-31: route by blocking-ness, not just autonomy mode. A
+                // blocking escalation (explicit payload.blocking / category C3 /
+                // carries a choices[] list) ALWAYS surfaces as a modal — even in
+                // full/mixed autonomy — so a genuine "I need the human" is never
+                // swallowed by the non-blocking toast path. Strict keeps its
+                // always-modal behaviour. Non-blocking escalations fall through
+                // to the alert toast.
                 {
-                    String mode = pair.getAutonomyMode();
-                    boolean strict = "strict".equals(mode);
-                    boolean legacyAliased = payload.has("legacyEscalate")
-                            && !payload.get("legacyEscalate").isJsonNull()
-                            && payload.get("legacyEscalate").getAsBoolean();
-                    if (strict) {
-                        pair.getProgressManager().incrementCounter("escalate_count");
-                        JsonObject snapshot = pair.getProgressManager().snapshot();
-                        if (snapshot.has("stats")) action.add("stats", snapshot.get("stats"));
-                        if (snapshot.has("steps")) action.add("steps", snapshot.get("steps"));
-                        webview.onEscalate(action);
-                    } else if (legacyAliased) {
-                        dispatchAlertFromAction(action, payload);
+                    boolean strict = "strict".equals(pair.getAutonomyMode());
+                    if (strict || isBlockingEscalation(payload)) {
+                        routeEscalateAsModal(action);
                     } else {
-                        // mixed/full + daemon didn't alias — synthesise C2 alert
                         if (!payload.has("category")) payload.addProperty("category", "C2");
                         if (!payload.has("severity")) payload.addProperty("severity", "alert");
                         dispatchAlertFromAction(action, payload);
@@ -453,9 +445,25 @@ public class ActionRouter {
             case "record_alert":
                 // Protocol v2 (2026-05-24): non-blocking alert. Supervisor decided
                 // a C1/C2 fallback; UI shows a toast, supervisor continues.
-                // In strict mode we'd ALSO show a modal, but record_alert is by
-                // design non-blocking — leave it as toast even in strict.
-                dispatchAlertFromAction(action, payload);
+                //
+                // 2026-05-31: the remote/server daemon aliases escalate_to_human →
+                // record_alert(legacyEscalate=true) before it reaches us. When such
+                // an aliased alert is actually a blocking decision (explicit
+                // blocking / category C3 / carries choices), or autonomy is strict,
+                // promote it back to a modal so remote-mode escalations pop up the
+                // same way local ones do. A genuine record_alert (no legacyEscalate)
+                // stays a toast even in strict — it is non-blocking by design.
+                {
+                    boolean fromEscalate = payload.has("legacyEscalate")
+                            && !payload.get("legacyEscalate").isJsonNull()
+                            && payload.get("legacyEscalate").getAsBoolean();
+                    boolean strict = "strict".equals(pair.getAutonomyMode());
+                    if (fromEscalate && (strict || isBlockingEscalation(payload))) {
+                        routeEscalateAsModal(action);
+                    } else {
+                        dispatchAlertFromAction(action, payload);
+                    }
+                }
                 break;
             case "request_amendment":
                 // Strict-plan policy: amendments are NOT auto-applied. Escalate the
@@ -782,6 +790,45 @@ public class ActionRouter {
                         null);
             }
         } catch (Exception ignored) { /* best-effort */ }
+    }
+
+    /**
+     * 2026-05-31: decide whether a human-facing escalation must block the user
+     * with a modal dialog (vs. a non-blocking toast). True when:
+     * <ul>
+     *   <li>the supervisor explicitly set {@code payload.blocking};</li>
+     *   <li>the decision category is {@code C3}; or</li>
+     *   <li>(fallback heuristic) the escalation carries an explicit
+     *       {@code choices[]} list — "pick one" only makes sense as a blocking
+     *       prompt, so a choice list implies the user must answer.</li>
+     * </ul>
+     */
+    private boolean isBlockingEscalation(JsonObject payload) {
+        if (payload == null) return false;
+        if (payload.has("blocking") && !payload.get("blocking").isJsonNull()) {
+            return payload.get("blocking").getAsBoolean();
+        }
+        if (payload.has("category") && !payload.get("category").isJsonNull()
+                && "C3".equals(payload.get("category").getAsString())) {
+            return true;
+        }
+        return payload.has("choices") && payload.get("choices").isJsonArray()
+                && payload.getAsJsonArray("choices").size() > 0;
+    }
+
+    /**
+     * 2026-05-31: surface a blocking escalation as a modal decision dialog.
+     * Bumps the escalate counter and attaches the latest progress snapshot
+     * (stats/steps) so the dialog can show the session summary before the user
+     * decides. Shared by the {@code escalate_to_human} and aliased
+     * {@code record_alert} dispatch branches.
+     */
+    private void routeEscalateAsModal(JsonObject action) {
+        pair.getProgressManager().incrementCounter("escalate_count");
+        JsonObject snapshot = pair.getProgressManager().snapshot();
+        if (snapshot.has("stats")) action.add("stats", snapshot.get("stats"));
+        if (snapshot.has("steps")) action.add("steps", snapshot.get("steps"));
+        webview.onEscalate(action);
     }
 
     /**

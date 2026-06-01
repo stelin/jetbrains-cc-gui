@@ -77,6 +77,12 @@ function buildEmitActionSchema(z) {
         context_files: z.array(z.string()).optional().describe(
             'Optional file paths attached to the escalation as context.'
         ),
+        blocking: z.boolean().optional().describe(
+            'escalate_to_human: set true when you genuinely need the human to decide before '
+            + 'work can continue — the UI then shows a blocking modal the user must answer. '
+            + 'Omit (or false) for informational escalations. Note: an escalation that carries '
+            + 'a `choices` list is treated as blocking automatically.'
+        ),
         proposal: z.string().optional().describe(
             'Used when action is request_amendment. The proposed plan change.'
         ),
@@ -154,6 +160,7 @@ export function normalizeAction(args) {
             }
             if (Array.isArray(args.choices)) payload.choices = args.choices;
             if (Array.isArray(args.context_files)) payload.context_files = args.context_files;
+            if (args.blocking === true) payload.blocking = true;
             break;
         case 'request_amendment':
             if (typeof args.proposal === 'string') payload.proposal = args.proposal;

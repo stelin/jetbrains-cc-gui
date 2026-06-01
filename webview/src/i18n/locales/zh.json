@@ -1682,6 +1682,11 @@
     "escalate": {
       "title": "{{name}} 请求决策",
       "defaultReason": "需要您决策",
+      "otherOption": "其他",
+      "otherOptionDesc": "输入自定义回复",
+      "inputPlaceholder": "请输入您的回复…",
+      "submit": "提交",
+      "cancel": "取消",
       "summary": {
         "stepsCompleted": "完成步骤 {{done}} / {{total}}",
         "decisionTotal": "自决记录 {{count}} 条",
@@ -1689,6 +1694,12 @@
         "autoRecover": "API 自愈 {{count}} 次",
         "reviewReject": "Review 反馈修复 {{count}} 次"
       }
+    },
+    "alert": {
+      "title": "监督者提醒",
+      "defaultHeadline": "监督者记录了一次自决",
+      "fallback": "采取的应对：{{choice}}",
+      "dismiss": "关闭"
     },
     "composer": {
       "placeholder": "向 Supervisor 描述编码任务、方案路径、规范要求...\n例如: 方案在 docs/plans/get-user.md，按 Go 分层规范实现，跑通后再让我看\n\n提示: 可拖文件到此处自动插入 @路径",
@@ -1750,6 +1761,10 @@
     "max": {
       "label": "最高",
       "description": "最大推理深度"
+    },
+    "ultra": {
+      "label": "Ultra",
+      "description": "Ultracode：最高深度并启用动态工作流编排（仅 Opus 4.8）"
     }
   },
   "errorBoundary": {

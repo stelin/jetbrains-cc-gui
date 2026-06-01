@@ -173,8 +173,22 @@ public class PairHandler extends BaseMessageHandler {
             String pairId = data.has("pairId") && !data.get("pairId").isJsonNull()
                     ? data.get("pairId").getAsString() : "";
             PairSession session = resolvePair(pairId);
+            if (session == null && pairId != null && !pairId.isEmpty()) {
+                // The webview tracked a pairId but it no longer resolves (stale id
+                // after a restart/rotation, or an ownership mismatch). Rather than
+                // silently dropping the user's Stop click on a wedged supervisor,
+                // fall back to this window's most-recently-started active pair —
+                // the same ownership-scoped fallback resolvePair uses for an empty
+                // id, so we still never steer another tab's pair.
+                session = resolvePair("");
+                if (session != null) {
+                    LOG.warn("[PairHandler] pair_supervisor_interrupt: id=" + pairId
+                            + " did not resolve; falling back to window-owned active pair "
+                            + session.getPairId());
+                }
+            }
             if (session == null) {
-                LOG.info("[PairHandler] pair_supervisor_interrupt ignored — no active pair for id=" + pairId);
+                LOG.warn("[PairHandler] pair_supervisor_interrupt ignored — no active pair (requested id=" + pairId + ")");
                 return;
             }
             LOG.info("[PairHandler] pair " + session.getPairId() + " supervisor interrupt requested by user");

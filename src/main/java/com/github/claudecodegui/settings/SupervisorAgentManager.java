@@ -28,14 +28,14 @@ public class SupervisorAgentManager {
     public static final int MAX_NAME_LENGTH = 30;
     public static final int MAX_DESCRIPTION_LENGTH = 100_000;
     /**
-     * Default model for built-in supervisor personas. Opus 4.7 paired with the
+     * Default model for built-in supervisor personas. Opus 4.8 paired with the
      * built-in {@code defaultLongContext=true} / {@code defaultReasoning="max"}
      * fields gives the supervisor enough room (1M ctx) and judgment depth (max
      * effort) to handle the multi-step review protocol baked into the v3 prompt.
      * The bare base id is stored here; the [1m] suffix is applied at send time
      * by the webview when {@code longContextEnabled} is on.
      */
-    public static final String DEFAULT_MODEL = "claude-opus-4-7";
+    public static final String DEFAULT_MODEL = "claude-opus-4-8";
     /** Default reasoning-effort tier seeded on built-in supervisor agents. */
     public static final String DEFAULT_REASONING_EFFORT = "max";
     /** Default 1M-context flag seeded on built-in supervisor agents. */

@@ -1323,6 +1323,10 @@
     "max": {
       "label": "Maximum",
       "description": "Profondeur de raisonnement maximale"
+    },
+    "ultra": {
+      "label": "Ultra",
+      "description": "Ultracode : profondeur maximale avec orchestration dynamique des workflows (Opus 4.8 uniquement)"
     }
   },
   "errorBoundary": {

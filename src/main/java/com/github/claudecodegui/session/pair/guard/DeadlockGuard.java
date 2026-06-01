@@ -1,5 +1,6 @@
 package com.github.claudecodegui.session.pair.guard;
 
+import com.github.claudecodegui.bridge.SupervisorBridge;
 import com.github.claudecodegui.session.pair.MainAIMonitor;
 import com.github.claudecodegui.session.pair.PairSession;
 import com.github.claudecodegui.session.pair.contract.Contract;
@@ -452,6 +453,22 @@ public class DeadlockGuard {
      * onto the correct emit_action(inject_prompt) path.
      */
     private void issueMainAiRecoveryDispatch(Plan plan, Contract failedDecision, String reason) {
+        // The supervisor is wedged (its DECISION_REQUEST turn never settled),
+        // which is exactly why we're taking over. Abort that stuck turn first so
+        // its daemon-side query.next() unblocks and the webview thinking spinner
+        // clears — otherwise the operator sees the takeover dispatch fire while
+        // the supervisor pane stays frozen on "正在生成响应". Fire-and-forget:
+        // the dispatch below proceeds regardless of the interrupt's outcome.
+        try {
+            SupervisorBridge sb = pair.getSupervisorBridge();
+            if (sb != null) {
+                sb.interrupt();
+            }
+        } catch (Exception e) {
+            LOG.warn("[DeadlockGuard] failed to abort supervisor turn before system takeover: "
+                    + e.getMessage());
+        }
+
         StringBuilder planSummary = new StringBuilder();
         if (plan == null) {
             planSummary.append("(no plan loaded)");

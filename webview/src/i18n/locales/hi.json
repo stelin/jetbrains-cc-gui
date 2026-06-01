@@ -1322,6 +1322,10 @@
     "max": {
       "label": "अधिकतम",
       "description": "अधिकतम तर्क गहराई"
+    },
+    "ultra": {
+      "label": "Ultra",
+      "description": "Ultracode: डायनेमिक वर्कफ़्लो ऑर्केस्ट्रेशन के साथ अधिकतम गहराई (केवल Opus 4.8)"
     }
   },
   "errorBoundary": {

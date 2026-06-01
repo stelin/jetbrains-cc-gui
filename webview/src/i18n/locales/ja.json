@@ -1328,6 +1328,10 @@
     "max": {
       "label": "最大",
       "description": "最大の推論深度"
+    },
+    "ultra": {
+      "label": "Ultra",
+      "description": "Ultracode：最大深度に加え動的ワークフロー編成を有効化（Opus 4.8 のみ）"
     }
   },
   "errorBoundary": {

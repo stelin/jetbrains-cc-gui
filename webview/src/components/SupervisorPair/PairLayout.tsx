@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import SupervisorPane from './SupervisorPane';
 import EscalateDialog, { type EscalateChoice } from './EscalateDialog';
+import SupervisorAlertToast from './SupervisorAlertToast';
 import { usePairContext } from './PairContext';
 import { useTranslation } from 'react-i18next';
 import styles from './style.module.less';
@@ -30,6 +31,8 @@ export default function PairLayout({ children, status }: PairLayoutProps) {
     pendingEscalate,
     respondToEscalate,
     dismissEscalate,
+    alerts,
+    dismissAlert,
     selected,
   } = usePairContext();
 
@@ -116,6 +119,7 @@ export default function PairLayout({ children, status }: PairLayoutProps) {
         {children}
         {pendingEscalate && (
           <EscalateDialog
+            key={pendingEscalate.id}
             open={true}
             supervisorName={escalateSupervisorName}
             reason={pendingEscalate.reason ?? ''}
@@ -123,10 +127,12 @@ export default function PairLayout({ children, status }: PairLayoutProps) {
             choices={escalateChoices}
             stats={pendingEscalate.stats}
             steps={pendingEscalate.steps}
-            onSelect={(choiceId) => respondToEscalate(choiceId)}
+            blocking={pendingEscalate.blocking}
+            onSelect={(value) => respondToEscalate(value)}
             onCancel={dismissEscalate}
           />
         )}
+        <SupervisorAlertToast alerts={alerts} onDismiss={dismissAlert} />
       </>
     );
   }
@@ -162,6 +168,7 @@ export default function PairLayout({ children, status }: PairLayoutProps) {
 
       {pendingEscalate && (
         <EscalateDialog
+          key={pendingEscalate.id}
           open={true}
           supervisorName={escalateSupervisorName}
           reason={pendingEscalate.reason ?? t('pairLayout.escalate.defaultReason', 'Decision required')}
@@ -169,10 +176,12 @@ export default function PairLayout({ children, status }: PairLayoutProps) {
           choices={escalateChoices}
           stats={pendingEscalate.stats}
           steps={pendingEscalate.steps}
-          onSelect={(choiceId) => respondToEscalate(choiceId)}
+          blocking={pendingEscalate.blocking}
+          onSelect={(value) => respondToEscalate(value)}
           onCancel={dismissEscalate}
         />
       )}
+      <SupervisorAlertToast alerts={alerts} onDismiss={dismissAlert} />
     </div>
   );
 }

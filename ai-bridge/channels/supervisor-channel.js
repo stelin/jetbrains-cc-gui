@@ -93,6 +93,11 @@ async function nextWithOptionalTimeout(query, timeoutMs, stage = 'default') {
 // budget on supervisor turns.
 const SUPPORTED_EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 
+// 'ultra' is Claude Code's "ultracode" session setting, NOT an SDK effort
+// level: it sends xhigh to the model AND enables dynamic workflow orchestration.
+// Only meaningful on an xhigh-capable model (Opus 4.8).
+const ULTRACODE_SETTINGS = { ultracode: true, enableWorkflows: true };
+
 function normalizeReasoningEffort(value) {
     const e = typeof value === 'string' ? value.trim() : '';
     if (!e) return null;
@@ -103,16 +108,27 @@ function normalizeReasoningEffort(value) {
     return null;
 }
 
+// Translate the UI reasoning tier into the SDK shape. 'ultra' → xhigh effort +
+// ultracode/workflow settings; everything else passes through normalizeReasoningEffort.
+function resolveEffortAndSettings(rawEffort) {
+    const e = typeof rawEffort === 'string' ? rawEffort.trim() : '';
+    if (e === 'ultra') {
+        return { effort: 'xhigh', settings: ULTRACODE_SETTINGS };
+    }
+    return { effort: normalizeReasoningEffort(rawEffort), settings: null };
+}
+
 /** @type {Map<string, SupervisorRuntime>} */
 const runtimes = new Map();
 
 class SupervisorRuntime {
-    constructor({ pairId, supervisorId, name, model, reasoningEffort, systemPrompt, allowedTools }) {
+    constructor({ pairId, supervisorId, name, model, reasoningEffort, ultracodeSettings, systemPrompt, allowedTools }) {
         this.pairId = pairId;
         this.supervisorId = supervisorId;
         this.name = name || supervisorId;
         this.model = model || DEFAULT_MODEL;
         this.reasoningEffort = reasoningEffort || null;
+        this.ultracodeSettings = ultracodeSettings || null;
         this.systemPrompt = systemPrompt;
         this.allowedTools = Array.isArray(allowedTools) ? allowedTools : [];
         this.inputStream = new AsyncStream();
@@ -207,7 +223,9 @@ function buildSystemPrompt({ name, description, planContent, specContent }) {
         '- reason: 强烈建议，1-2 句决策原因',
         '- inject_prompt / retry_with_hint 需要 prompt（注入给主 AI 的内容）',
         '- retry_with_hint 可选 wait_seconds（延迟秒数）',
-        '- escalate_to_human 需要 question，可选 choices / context_files',
+        '- escalate_to_human 需要 question，可选 choices / context_files / blocking',
+        '  · blocking=true 表示必须等用户当面拍板（前端弹出阻塞式对话框，用户必选一项或填一句才能继续），仅在「不拿到用户决定就无法继续」时设；',
+        '    带了 choices 的升级会被自动视为 blocking；纯告知类（用户可事后再看）不要设 blocking，让它走非阻塞提示。',
         '- request_amendment 建议带 proposal',
         '- approve_and_continue 可选 mark_step_complete（步骤序号）——仅用于**非最后一步**通过 review；',
         '- complete_plan: 当**所有 step 都完成、整个 plan 收尾**时用，可选 summary。系统据此把 plan 转入 DONE 并生成 COMPLETION_REPORT.md。',
@@ -280,12 +298,14 @@ export async function startSupervisorSession(params) {
         throw new Error('Claude SDK does not expose query() function');
     }
 
+    const { effort: resolvedEffort, settings: resolvedUltracodeSettings } = resolveEffortAndSettings(reasoningEffort);
     const runtime = new SupervisorRuntime({
         pairId,
         supervisorId,
         name,
         model,
-        reasoningEffort: normalizeReasoningEffort(reasoningEffort),
+        reasoningEffort: resolvedEffort,
+        ultracodeSettings: resolvedUltracodeSettings,
         systemPrompt,
         allowedTools,
     });
@@ -331,6 +351,10 @@ export async function startSupervisorSession(params) {
             // high/xhigh/max scale it uses for the main AI. Omitted (effort
             // = null) leaves whatever SDK default is in play.
             ...(runtime.reasoningEffort && { effort: runtime.reasoningEffort }),
+            // 2026-05-30: the 'ultra' tier additionally enables ultracode +
+            // dynamic workflow orchestration via the inline settings layer
+            // (effort is already xhigh above). Only set on Opus 4.8.
+            ...(runtime.ultracodeSettings && { settings: runtime.ultracodeSettings }),
             mcpServers: { [SUPERVISOR_MCP_NAME]: supervisorMcpServer },
             allowedTools: allowedToolList,
             // Defensive allowlist: pre-approve emit_action, deny everything else
@@ -484,6 +508,108 @@ export async function stopSupervisorSession(params) {
     runtimes.delete(k);
     process.stdout.write(`[supervisor] stopped: ${k}\n`);
     return { stopped: true };
+}
+
+/**
+ * Interrupt the currently-running supervisor turn.
+ *
+ * Two-stage stop, mirroring the remote daemon (ai-bridge-server) so local and
+ * remote modes behave identically:
+ *   1) Query.interrupt() — graceful, preserves the SDK session/context (the
+ *      SDK documents interrupt as valid only in streaming-input mode, which
+ *      the supervisor channel always uses).
+ *   2) query.close() hard-stop fallback — if interrupt() does not actually
+ *      settle the turn within a short grace window (a turn wedged in
+ *      extended-thinking stays blocked inside `await query.next()`), tear the
+ *      transport down like the main-AI abort does. close() rejects the blocked
+ *      next() -> collectAssistantTurn unwinds -> postEvent rejects -> the
+ *      daemon writes the request's done line -> Java fires onPairThinking(false)
+ *      and the thinking spinner clears.
+ */
+export async function interruptSupervisor(params) {
+    const { pairId, supervisorId } = params || {};
+    if (!pairId || !supervisorId) {
+        throw new Error('supervisor.interrupt requires pairId and supervisorId');
+    }
+    const k = key(pairId, supervisorId);
+    const runtime = runtimes.get(k);
+    if (!runtime || runtime.disposed) {
+        // Nothing to interrupt — already over/disposed. Success from the
+        // caller's POV: emit a result line so Java settles the request and
+        // clears the spinner. Do NOT throw SUPERVISOR_NOT_FOUND: interrupt is
+        // fire-and-forget and an absent runtime means "already stopped".
+        process.stdout.write('[SUPERVISOR_INTERRUPT_RESULT] ' + JSON.stringify({
+            pairId, supervisorId, ts: Date.now(),
+            interrupted: false, forceStopped: false, error: 'SUPERVISOR_NOT_FOUND',
+        }) + '\n');
+        return { ok: true };
+    }
+
+    // Snapshot the in-flight turn's barrier BEFORE touching anything. postEvent
+    // reassigns runtime.busy per turn and clears runtime.currentTurnId in its
+    // finally, so these let us tell whether the turn actually ended after
+    // interrupt() — not just whether interrupt() resolved.
+    const busyAtCall = runtime.busy;
+    const turnWasActive = runtime.currentTurnId != null;
+    let interrupted = false;
+    let forceStopped = false;
+    let error = null;
+
+    // 1) Graceful interrupt — preserves the SDK session/context.
+    if (typeof runtime.query?.interrupt === 'function') {
+        try {
+            await Promise.race([
+                runtime.query.interrupt(),
+                new Promise((_, reject) => setTimeout(
+                    () => reject(new Error('INTERRUPT_TIMEOUT')), 3_000
+                )),
+            ]);
+            interrupted = true;
+        } catch (e) {
+            error = e?.message || String(e);
+        }
+    } else {
+        error = 'SDK does not expose Query.interrupt';
+    }
+
+    // 2) Confirm the turn actually SETTLED. interrupt() resolving only means it
+    //    was accepted; a wedged turn can still be blocked inside query.next().
+    //    Wait on the captured busy barrier (released by postEvent's finally)
+    //    for a short grace period.
+    let settled = !turnWasActive || runtime.currentTurnId == null;
+    if (!settled) {
+        settled = await Promise.race([
+            busyAtCall.then(() => true, () => true),
+            new Promise((r) => setTimeout(() => r(false), 2_500)),
+        ]);
+    }
+
+    // 3) Hard-stop fallback — force the transport down like the main-AI abort.
+    //    Deleting the runtime is safe: the next postEvent hits the
+    //    SUPERVISOR_NOT_FOUND lazy-restart path and recreates it.
+    if (!settled) {
+        forceStopped = true;
+        runtime.disposed = true;
+        try { runtime.inputStream.done(); } catch { /* ignore */ }
+        try {
+            if (typeof runtime.query?.close === 'function') {
+                runtime.query.close();
+            } else if (typeof runtime.query?.return === 'function') {
+                await Promise.race([
+                    runtime.query.return(),
+                    new Promise((r) => setTimeout(r, 2_000)),
+                ]);
+            }
+        } catch (e) {
+            error = error || (e?.message || String(e));
+        }
+        runtimes.delete(k);
+    }
+
+    process.stdout.write('[SUPERVISOR_INTERRUPT_RESULT] ' + JSON.stringify({
+        pairId, supervisorId, ts: Date.now(), interrupted, forceStopped, error,
+    }) + '\n');
+    return { ok: true };
 }
 
 /**

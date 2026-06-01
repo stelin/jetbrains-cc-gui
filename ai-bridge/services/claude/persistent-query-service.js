@@ -52,12 +52,28 @@ import {
 
 const SUPPORTED_EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 
+// 'ultra' is Claude Code's "ultracode" session setting, NOT an SDK effort
+// level: it sends xhigh to the model AND enables dynamic workflow
+// orchestration. Only meaningful on an xhigh-capable model (Opus 4.8).
+// https://code.claude.com/docs/en/model-config#adjust-effort-level
+const ULTRACODE_SETTINGS = { ultracode: true, enableWorkflows: true };
+
 function normalizeReasoningEffort(value) {
   const e = typeof value === 'string' ? value.trim() : '';
   if (!e) return null;
   if (SUPPORTED_EFFORT_LEVELS.has(e)) return e;
   console.warn(`[REASONING_EFFORT] ⚠️ unsupported effort value received: ${JSON.stringify(value)} — falling back to SDK default`);
   return null;
+}
+
+// Translate the UI reasoning tier into the SDK shape. 'ultra' → xhigh effort +
+// ultracode/workflow settings; everything else passes through normalizeReasoningEffort.
+function resolveEffortAndSettings(rawEffort) {
+  const e = typeof rawEffort === 'string' ? rawEffort.trim() : '';
+  if (e === 'ultra') {
+    return { effort: 'xhigh', settings: ULTRACODE_SETTINGS, ultracode: true };
+  }
+  return { effort: normalizeReasoningEffort(rawEffort), settings: null, ultracode: false };
 }
 
 function resolveThinkingTokens(params, settings) {
@@ -86,7 +102,7 @@ function buildSystemPromptAppend(params) {
   return buildIDEContextPrompt(openedFiles, agentPrompt);
 }
 
-function buildQueryOptions(workingDirectory, sdkModelName, permissionMode, maxThinkingTokens, streamingEnabled, systemPromptAppend, requestedSessionId, reasoningEffort, windowId) {
+function buildQueryOptions(workingDirectory, sdkModelName, permissionMode, maxThinkingTokens, streamingEnabled, systemPromptAppend, requestedSessionId, reasoningEffort, windowId, extraSettings) {
   // Close over windowId so AskUserQuestion's file-IPC request can be tagged
   // with the originating tab. The Java-side PermissionService uses this to
   // decide whether the tab is currently in supervisor pair mode (no popup)
@@ -103,6 +119,7 @@ function buildQueryOptions(workingDirectory, sdkModelName, permissionMode, maxTh
     env: buildCliEnv(),
     ...(maxThinkingTokens !== undefined && { maxThinkingTokens }),
     ...(reasoningEffort && { effort: reasoningEffort }),
+    ...(extraSettings && { settings: extraSettings }),
     ...(streamingEnabled && { includePartialMessages: true }),
     additionalDirectories: Array.from(
       new Set(
@@ -171,14 +188,16 @@ async function buildRequestContext(params, withAttachments) {
 
   const permissionMode = normalizePermissionMode(params.permissionMode);
   const streamingEnabled = resolveStreamingEnabled(params, settings);
-  const normalizedReasoningEffort = normalizeReasoningEffort(params.reasoningEffort);
+  const { effort: normalizedReasoningEffort, settings: ultracodeSettings } = resolveEffortAndSettings(params.reasoningEffort);
   // effort 与 maxThinkingTokens 互斥
   const maxThinkingTokens = normalizedReasoningEffort
     ? undefined
     : resolveThinkingTokens(params, settings);
   const systemPromptAppend = buildSystemPromptAppend(params);
 
-  if (normalizedReasoningEffort) {
+  if (ultracodeSettings) {
+    console.log(`[REASONING_EFFORT] ✓ persistent buildRequestContext applied ULTRACODE (effort=xhigh + settings.ultracode/enableWorkflows) (model=${sdkModelName ?? modelId ?? 'default'}, maxThinkingTokens disabled due to mutex)`);
+  } else if (normalizedReasoningEffort) {
     console.log(`[REASONING_EFFORT] ✓ persistent buildRequestContext applied options.effort=${normalizedReasoningEffort} (model=${sdkModelName ?? modelId ?? 'default'}, maxThinkingTokens disabled due to mutex)`);
   } else {
     console.log(`[REASONING_EFFORT] ⊝ persistent buildRequestContext: no effort set (model=${sdkModelName ?? modelId ?? 'default'}, maxThinkingTokens=${maxThinkingTokens ?? 'undefined'}, raw=${JSON.stringify(params.reasoningEffort ?? null)})`);
@@ -194,7 +213,7 @@ async function buildRequestContext(params, withAttachments) {
   const options = buildQueryOptions(
     workingDirectory, sdkModelName, permissionMode,
     maxThinkingTokens, streamingEnabled, systemPromptAppend, requestedSessionId,
-    normalizedReasoningEffort, windowId
+    normalizedReasoningEffort, windowId, ultracodeSettings
   );
 
   const userMessage = await buildUserMessage(params, withAttachments, requestedSessionId);

@@ -1397,6 +1397,11 @@
     "escalate": {
       "title": "{{name}} 請求決策",
       "defaultReason": "需要您決策",
+      "otherOption": "其他",
+      "otherOptionDesc": "輸入自訂回覆",
+      "inputPlaceholder": "請輸入您的回覆…",
+      "submit": "提交",
+      "cancel": "取消",
       "summary": {
         "stepsCompleted": "完成步驟 {{done}} / {{total}}",
         "decisionTotal": "自決紀錄 {{count}} 條",
@@ -1404,6 +1409,12 @@
         "autoRecover": "API 自癒 {{count}} 次",
         "reviewReject": "Review 反饋修復 {{count}} 次"
       }
+    },
+    "alert": {
+      "title": "監督者提醒",
+      "defaultHeadline": "監督者記錄了一次自決",
+      "fallback": "採取的應對：{{choice}}",
+      "dismiss": "關閉"
     },
     "composer": {
       "placeholder": "向 Supervisor 描述編碼任務、方案路徑、規範要求...\n例如: 方案在 docs/plans/get-user.md，按 Go 分層規範實現，跑通後再讓我看\n\n提示: 可拖檔案到此處自動插入 @路徑",
@@ -1465,6 +1476,10 @@
     "max": {
       "label": "最高",
       "description": "最大推理深度"
+    },
+    "ultra": {
+      "label": "Ultra",
+      "description": "Ultracode：最高深度並啟用動態工作流程編排（僅 Opus 4.8）"
     }
   },
   "errorBoundary": {

@@ -52,6 +52,7 @@ import { FILE_MODIFY_TOOL_NAMES, isToolName } from './utils/toolConstants';
 import type { RewindableMessage } from './components/RewindSelectDialog';
 import { AppDialogs } from './components/AppDialogs';
 import { PairProvider, PairLayout, usePairContext } from './components/SupervisorPair';
+import { WorkflowProvider, WorkflowView, RunStatusBar, EscalationToast } from './components/WorkflowOrchestration';
 import { APP_VERSION } from './version/version';
 import type {
   ClaudeMessage,
@@ -677,6 +678,7 @@ const App = () => {
 
   // ── Render ──
   return (
+    <WorkflowProvider>
     <PairProvider>
       <PairAppBridge
         setSettingsInitialTab={setSettingsInitialTab}
@@ -708,7 +710,13 @@ const App = () => {
           setSettingsInitialTab('supervisor');
           setCurrentView('settings');
         }}
+        onOpenWorkflow={() => setCurrentView('workflow')}
       />
+
+      {/* Supervisor workflow orchestration: non-modal run strip + escalation toast.
+          The strip is hidden on the workflow page itself (which has its own header). */}
+      {currentView !== 'workflow' && <RunStatusBar onExpand={() => setCurrentView('workflow')} />}
+      <EscalationToast />
 
       {currentView === 'settings' ? (
         <SettingsView
@@ -848,6 +856,14 @@ const App = () => {
             />
           </div>
         </PairLayout>
+      ) : currentView === 'workflow' ? (
+        <WorkflowView
+          onClose={() => setCurrentView('chat')}
+          onOpenSupervisorManager={() => {
+            setSettingsInitialTab('supervisor');
+            setCurrentView('settings');
+          }}
+        />
       ) : (
         <HistoryView
           historyData={historyData}
@@ -899,6 +915,7 @@ const App = () => {
         currentProvider={currentProvider}
       />
     </PairProvider>
+    </WorkflowProvider>
   );
 };
 

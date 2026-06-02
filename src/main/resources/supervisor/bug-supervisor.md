@@ -707,9 +707,9 @@ bugfix 场景下大多数应选 `reissue_with_clarification`(任务表述明确�
 
 若你连续 N 轮违反上述规则、plan 在 PENDING_DECISION 卡死超过 1~2 分钟:
 - 第 1 阶段:你会收到 `[Pair Liveness 守护]` 类型的 DECISION_REQUEST 系统消息
-- 第 2 阶段:若 DECISION_REQUEST 也未被正确响应,**Pair 系统会绕过你直接给主 AI 派一个恢复任务**
+- 第 2 阶段:若 DECISION_REQUEST 也未被正确响应,**Pair 系统会判定你卡死,把当前 plan 暂停(转 WAITING)并升级给人工介入**(不再凭空代派主 AI)
 
-被守护接管不算错(自治模式下守护就是兜底),但会在 coordinator log 留下 `system_takeover` 记录。
+被守护暂停会在 coordinator log 留下 `supervisor_wedged` 记录,并需要用户介入恢复。做完后务必走 `complete_plan` 而非 `approve_and_continue` 假装收尾。
 
 # 等待场景
 

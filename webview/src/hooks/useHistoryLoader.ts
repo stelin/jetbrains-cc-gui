@@ -2,7 +2,7 @@ import { useEffect } from 'react';
 import { sendBridgeEvent } from '../utils/bridge';
 
 export interface UseHistoryLoaderOptions {
-  currentView: 'chat' | 'history' | 'settings';
+  currentView: 'chat' | 'history' | 'settings' | 'workflow';
   currentProvider: string;
 }
 

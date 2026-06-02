@@ -227,11 +227,19 @@ public class DeadlockGuard {
             try {
                 registry.escalate(c.id);
                 if (c.type == ContractType.DECISION_REQUEST) {
-                    issueMainAiRecoveryDispatch(planSm.getCurrent(), c,
-                            "supervisor DECISION_REQUEST " + c.id + " R3 (deadline " + c.deadlineMs
-                                    + "ms 内未 discharge,supervisor 卡死)");
+                    // Transport-backstop policy (2026-06-01): the supervisor was
+                    // already nudged with an explicit DECISION_REQUEST and still
+                    // didn't discharge it within deadline. We no longer fabricate
+                    // a MAIN_AI task to "break the deadlock" — that synthesized
+                    // work has no real owner (the main AI doesn't decide the next
+                    // step), so it could only reply "nothing to do", which
+                    // advanced lastTransitionAt and re-armed this guard → the
+                    // observed 6th/7th-dispatch livelock. A wedged supervisor is
+                    // now treated as a genuine failure: pause the plan + escalate
+                    // to the human, fabricate nothing.
+                    escalateWedgedSupervisorToHuman(c);
                     LOG.warn("[DeadlockGuard] " + pair.getPairId()
-                            + " R3 on DECISION_REQUEST " + c.id + " — system_takeover: auto-dispatch to MAIN_AI");
+                            + " R3 on DECISION_REQUEST " + c.id + " — supervisor wedged, escalating to human (no system_takeover)");
                 } else {
                     issueDecisionRequest(c);
                     LOG.warn("[DeadlockGuard] " + pair.getPairId()
@@ -382,10 +390,11 @@ public class DeadlockGuard {
      *
      * <p>v3.2 (2026-05-26): deadline 90s + {@code maxRetries=0} so this
      * contract falls straight through to R3 if the supervisor doesn't
-     * discharge it. R3 on a {@code DECISION_REQUEST} triggers Plan B
-     * ({@link #issueMainAiRecoveryDispatch}) — system takeover that
-     * dispatches a recovery task to MAIN_AI to break the deadlock without
-     * any human intervention.
+     * discharge it. v4 (2026-06-01): R3 on a {@code DECISION_REQUEST} now
+     * routes to {@link #escalateWedgedSupervisorToHuman} — the plan is paused
+     * and escalated to the operator. The old "system_takeover" that fabricated
+     * a MAIN_AI task was removed because that synthesized work had no real
+     * owner and re-armed this guard into a livelock.
      */
     private void issueLivenessDecisionRequest(Plan plan, long idleMs) {
         long idleSec = Math.max(1L, idleMs / 1000L);
@@ -411,8 +420,8 @@ public class DeadlockGuard {
                 + "objective: '...'}) —— 派单给主 AI 推进 plan\n"
                 + "(b) emit_action(complete_plan, {summary: '...'}) —— 收尾当前 plan\n"
                 + "(c) emit_action(escalate_to_human, ...) —— 你无法决策时升级给用户\n\n"
-                + "⚠️ 90 秒内如果你仍未 emit 真实 action,Pair Liveness 守护会进入 system_takeover —— "
-                + "直接合成 TASK_ASSIGNMENT 派给主 AI,绕过你打破死锁(全自治模式无人干预)。";
+                + "⚠️ 90 秒内如果你仍未 emit 真实 action,Pair Liveness 守护会判定监督者卡死,"
+                + "暂停当前 plan 并升级给人工介入(不会再凭空代派主 AI)。";
 
         JsonObject payload = new JsonObject();
         payload.addProperty("text", text);
@@ -431,121 +440,72 @@ public class DeadlockGuard {
     }
 
     /**
-     * Plan B (2026-05-26 v3.2): system-takeover auto-dispatch.
+     * Transport-backstop terminal (2026-06-01). Replaces the old
+     * {@code issueMainAiRecoveryDispatch} "system_takeover" path.
      *
-     * <p>Fires when a {@link ContractType#DECISION_REQUEST} reaches R3 —
-     * meaning the supervisor was nudged once, given the explicit recovery
-     * choices, and STILL didn't emit a usable action. At that point we treat
-     * the supervisor as the bottleneck and synthesize a {@link ContractType#TASK_ASSIGNMENT}
-     * directly to MAIN_AI so the deadlock breaks without any human in the loop.
+     * <p>Fires when a {@link ContractType#DECISION_REQUEST} reaches R3 — the
+     * supervisor was woken, given explicit recovery choices, and STILL produced
+     * no usable action within deadline. Previously we synthesized a
+     * {@link ContractType#TASK_ASSIGNMENT} to MAIN_AI to break the deadlock
+     * without a human, but that fabricated work has no real owner: the main AI
+     * doesn't decide the next step, so it could only reply "nothing to do",
+     * which advanced {@code lastTransitionAt} and re-armed this guard → the
+     * observed livelock (6th/7th identical dispatch).
      *
-     * <p>The synthesized prompt deliberately gives MAIN_AI agency rather than
-     * trying to guess the next step from narration (which is unreliable):
-     * MAIN_AI either continues based on the sequential pattern it sees, or
-     * reports its own state so the supervisor gets fresh context on the next
-     * wake. Either path produces a state transition that lifts the plan out
-     * of PENDING_DECISION.
-     *
-     * <p>Marked with {@code systemTakeover=true} in the payload + a
-     * coordinator-event log entry so the operator can audit. The supervisor
-     * will see the resulting MAIN_AI TURN_REPORT on its next wake and (per
-     * the v3.2 hard rules in {@code code-supervisor.md}) should snap back
-     * onto the correct emit_action(inject_prompt) path.
+     * <p>New policy: a wedged supervisor is a genuine failure. We move the plan
+     * to {@code WAITING} (which disarms the guard — {@link #tick} only acts on
+     * {@code ACTIVE} plans), record a coordinator event, and surface a
+     * non-blocking alert so the operator can intervene. Nothing is fabricated,
+     * so there is no work for the main AI to bounce back and re-arm us with.
      */
-    private void issueMainAiRecoveryDispatch(Plan plan, Contract failedDecision, String reason) {
-        // The supervisor is wedged (its DECISION_REQUEST turn never settled),
-        // which is exactly why we're taking over. Abort that stuck turn first so
-        // its daemon-side query.next() unblocks and the webview thinking spinner
-        // clears — otherwise the operator sees the takeover dispatch fire while
-        // the supervisor pane stays frozen on "正在生成响应". Fire-and-forget:
-        // the dispatch below proceeds regardless of the interrupt's outcome.
+    private void escalateWedgedSupervisorToHuman(Contract failedDecision) {
+        // Best-effort: unstick a frozen supervisor turn so its pane spinner
+        // clears. Fire-and-forget — escalation proceeds regardless of outcome.
         try {
             SupervisorBridge sb = pair.getSupervisorBridge();
-            if (sb != null) {
-                sb.interrupt();
-            }
+            if (sb != null) sb.interrupt();
         } catch (Exception e) {
-            LOG.warn("[DeadlockGuard] failed to abort supervisor turn before system takeover: "
-                    + e.getMessage());
+            LOG.warn("[DeadlockGuard] interrupt before escalate failed: " + e.getMessage());
         }
 
-        StringBuilder planSummary = new StringBuilder();
-        if (plan == null) {
-            planSummary.append("(no plan loaded)");
-        } else {
-            planSummary.append("Plan ").append(plan.id)
-                    .append(" state=").append(plan.state)
-                    .append("/").append(plan.subState);
-            PlanStep cur = plan.getCurrentStep();
-            if (cur != null) {
-                planSummary.append("; 当前 step #").append(cur.index + 1)
-                        .append("/").append(plan.steps.size())
-                        .append(" \"").append(cur.title).append("\"")
-                        .append(" status=").append(cur.status);
-            }
-        }
+        String reason = "supervisor DECISION_REQUEST "
+                + (failedDecision != null ? failedDecision.id : "(none)")
+                + " 未在 deadline 内 discharge — 监督者卡死";
 
-        String inlinePrompt = "[Pair Liveness 系统代派 - 监督者卡死,系统接管派单]\n\n"
-                + "你刚才完成上一轮任务并 report_turn_completion 后,监督者陷入 wait 循环 ("
-                + "narration 说\"下发\"但实际未 emit_action(inject_prompt),且 Pair Liveness DECISION_REQUEST "
-                + "也未被正确响应)。为避免双向死锁,Pair 守护直接派单让你继续。\n\n"
-                + "触发原因: " + reason + "\n"
-                + "当前状态: " + planSummary + "\n\n"
-                + "请这样处理:\n"
-                + "1. 检视你刚完成的任务模式 —— 如果是序列化模式(如 ping #N → ping #N+1, "
-                + "Step N → Step N+1, 测试 N → 测试 N+1),直接执行下一步,正常调用 "
-                + "report_turn_completion 汇报。\n"
-                + "2. 如果不是序列化模式 / 不确定下一步:\n"
-                + "   - 简述你刚完成什么 + 你看到的下一步候选(1-3 个)\n"
-                + "   - 调 report_turn_completion(selfAssessment={confidence:'low', "
-                + "concerns:['监督者卡死,系统代派,需要监督者重新对齐']})\n"
-                + "   - 这会让监督者获得新上下文重新决策\n"
-                + "3. 不论哪种,本轮**必须**调用至少一个有副作用的 tool 或 report_turn_completion,"
-                + "禁止纯文字回复(否则会触发主 AI 侧的合同 R1/R2/R3)。";
-
-        JsonObject payload = new JsonObject();
-        payload.addProperty("inlinePrompt", inlinePrompt);
-        payload.addProperty("objective", "[系统代派] 监督者卡死,打破死锁继续推进");
-        payload.addProperty("systemTakeover", true);
-        payload.addProperty("triggeredBy", failedDecision != null ? failedDecision.id : "(none)");
-        payload.addProperty("reason", reason);
-
-        String parentStepId = null;
-        if (plan != null) {
-            PlanStep cur = plan.getCurrentStep();
-            if (cur != null) parentStepId = cur.id;
-        }
-        if (parentStepId == null && failedDecision != null) {
-            parentStepId = failedDecision.parentStepId;
-        }
-
+        // WAITING disarms the guard and marks "needs human". Safe no-op if the
+        // plan already reached a terminal state in the meantime.
         try {
-            registry.issue(ContractIssueRequest.builder()
-                    .parentStepId(parentStepId)
-                    .type(ContractType.TASK_ASSIGNMENT)
-                    .assignedTo(ContractAssignee.MAIN_AI)
-                    .payloadJson(payload.toString())
-                    .deadlineMs(5L * 60L * 1000L)
-                    .replaceExisting(false)
-                    .maxRetries(2)
-                    .build());
+            if (planSm != null) planSm.onEscalatedToHuman(reason);
         } catch (Exception e) {
-            LOG.warn("[DeadlockGuard] system_takeover issue failed: " + e.getMessage());
-            return;
+            LOG.warn("[DeadlockGuard] onEscalatedToHuman failed: " + e.getMessage());
         }
 
-        // Coordinator-event log so the operator sees system_takeover in the
-        // status strip alongside Plan/Ctr/Guard rows. Best-effort — never let
-        // a logging failure mask the actual dispatch.
+        // Coordinator-event log so the operator sees it in the status strip
+        // alongside the Plan/Ctr/Guard rows. Best-effort.
         try {
             com.github.claudecodegui.session.pair.PairStatusPusher pusher = pair.getStatusPusher();
             if (pusher != null) {
                 pusher.recordCoordinatorEvent(
                         com.github.claudecodegui.session.pair.PairStatusSnapshot.CoordinatorEvent.Source.GUARD,
-                        "system_takeover",
-                        "Liveness system_takeover: " + reason
-                                + " → 已合成 TASK_ASSIGNMENT 派给主 AI",
-                        null);
+                        "supervisor_wedged",
+                        "监督者卡死,已暂停 plan 并升级给人工(不再代派主 AI): " + reason,
+                        failedDecision != null ? failedDecision.id : null);
+            }
+        } catch (Exception ignored) { /* best-effort */ }
+
+        // Non-blocking alert so the user notices without a forced modal.
+        try {
+            com.github.claudecodegui.session.pair.ActionRouter router = pair.getActionRouter();
+            if (router != null && router.getWebview() != null) {
+                JsonObject alert = new JsonObject();
+                alert.addProperty("pairId", pair.getPairId());
+                alert.addProperty("supervisorId", pair.getAgentId());
+                alert.addProperty("severity", "alert");
+                alert.addProperty("category", "C2");
+                alert.addProperty("reason", "监督者卡死,Pair 已暂停并等待人工介入");
+                alert.addProperty("question", reason);
+                alert.addProperty("ts", System.currentTimeMillis());
+                router.getWebview().onPairAlert(alert);
             }
         } catch (Exception ignored) { /* best-effort */ }
     }

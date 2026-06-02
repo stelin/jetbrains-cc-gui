@@ -1,4 +1,68 @@
 {
+  "workflow": {
+    "entryTooltip": "Supervisor workflow orchestration",
+    "title": "Workflow Orchestration",
+    "inspectorEmpty": "Select a node to edit",
+    "connectTip": "drag the right dot of a node onto another to link them",
+    "portIn": "Input (depends on upstream)",
+    "portOut": "Drag to a node to make it depend on this one",
+    "run": "Run",
+    "abort": "Abort",
+    "expand": "Expand",
+    "lockedRunning": "Another workflow is already running",
+    "addNode": "Add node",
+    "canvasHint": "{{n}} node(s) · {{e}} edge(s)",
+    "emptyCanvas": "No nodes yet. Click \"Add node\" to start.",
+    "pickOrCreate": "Select or create a workflow",
+    "noWorkflows": "No workflows yet",
+    "nodeCount": "{{n}} nodes",
+    "newWorkflow": "New workflow",
+    "runBar": "{{done}}/{{total}} done · concurrency {{conc}}",
+    "escalation": "Node \"{{node}}\" needs you",
+    "jumpToTab": "Open tab",
+    "viewReport": "Report",
+    "confirmAbort": "Abort the running workflow? Already-opened tabs are kept.",
+    "state": {
+      "editing": "Editing",
+      "running": "Running",
+      "completed": "Completed",
+      "aborted": "Aborted"
+    },
+    "status": {
+      "pending": "Pending",
+      "ready": "Queued",
+      "running": "Running",
+      "waitingHuman": "Needs you",
+      "done": "Done",
+      "aborted": "Aborted"
+    },
+    "node": {
+      "title": "Node",
+      "name": "Name (= tab name)",
+      "supervisor": "Supervisor",
+      "pickSupervisor": "Select a supervisor…",
+      "model": "Model",
+      "modelPlaceholder": "Use supervisor default",
+      "longContext": "1M context",
+      "reasoning": "Reasoning",
+      "default": "default",
+      "dependsOn": "Depends on (upstream)",
+      "connectFromCanvas": "Drag from an upstream node's right dot onto this node to link.",
+      "noOtherNodes": "No other nodes",
+      "cycleHint": "Would create a cycle",
+      "planSource": "Task source",
+      "planInline": "Inline text",
+      "planFile": "Reference file",
+      "dropFiles": "Drop files to insert @path",
+      "planPlaceholder": "The task this node hands to its supervisor…",
+      "delete": "Delete",
+      "done": "Done"
+    },
+    "err": {
+      "nameRequired": "Name is required",
+      "nameDup": "Name already used"
+    }
+  },
   "chatHeader": {
     "sync": {
       "stopped": "Sync stopped",

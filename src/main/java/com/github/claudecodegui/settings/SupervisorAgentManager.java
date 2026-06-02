@@ -452,6 +452,37 @@ public class SupervisorAgentManager {
                 DEFAULT_MODEL,
                 now);
 
+        // v1: fourth built-in persona — unit-test supervisor. Standalone, like
+        // bug-supervisor: takes a test target (package / file / function) from
+        // the user's first message and drives main AI through: skill-match gate
+        // → baseline run (attribute pre-existing vs introduced failures) →
+        // test plan → write tests → run + zero-human self-heal loop (test-code
+        // bug vs product-code bug, auto-fixed and only recorded; unfixable items
+        // quarantined, never escalated) → complete_plan with a coverage + fixed-
+        // bug + quarantine report. Decision matrix is A/B/Q/T (no human-facing
+        // action) instead of the A/B/C1/C2/C3 used by code/design/bug.
+        dirty |= ensureOrRefresh(agents, "unit-test-supervisor",
+                "单元测试监督者 / Unit Test Supervisor",
+                loadPreset("unit-test-supervisor"),
+                DEFAULT_MODEL,
+                now);
+
+        // v1: fifth built-in persona — API/interface-test supervisor.
+        // Standalone: takes a service target (Java/Go) from the user's first
+        // message and drives main AI through: skill-match gate + ServiceSpec
+        // inference + read-only verify-MCP self-check → endpoint inventory →
+        // start service (code/config failures self-heal; missing middleware →
+        // terminal-partial) → per-endpoint mock + curl (queue side-effects
+        // default-success) → verify + zero-human self-heal loop where the
+        // supervisor itself runs read-only MySQL/Redis MCP to confirm side
+        // effects (anti-hallucination) → complete_plan after tearing the
+        // service down. Same A/B/Q/T matrix; never escalates.
+        dirty |= ensureOrRefresh(agents, "api-test-supervisor",
+                "接口测试监督者 / API Test Supervisor",
+                loadPreset("api-test-supervisor"),
+                DEFAULT_MODEL,
+                now);
+
         // Default points at code-supervisor unless the user picked something
         // else that still exists. If the previous default referenced a removed
         // legacy id, redirect.

@@ -196,9 +196,9 @@ public class PairHandler extends BaseMessageHandler {
             // 2026-05-28: the user is pausing to add context — the supervisor
             // owes no decision right now. Move the plan to WAITING so the
             // DeadlockGuard liveness countdown stops; otherwise the 60s/90s
-            // timer keeps running and can still fire a system_takeover despite
-            // the user having intervened. Push a fresh status snapshot so the
-            // Stop button's enabled state updates on the webview immediately.
+            // timer keeps running and can still fire a spurious wedged-supervisor
+            // escalation despite the user having intervened. Push a fresh status
+            // snapshot so the Stop button's enabled state updates immediately.
             com.github.claudecodegui.session.pair.plan.PlanStateMachine sm = session.getPlanStateMachine();
             if (sm != null) sm.onUserPaused();
             PairStatusPusher sp = session.getStatusPusher();

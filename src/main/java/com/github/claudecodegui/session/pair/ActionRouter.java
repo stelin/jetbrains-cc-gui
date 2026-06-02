@@ -750,11 +750,11 @@ public class ActionRouter {
         }
         if (attempt == 2) {
             return "\n【⚠️ 连续第 " + attempt + " 次 wait 被拒】"
-                    + "再 wait 一轮,Pair Liveness 守护会判定为持续死锁,自动接管派单。";
+                    + "再 wait 一轮,Pair Liveness 守护会判定为持续死锁,暂停 plan 并升级给人工。";
         }
         return "\n【🚨 连续第 " + attempt + " 次 wait 被拒】"
-                + "Pair Liveness 守护已在准备 system_takeover —— 即将绕过你直接给主 AI 派恢复任务。"
-                + "本轮如果还不 emit_action(inject_prompt / complete_plan),你的派单决策权将被系统暂时接管。";
+                + "Pair Liveness 守护即将判定监督者卡死 —— 会暂停当前 plan 并升级给人工介入(不再凭空代派主 AI)。"
+                + "本轮如果还不 emit_action(inject_prompt / complete_plan),plan 将被挂起等待用户。";
     }
 
     /**

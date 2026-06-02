@@ -481,6 +481,14 @@ interface Window {
   onDefaultSupervisorAgentReceived?: (json: string) => void;
   onDefaultSupervisorAgentChanged?: (json: string) => void;
 
+  // Supervisor workflow orchestration callbacks (Java → JS).
+  // See docs/workflow/ui-implementation.md §9.2. Backend lands in a later plan;
+  // until then the editor runs off localStorage and these are no-ops.
+  onWorkflowDefinitions?: (json: string) => void;      // WorkflowDefinition[]
+  onWorkflowExecutionUpdate?: (json: string) => void;  // WorkflowExecution (full snapshot)
+  onWorkflowEscalation?: (json: string) => void;       // { nodeName, reason }
+  onWorkflowOperationResult?: (json: string) => void;  // { success, operation?, error? }
+
   // Pair lifecycle callbacks (Phase B):
   onPairStarted?: (json: string) => void;
   onPairStopped?: (json: string) => void;

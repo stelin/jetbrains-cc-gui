@@ -378,7 +378,7 @@ emit_action({
 - **所有 step 都已完成** → `emit_action(complete_plan, summary='...')` 收尾(这是最常见的真实原因——你其实做完了,只是上一轮没正确收尾)
 - 你确实无法决策 → `emit_action(escalate_to_human, ...)`
 
-⚠️ 若本轮仍不 emit 真实 action,守护会进入 system_takeover 直接代派给主 AI。**别再 narrate 解释或裸 wait。**
+⚠️ 若本轮仍不 emit 真实 action,守护会判定你卡死,**暂停当前 plan 并升级给人工介入**(不再凭空代派主 AI)。**别再 narrate 解释或裸 wait。**
 
 # directive_lost / step_blocked 响应(v5 + v6,Contract v3 兼容)
 
@@ -479,9 +479,9 @@ emit_action({
 
 若你连续 N 轮违反上述规则、plan 在 PENDING_DECISION 卡死超过 1~2 分钟：
 - 第 1 阶段：你会收到 `[Pair Liveness 守护]` 类型的 DECISION_REQUEST 系统消息
-- 第 2 阶段：若 DECISION_REQUEST 也未被你正确响应，**Pair 系统会绕过你直接给主 AI 派一个恢复任务**（强制打破死锁，无需人工介入）
+- 第 2 阶段：若 DECISION_REQUEST 也未被你正确响应，**Pair 系统会判定你卡死，把当前 plan 暂停（转 WAITING）并升级给人工介入**（不会再凭空代派主 AI——那种代派只会让主 AI 回「没事干」并把守护自己喂成死循环）
 
-被守护接管不会算错（自治模式下守护就是兜底），但会在 coordinator log 留下 `system_takeover` 记录。**最好的方式是自己按上面 3 步自检走对路径**。
+被守护暂停会在 coordinator log 留下 `supervisor_wedged` 记录，并需要用户介入恢复。**最好的方式是自己按上面 3 步自检走对路径，尤其是做完后一定走 `complete_plan` 而不是 `approve_and_continue` 假装收尾。**
 
 # 等待场景（v3.1 必读）
 

@@ -1,4 +1,68 @@
 {
+  "workflow": {
+    "entryTooltip": "监督者编排工作流",
+    "title": "工作流编排",
+    "inspectorEmpty": "选择一个节点进行编辑",
+    "connectTip": "把节点右侧圆点拖到另一个节点即可连线",
+    "portIn": "输入（依赖上游）",
+    "portOut": "拖到其它节点，让它依赖本节点",
+    "run": "运行",
+    "abort": "中止",
+    "expand": "展开",
+    "lockedRunning": "已有工作流正在运行",
+    "addNode": "添加节点",
+    "canvasHint": "{{n}} 个节点 · {{e}} 条依赖",
+    "emptyCanvas": "还没有节点，点「添加节点」开始。",
+    "pickOrCreate": "请选择或新建一个工作流",
+    "noWorkflows": "暂无工作流",
+    "nodeCount": "{{n}} 个节点",
+    "newWorkflow": "新建工作流",
+    "runBar": "完成 {{done}}/{{total}} · 并发 {{conc}}",
+    "escalation": "节点「{{node}}」需要你处理",
+    "jumpToTab": "跳转到标签页",
+    "viewReport": "查看完成报告",
+    "confirmAbort": "确定中止当前工作流？已打开的标签页会保留。",
+    "state": {
+      "editing": "编辑中",
+      "running": "运行中",
+      "completed": "已完成",
+      "aborted": "已中止"
+    },
+    "status": {
+      "pending": "依赖未满足",
+      "ready": "排队中",
+      "running": "进行中",
+      "waitingHuman": "待人工",
+      "done": "已完成",
+      "aborted": "已中止"
+    },
+    "node": {
+      "title": "节点",
+      "name": "名称（= 标签页名）",
+      "supervisor": "监督者",
+      "pickSupervisor": "选择监督者……",
+      "model": "模型",
+      "modelPlaceholder": "使用监督者默认",
+      "longContext": "1M 上下文",
+      "reasoning": "推理",
+      "default": "默认",
+      "dependsOn": "依赖于（上游）",
+      "connectFromCanvas": "在画布上从上游节点右侧圆点拖线到本节点即可建立依赖。",
+      "noOtherNodes": "暂无其它节点",
+      "cycleHint": "会形成循环依赖",
+      "planSource": "任务来源",
+      "planInline": "内联文本",
+      "planFile": "引用文件",
+      "dropFiles": "拖入文件以插入 @路径",
+      "planPlaceholder": "本节点交给监督者的任务……",
+      "delete": "删除节点",
+      "done": "完成"
+    },
+    "err": {
+      "nameRequired": "名称不能为空",
+      "nameDup": "名称已被使用"
+    }
+  },
   "chatHeader": {
     "sync": {
       "stopped": "同步未启动",

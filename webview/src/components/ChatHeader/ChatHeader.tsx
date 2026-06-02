@@ -6,7 +6,7 @@ import SupervisorToggle from '../ChatInputBox/SupervisorToggle';
 import type { SelectedSupervisor } from '../../types/supervisorAgent';
 
 export interface ChatHeaderProps {
-  currentView: 'chat' | 'history' | 'settings';
+  currentView: 'chat' | 'history' | 'settings' | 'workflow';
   sessionTitle: string;
   t: TFunction;
   onBack: () => void;
@@ -25,6 +25,8 @@ export interface ChatHeaderProps {
   onOpenSupervisorManager?: () => void;
   /** When false, the supervisor toggle is not rendered (e.g. provider doesn't support it). */
   supervisorEnabled?: boolean;
+  /** Open the supervisor workflow orchestration dialog (header toolbar button). */
+  onOpenWorkflow?: () => void;
 }
 
 export function ChatHeader({
@@ -41,6 +43,7 @@ export function ChatHeader({
   onSupervisorChange,
   onOpenSupervisorManager,
   supervisorEnabled = true,
+  onOpenWorkflow,
 }: ChatHeaderProps): React.ReactElement | null {
   const [editing, setEditing] = useState(false);
   const [editValue, setEditValue] = useState('');
@@ -96,7 +99,7 @@ export function ChatHeader({
     commitEdit();
   }, [commitEdit]);
 
-  if (currentView === 'settings') {
+  if (currentView === 'settings' || currentView === 'workflow') {
     return null;
   }
 
@@ -167,6 +170,15 @@ export function ChatHeader({
             >
               <span className="codicon codicon-history" />
             </button>
+            {onOpenWorkflow && (
+              <button
+                className="icon-button"
+                onClick={onOpenWorkflow}
+                data-tooltip={t('workflow.entryTooltip', '监督者编排工作流')}
+              >
+                <span className="codicon codicon-git-merge" />
+              </button>
+            )}
             <button
               className="icon-button"
               onClick={onSettings}

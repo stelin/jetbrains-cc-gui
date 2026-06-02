@@ -3,7 +3,7 @@ import type { TFunction } from 'i18next';
 import type { ClaudeMessage, HistoryData } from '../types';
 import { sendBridgeEvent } from '../utils/bridge';
 
-type ViewMode = 'chat' | 'history' | 'settings';
+type ViewMode = 'chat' | 'history' | 'settings' | 'workflow';
 
 type ToastType = 'info' | 'success' | 'warning' | 'error';
 

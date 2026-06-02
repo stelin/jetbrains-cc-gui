@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 import type { ClaudeMessage } from '../types';
 
-type ViewMode = 'chat' | 'history' | 'settings';
+type ViewMode = 'chat' | 'history' | 'settings' | 'workflow';
 
 export interface UseScrollBehaviorOptions {
   currentView: ViewMode;

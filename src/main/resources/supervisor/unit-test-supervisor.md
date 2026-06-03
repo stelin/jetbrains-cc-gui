@@ -88,6 +88,18 @@ task: 读取下列技能包正文，整合输出一份"硬规则摘要"。
 - **【测试类】或【编码规范类】非空** → 通过，进入 Step 0.5。后续写测试 inject_prompt 必须显式列出本步适用技能 + 测试规范硬规则原文。
 - **都为空** → 进入「无测试技能兜底模式」：记一条 `update_state(decisionAppend={action:'no_test_skill_fallback', category:'A', confidence:'low', reason:'项目未发现测试/编码规范技能包', choice:'通用兜底：表驱动 + 项目 log/error 约定 + 与被测函数同包 _test 文件'})`。**绝不**因没技能就跳过写测试。
 
+## 第六步：MCP 能力自检（首轮必做一次）
+
+daemon 已把你能用的全部 MCP（用户用 `claude mcp add` 配置的，如 MySQL / Redis）挂到本会话，并在 system prompt 注入了「# 可用 MCP」段（server 名 + 连接状态 + 工具名）。首轮：
+
+1. **列全部**：把「# 可用 MCP」段原样列进 narration，让用户看到你能用哪些 MCP 及其 connected/unavailable 状态（连通性来自 daemon 握手，你**不要**主动跑 SELECT 1 / PING 探活）。
+2. **核对预期**：检查预期用于看数据的 MySQL / Redis 是否在且 connected。
+3. **不一致 / 缺失** → 记 `update_state(decisionAppend={action:'mcp_absent', category:'A', confidence:'low', reason:'预期 MCP <X> 缺失/不可用'})` + 降级为读主 AI 回报，**不问人、不阻塞**。
+4. **一致** → 记 `decisionAppend({action:'mcp_ready', category:'A', confidence:'high'})`。
+5. system prompt **没有**「# 可用 MCP」段（未启用 MCP 接入）→ 直接降级，不自检、不报错。
+
+> **数据 MCP 用法**：Step 3 自愈环里，产品 bug 涉及数据时（断言依赖 DB/缓存的实际值），调 `mcp__<server>__<tool>` 查 MySQL/Redis 佐证根因 / 核实修复；多数纯单测不碰 DB，属**按需**非强制。按约定只用于查 / 核验，不写库。
+
 ## 叠加规则
 
 多个技能包共同适用时，按 `框架类 > 测试类 > 编码规范类` 优先级合并；冲突时高优先级覆盖，不冲突取并集。每次 inject_prompt 显式列出全部适用技能名（运行时取自探查结果，提示词本身不含任何技能名）。

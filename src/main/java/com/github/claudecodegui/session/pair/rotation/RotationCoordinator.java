@@ -164,7 +164,8 @@ public class RotationCoordinator {
                     pair.getReasoningEffort(),
                     newSupervisorId,
                     successorPrompt,
-                    newGeneration
+                    newGeneration,
+                    pair.isMcpAccess()
             ).get(NEW_START_TIMEOUT_SEC, TimeUnit.SECONDS);
             if (!Boolean.TRUE.equals(started)) {
                 return RotationResult.failed("new start returned false",

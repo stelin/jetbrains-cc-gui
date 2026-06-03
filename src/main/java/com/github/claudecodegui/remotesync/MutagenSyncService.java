@@ -62,13 +62,32 @@ public final class MutagenSyncService {
         public String mode = "two-way-safe";
         /** "windows" / "unix" / "auto" (default). Drives endpoint path normalisation. */
         public String remoteOs = "auto";
+        /**
+         * Transport to reach the remote endpoint:
+         * <ul>
+         *   <li>{@code "ssh"} (default) → {@code user@host:port} over OpenSSH.
+         *   <li>{@code "docker"} → {@code docker://[user@]container/path}; mutagen
+         *       talks to the local Docker daemon, so no SSH host/port/password.
+         * </ul>
+         */
+        public String transport = "ssh";
+        /** Container name or id, used only when {@link #transport} is {@code "docker"}. */
+        public String dockerContainer;
+
+        public boolean isDocker() { return "docker".equalsIgnoreCase(transport); }
 
         public String validate() {
             if (isBlank(name)) return "sync name is required";
             if (isBlank(localPath)) return "local path is required";
+            if (isBlank(remotePath)) return "remote path is required";
+            if (isDocker()) {
+                // Docker only needs a container; user is the optional in-container
+                // account and there is no host/port/SSH password.
+                if (isBlank(dockerContainer)) return "docker container is required";
+                return null;
+            }
             if (isBlank(remoteUser)) return "remote user is required";
             if (isBlank(remoteHost)) return "remote host is required";
-            if (isBlank(remotePath)) return "remote path is required";
             if (remotePort < 1 || remotePort > 65535) return "remote port out of range";
             return null;
         }
@@ -88,6 +107,21 @@ public final class MutagenSyncService {
         public String remoteEndpoint() {
             String path = (remotePath == null) ? "" : remotePath.trim();
             boolean isWindows = isWindowsRemote(path);
+
+            if (isDocker()) {
+                // docker://[user@]container[/path] — mutagen splits on the first '/'
+                // after the authority, so the path keeps its leading slash. Home-
+                // relative ("~/...") and absolute ("/...") paths pass through as-is;
+                // anything else gets a leading '/' to stay absolute.
+                String container = (dockerContainer == null) ? "" : dockerContainer.trim();
+                String user = (remoteUser == null) ? "" : remoteUser.trim();
+                String authority = user.isEmpty() ? container : user + "@" + container;
+                String dockerPath = isWindows ? path.replace('\\', '/') : path;
+                if (!dockerPath.isEmpty() && !dockerPath.startsWith("/") && !dockerPath.startsWith("~")) {
+                    dockerPath = "/" + dockerPath;
+                }
+                return "docker://" + authority + dockerPath;
+            }
 
             if (remotePort == 22) {
                 return remoteUser + "@" + remoteHost + ":" + path;
@@ -134,8 +168,11 @@ public final class MutagenSyncService {
         if (!MutagenDaemon.getInstance().ensureRunning()) {
             return TestResult.fail("mutagen daemon failed to start (is the binary installed?)");
         }
-        TestResult conn = ensureControlMaster(form, password);
-        if (!conn.ok) return conn;
+        // Docker reaches the container through the local daemon — no SSH auth to set up.
+        if (!form.isDocker()) {
+            TestResult conn = ensureControlMaster(form, password);
+            if (!conn.ok) return conn;
+        }
 
         String probeName = form.name + "-probe-" + Long.toHexString(System.currentTimeMillis());
         try {
@@ -247,8 +284,11 @@ public final class MutagenSyncService {
             }
             return TestResult.ok("resumed");
         }
-        TestResult conn = ensureControlMaster(form, password);
-        if (!conn.ok) return conn;
+        // Docker reaches the container through the local daemon — no SSH auth to set up.
+        if (!form.isDocker()) {
+            TestResult conn = ensureControlMaster(form, password);
+            if (!conn.ok) return conn;
+        }
 
         try {
             List<String> cmd = buildCreateCommand(form, form.name, false);
@@ -370,33 +410,50 @@ public final class MutagenSyncService {
         sb.append("=== mutagen daemon status ===\n");
         sb.append("running=").append(MutagenDaemon.getInstance().isRunning()).append("\n\n");
 
-        sb.append("=== ssh auth strategy ===\n");
-        sb.append("client os: ").append(PlatformUtils.isWindows() ? "Windows (SSH key)"
-                : "macOS/Linux (ControlMaster)").append('\n');
+        sb.append("=== transport ===\n");
         try {
             com.google.gson.JsonObject cfg =
                     new com.github.claudecodegui.settings.CodemossSettingsService()
                             .getRemoteSyncConfig();
+            String transport = cfg.has("transport") && !cfg.get("transport").isJsonNull()
+                    ? cfg.get("transport").getAsString() : "ssh";
             String user = cfg.has("remoteUser") ? cfg.get("remoteUser").getAsString() : "";
-            String host = cfg.has("remoteHost") ? cfg.get("remoteHost").getAsString() : "";
-            int port = cfg.has("remotePort") ? cfg.get("remotePort").getAsInt() : 22;
-            if (!user.isEmpty() && !host.isEmpty()) {
-                if (PlatformUtils.isWindows()) {
-                    SshKeyManager mgr = SshKeyManager.getInstance();
-                    sb.append("key pair: ").append(mgr.privateKeyPath())
-                            .append(java.nio.file.Files.isRegularFile(mgr.privateKeyPath())
-                                    ? "  (present)" : "  (missing)").append('\n');
-                    sb.append("key accepted by remote: ")
-                            .append(mgr.probeKeyAuth(user, host, port)).append('\n');
-                    sb.append("config block present:   ").append(mgr.configHasEntry(host)).append('\n');
-                } else {
-                    SshControlMaster cm = SshControlMaster.getInstance();
-                    sb.append("socket: ").append(cm.socketPath(host, port)).append('\n');
-                    sb.append("alive:  ").append(cm.isMasterAlive(user, host, port)).append('\n');
-                    sb.append("config block present: ").append(cm.configHasEntry(host)).append('\n');
-                }
+            if ("docker".equalsIgnoreCase(transport)) {
+                String container = cfg.has("dockerContainer") ? cfg.get("dockerContainer").getAsString() : "";
+                sb.append("mode:           docker\n");
+                sb.append("container:      ").append(container.isEmpty() ? "(not configured)" : container).append('\n');
+                sb.append("container user: ").append(user.isEmpty() ? "(image default)" : user).append('\n');
+                ProcessOutcome dockerVer = run(List.of(
+                        "docker", "version", "--format", "{{.Server.Version}}"), null);
+                sb.append("docker server:  ")
+                        .append(dockerVer.exitCode == 0
+                                ? dockerVer.combined.trim()
+                                : "(unreachable: " + dockerVer.combined.trim() + ")")
+                        .append('\n');
             } else {
-                sb.append("(remoteUser/remoteHost not configured)\n");
+                sb.append("mode:      ssh\n");
+                sb.append("client os: ").append(PlatformUtils.isWindows() ? "Windows (SSH key)"
+                        : "macOS/Linux (ControlMaster)").append('\n');
+                String host = cfg.has("remoteHost") ? cfg.get("remoteHost").getAsString() : "";
+                int port = cfg.has("remotePort") ? cfg.get("remotePort").getAsInt() : 22;
+                if (!user.isEmpty() && !host.isEmpty()) {
+                    if (PlatformUtils.isWindows()) {
+                        SshKeyManager mgr = SshKeyManager.getInstance();
+                        sb.append("key pair: ").append(mgr.privateKeyPath())
+                                .append(java.nio.file.Files.isRegularFile(mgr.privateKeyPath())
+                                        ? "  (present)" : "  (missing)").append('\n');
+                        sb.append("key accepted by remote: ")
+                                .append(mgr.probeKeyAuth(user, host, port)).append('\n');
+                        sb.append("config block present:   ").append(mgr.configHasEntry(host)).append('\n');
+                    } else {
+                        SshControlMaster cm = SshControlMaster.getInstance();
+                        sb.append("socket: ").append(cm.socketPath(host, port)).append('\n');
+                        sb.append("alive:  ").append(cm.isMasterAlive(user, host, port)).append('\n');
+                        sb.append("config block present: ").append(cm.configHasEntry(host)).append('\n');
+                    }
+                } else {
+                    sb.append("(remoteUser/remoteHost not configured)\n");
+                }
             }
         } catch (Exception e) {
             sb.append("(unable to inspect: ").append(e.getMessage()).append(")\n");

@@ -172,6 +172,7 @@ export default function EscalateDialog({
           <span className="codicon codicon-warning" />
           {t('pairLayout.escalate.title', { name: supervisorName })}
         </div>
+        <div className={styles.escalateScroll}>
         {hasStats && (
           <div className={styles.escalateSummary}>
             {stepsTotal > 0 && (
@@ -272,6 +273,7 @@ export default function EscalateDialog({
             maxLength={MAX_INPUT_LENGTH}
           />
         )}
+        </div>
 
         <div className={styles.escalateActions}>
           {!isBlocking && (

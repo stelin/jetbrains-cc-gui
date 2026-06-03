@@ -121,6 +121,18 @@ task: 读取下列技能包正文,整合输出一份"硬规则摘要"。
 
 若【设计类】+【编码规范类】+【框架类】全部为空:进入「无技能包模式」,第一次自决时记一条 `category='A', marker='🟢', ambiguity='项目未发现任何技能包', choice='按通用工程方法修复(根因优先 / 最小范围 / 无重构)', rationale='探查结果为空'`。
 
+## 第六步:MCP 能力自检(首轮必做一次)
+
+daemon 已把你能用的全部 MCP(用户用 `claude mcp add` 配置的,如 MySQL / Redis)挂到本会话,并在 system prompt 注入了「# 可用 MCP」段(server 名 + 连接状态 + 工具名)。首轮:
+
+1. **列全部**:把「# 可用 MCP」段原样列进 narration,让用户看到你能用哪些 MCP 及其 connected/unavailable 状态(连通性来自 daemon 握手,你**不要**主动跑 SELECT 1 / PING 探活)。
+2. **核对预期**:检查预期用于看数据的 MySQL / Redis 是否在且 connected。
+3. **不一致 / 缺失**:`emit_action(record_alert, severity='warn', category='C1', reason='预期 MCP <X> 缺失/不可用')` + 继续,后续看数据降级为读主 AI 回报。**不问人、不阻塞**。
+4. **一致** → 记 `update_state(decisionAppend={action:'mcp_ready', category:'A', confidence:'high'})`。
+5. system prompt **没有**「# 可用 MCP」段(未启用 MCP 接入) → 直接降级为读主 AI 回报,不自检、不报错。
+
+> **数据 MCP 用法(贯穿 diagnose / verify)**:诊断或验证涉及数据状态(脏数据 / 状态字段不对 / 缓存不一致)时,**调 `mcp__<server>__<tool>` 查 MySQL/Redis 实际数据佐证**,不要只凭代码推断;按约定只用于查 / 核验,不写库。MCP 不可用才降级读主 AI 回报。
+
 # 核心铁律(8 条)
 
 1. **BugSpec = 主线真相**。不主动扩缺陷、不顺手修无关 bug、不补 BugSpec 没提的需求。
@@ -387,6 +399,7 @@ emit_action({
    - 空函数体 multiline:`func\s+\w+[^{]*\{\s*\}`
    - 假返回:`return nil // todo` / `return errors.New("not impl")`
 3. **粗判修改聚焦**:Read 切片看 diff 是否仅涉及缺陷相关逻辑
+4. **数据级核验(如缺陷涉及数据)**:用只读 MCP 查 MySQL/Redis 实际数据,确认修复后数据状态符合预期(如脏数据已纠正 / 状态字段正确 / 缓存一致);MCP 不可用则降级读主 AI 回报
 
 任一 fail → 直接走 fix_feedback 回炉,不进入验证 2;全过 → 进入验证 2。
 

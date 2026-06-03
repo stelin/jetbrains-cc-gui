@@ -202,7 +202,8 @@ public class RemoteSyncHandler extends BaseMessageHandler {
                     pushTestResult(false, validation);
                     return;
                 }
-                if (!ensureHostTrusted(form)) {
+                // Docker has no SSH host key to verify; only SSH transport prompts.
+                if (!form.isDocker() && !ensureHostTrusted(form)) {
                     pushTestResult(false, "host key not trusted");
                     return;
                 }
@@ -225,7 +226,8 @@ public class RemoteSyncHandler extends BaseMessageHandler {
                     pushTestResult(false, validation);
                     return;
                 }
-                if (!ensureHostTrusted(form)) {
+                // Docker has no SSH host key to verify; only SSH transport prompts.
+                if (!form.isDocker() && !ensureHostTrusted(form)) {
                     pushTestResult(false, "host key not trusted");
                     return;
                 }
@@ -349,6 +351,8 @@ public class RemoteSyncHandler extends BaseMessageHandler {
         f.remotePath  = cfg.get("remotePath").getAsString();
         f.mode        = cfg.get("mode").getAsString();
         f.remoteOs    = cfg.has("remoteOs") ? cfg.get("remoteOs").getAsString() : "auto";
+        f.transport   = cfg.has("transport") ? cfg.get("transport").getAsString() : "ssh";
+        f.dockerContainer = cfg.has("dockerContainer") ? cfg.get("dockerContainer").getAsString() : "";
         return f;
     }
 

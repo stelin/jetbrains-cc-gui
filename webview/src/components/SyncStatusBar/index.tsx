@@ -44,6 +44,8 @@ interface SyncConfig {
   enabled: boolean;
   name?: string;
   localPath?: string;
+  transport?: 'ssh' | 'docker';
+  dockerContainer?: string;
   remoteUser?: string;
   remoteHost?: string;
   remotePath?: string;
@@ -274,9 +276,13 @@ export function SyncStatusBar() {
     ? Math.round(((status?.stagingProgress || 0) / (status?.stagingTotal || 1)) * 100)
     : 0;
 
-  const remoteLabel = config.remoteUser && config.remoteHost
-    ? `${config.remoteUser}@${config.remoteHost}:${config.remotePath || ''}`
-    : '';
+  const remoteLabel = config.transport === 'docker'
+    ? (config.dockerContainer
+        ? `docker://${config.remoteUser ? config.remoteUser + '@' : ''}${config.dockerContainer}${config.remotePath || ''}`
+        : '')
+    : config.remoteUser && config.remoteHost
+      ? `${config.remoteUser}@${config.remoteHost}:${config.remotePath || ''}`
+      : '';
 
   const inventory = inventoryString(status || ({} as SyncStatus));
 

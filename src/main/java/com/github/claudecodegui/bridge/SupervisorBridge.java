@@ -295,11 +295,13 @@ public class SupervisorBridge {
             String specContent,
             String model,
             Integer autoCompactThreshold,
-            String reasoningEffort
+            String reasoningEffort,
+            boolean mcpAccess
     ) {
         JsonObject params = new JsonObject();
         params.addProperty("pairId", pairId);
         params.addProperty("supervisorId", supervisorId);
+        params.addProperty("mcpAccess", mcpAccess);
         params.addProperty("name", agentName);
         params.addProperty("description", description);
         params.addProperty("planContent", planContent);
@@ -343,7 +345,8 @@ public class SupervisorBridge {
             String reasoningEffort,
             String explicitSupervisorId,
             String successorPromptAppend,
-            int generation
+            int generation,
+            boolean mcpAccess
     ) {
         if (explicitSupervisorId == null || explicitSupervisorId.isEmpty()) {
             throw new IllegalArgumentException("explicitSupervisorId is required for handoff start");
@@ -351,6 +354,7 @@ public class SupervisorBridge {
         JsonObject params = new JsonObject();
         params.addProperty("pairId", pairId);
         params.addProperty("supervisorId", explicitSupervisorId);
+        params.addProperty("mcpAccess", mcpAccess);
         params.addProperty("name", agentName);
         params.addProperty("description", description);
         params.addProperty("planContent", planContent);

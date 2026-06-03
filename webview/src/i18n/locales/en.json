@@ -433,9 +433,18 @@
         "toggleOff": "Disabled",
         "toggleHint": "Turn on to edit the fields below and start syncing",
         "needSdkWarning": "Install the mutagen tool above before using sync.",
+        "transport": {
+          "title": "Transport",
+          "ssh": "SSH",
+          "docker": "Docker",
+          "sshHint": "Sync to a remote host over SSH; requires host, port and password.",
+          "dockerHint": "Sync into a container via the local Docker daemon — no SSH host / port / password, e.g. docker://root@f9803c0471fb/workspace/workplace_hyy"
+        },
         "name": "Sync name",
         "localPath": "Local path",
         "remoteUser": "Remote user",
+        "dockerContainer": "Container name / ID",
+        "dockerUser": "Container user",
         "remoteHost": "Remote host",
         "remotePath": "Remote path",
         "password": "SSH password",

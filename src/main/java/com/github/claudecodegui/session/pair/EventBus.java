@@ -494,7 +494,8 @@ public class EventBus {
                             pair.getProjectSpec(),
                             pair.getModel(),
                             pair.getAutoCompactThreshold(),
-                            pair.getReasoningEffort())
+                            pair.getReasoningEffort(),
+                            pair.isMcpAccess())
                     .get(RESTART_TIMEOUT_SEC, TimeUnit.SECONDS);
             return Boolean.TRUE.equals(ok);
         } catch (Exception e) {

@@ -1348,6 +1348,12 @@ public class CodemossSettingsService {
         if (!rs.has("remoteOs") || rs.get("remoteOs").isJsonNull() || rs.get("remoteOs").getAsString().isEmpty()) {
             rs.addProperty("remoteOs", "auto");
         }
+        if (!rs.has("transport") || rs.get("transport").isJsonNull() || rs.get("transport").getAsString().isEmpty()) {
+            rs.addProperty("transport", "ssh");
+        }
+        if (!rs.has("dockerContainer") || rs.get("dockerContainer").isJsonNull()) {
+            rs.addProperty("dockerContainer", "");
+        }
         return rs;
     }
 

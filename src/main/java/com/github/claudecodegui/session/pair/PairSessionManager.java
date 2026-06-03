@@ -237,6 +237,10 @@ public final class PairSessionManager implements Disposable {
                         ? agentConfig.get("defaultReasoning").getAsString()
                         : null);
 
+        // 2026-06-01: whether this supervisor gets the user's `claude mcp add`
+        // servers attached (seeded true on bug/unit-test/api-test supervisors).
+        boolean mcpAccess = com.github.claudecodegui.settings.SupervisorAgentManager.isMcpAccess(agentConfig);
+
         // Pull project-applicable skills and shape them as a compact markdown
         // checklist the Supervisor can use as review rules. We embed only
         // name + description (not the full skill body) to stay token-light.
@@ -317,6 +321,9 @@ public final class PairSessionManager implements Disposable {
         if (reasoning != null && !reasoning.isEmpty()) {
             session.setReasoningEffort(reasoning);
         }
+        // Seed mcpAccess so handoff (RotationCoordinator) + lazy restart
+        // (EventBus) replay it from the session snapshot.
+        session.setMcpAccess(mcpAccess);
 
         // Phase 4 (2026-05-24): generation-0 start uses the same daemon
         // command as rotation (supervisor.start with successorPromptAppend),
@@ -337,7 +344,8 @@ public final class PairSessionManager implements Disposable {
                     reasoning,
                     params.agentId, // generation-0 supervisorId == agentId
                     bootstrapAppend,
-                    0
+                    0,
+                    mcpAccess
             ).get(START_SUPERVISOR_DAEMON_TIMEOUT_SEC, TimeUnit.SECONDS);
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();

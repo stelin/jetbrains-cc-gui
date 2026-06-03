@@ -62,6 +62,14 @@ public class PairSession {
      * from {@link com.github.claudecodegui.settings.SupervisorAgentManager}.
      */
     private volatile Integer autoCompactThreshold;
+    /**
+     * 2026-06-01: whether this supervisor opted into MCP access (seeded true on
+     * bug / unit-test / api-test supervisors). Stored on the session so all
+     * three supervisor.start sites — initial ({@link PairSessionManager}),
+     * handoff ({@link com.github.claudecodegui.session.pair.rotation.RotationCoordinator})
+     * and lazy restart ({@link EventBus#restartSupervisor()}) — replay it.
+     */
+    private volatile boolean mcpAccess = false;
 
     private volatile EventBus eventBus;       // wired by PairSessionManager
     private volatile ActionRouter actionRouter;
@@ -434,6 +442,9 @@ public class PairSession {
 
     public Integer getAutoCompactThreshold() { return autoCompactThreshold; }
     public void setAutoCompactThreshold(Integer v) { this.autoCompactThreshold = v; }
+
+    public boolean isMcpAccess() { return mcpAccess; }
+    public void setMcpAccess(boolean v) { this.mcpAccess = v; }
 
     /**
      * Current Supervisor agent ids (always size 1 in current iteration).

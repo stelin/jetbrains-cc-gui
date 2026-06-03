@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import styles from './style.module.less';
 import { MutagenSdkCard, type MutagenSdkStatus } from './MutagenSdkCard';
-import { SyncConfigForm, type SyncConfig, type SyncMode, type RemoteOs } from './SyncConfigForm';
+import { SyncConfigForm, type SyncConfig, type SyncMode, type RemoteOs, type SyncTransport } from './SyncConfigForm';
 import { HostKeyDialog, type HostKeyChallenge } from './HostKeyDialog';
 import { SyncStatusPanel, type SyncStatus } from './SyncStatusPanel';
 import {
@@ -45,6 +45,8 @@ const INITIAL_CONFIG: SyncConfig = {
   enabled: false,
   name: 'codemoss-sync',
   localPath: '',
+  transport: 'ssh',
+  dockerContainer: '',
   remoteUser: '',
   remoteHost: '',
   remotePort: 22,
@@ -93,6 +95,8 @@ export default function RemoteSyncSection() {
           enabled:    !!c.enabled,
           name:        c.name        || INITIAL_CONFIG.name,
           localPath:   c.localPath   || '',
+          transport:  (c.transport as SyncTransport) || 'ssh',
+          dockerContainer: c.dockerContainer || '',
           remoteUser:  c.remoteUser  || '',
           remoteHost:  c.remoteHost  || '',
           remotePort:  c.remotePort  || 22,
@@ -173,7 +177,9 @@ export default function RemoteSyncSection() {
     setHostKey(null);
   }, [hostKey]);
 
-  const canTest = config.enabled && sdk.installed && hasPassword;
+  // Docker reaches the container via the local daemon, so no SSH password is required.
+  const needsPassword = config.transport !== 'docker';
+  const canTest = config.enabled && sdk.installed && (!needsPassword || hasPassword);
   const canStart = canTest && (status.state === 'disabled' || status.state === 'stopped'
                                 || status.state === 'error');
 
@@ -274,7 +280,7 @@ export default function RemoteSyncSection() {
                 : `✗ ${testResult.message}`}
             </div>
           )}
-          {!hasPassword && (
+          {needsPassword && !hasPassword && (
             <div className={styles.formHint}>{t('settings.remoteSync.actions.needPassword')}</div>
           )}
         </div>

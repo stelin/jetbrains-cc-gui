@@ -426,7 +426,8 @@ public class SupervisorAgentManager {
                 "编码监督者 / Code Supervisor",
                 loadPreset("code-supervisor"),
                 DEFAULT_MODEL,
-                now);
+                now,
+                false);
 
         // v3.1: second built-in persona — upstream "design / plan supervisor"
         // that consumes a raw design doc and emits the structured plan that
@@ -436,7 +437,8 @@ public class SupervisorAgentManager {
                 "方案监督者 / Design Supervisor",
                 loadPreset("design-supervisor"),
                 DEFAULT_MODEL,
-                now);
+                now,
+                false);
 
         // v1: third built-in persona — bug supervisor. Takes a bug
         // description from the user's first message (plain text / URL / both)
@@ -450,7 +452,8 @@ public class SupervisorAgentManager {
                 "缺陷监督者 / Bug Supervisor",
                 loadPreset("bug-supervisor"),
                 DEFAULT_MODEL,
-                now);
+                now,
+                true);  // 2026-06-01: MCP access for data-aware diagnose/verify
 
         // v1: fourth built-in persona — unit-test supervisor. Standalone, like
         // bug-supervisor: takes a test target (package / file / function) from
@@ -465,7 +468,8 @@ public class SupervisorAgentManager {
                 "单元测试监督者 / Unit Test Supervisor",
                 loadPreset("unit-test-supervisor"),
                 DEFAULT_MODEL,
-                now);
+                now,
+                true);  // 2026-06-01: MCP access for data-aware test self-heal
 
         // v1: fifth built-in persona — API/interface-test supervisor.
         // Standalone: takes a service target (Java/Go) from the user's first
@@ -481,7 +485,8 @@ public class SupervisorAgentManager {
                 "接口测试监督者 / API Test Supervisor",
                 loadPreset("api-test-supervisor"),
                 DEFAULT_MODEL,
-                now);
+                now,
+                true);  // 2026-06-01: MCP access for read-only DB/Redis verify
 
         // Default points at code-supervisor unless the user picked something
         // else that still exists. If the previous default referenced a removed
@@ -523,7 +528,8 @@ public class SupervisorAgentManager {
      * Insert or refresh a built-in agent in place.
      *
      * <p>Refresh triggers on any drift between the persisted agent and the
-     * preset — description, defaultLongContext, or defaultReasoning differs.
+     * preset — description, defaultLongContext, defaultReasoning, or mcpAccess
+     * differs.
      * Earlier versions used a first-line marker to detect "is the description
      * still the old copy", but that silently failed whenever a prompt rewrite
      * kept the same opening line; full-content comparison is more reliable.
@@ -535,7 +541,7 @@ public class SupervisorAgentManager {
      * @return true if the agents object was mutated (caller decides whether to write).
      */
     private boolean ensureOrRefresh(JsonObject agents, String id, String name,
-                                    String preset, String model, long ts) {
+                                    String preset, String model, long ts, boolean mcpAccess) {
         // Defensive: an empty preset (e.g. resource lookup failed at runtime)
         // would match nothing and trigger refresh every startup; skip instead.
         if (preset == null || preset.isEmpty()) {
@@ -544,7 +550,7 @@ public class SupervisorAgentManager {
         }
 
         if (!agents.has(id)) {
-            agents.add(id, buildBuiltInAgent(id, name, preset, model, ts));
+            agents.add(id, buildBuiltInAgent(id, name, preset, model, ts, mcpAccess));
             return true;
         }
 
@@ -566,13 +572,19 @@ public class SupervisorAgentManager {
         boolean reasoningMatches = existing.has("defaultReasoning")
                 && !existing.get("defaultReasoning").isJsonNull()
                 && DEFAULT_REASONING_EFFORT.equals(existing.get("defaultReasoning").getAsString());
-        if (descMatches && longCtxMatches && reasoningMatches) {
+        // 2026-06-01: mcpAccess drift — seed/refresh so built-ins pick up the
+        // flag on a plugin update (true for bug/unit-test/api-test).
+        boolean mcpAccessMatches = existing.has("mcpAccess")
+                && !existing.get("mcpAccess").isJsonNull()
+                && existing.get("mcpAccess").getAsBoolean() == mcpAccess;
+        if (descMatches && longCtxMatches && reasoningMatches && mcpAccessMatches) {
             return false;
         }
 
         existing.addProperty("description", preset);
         existing.addProperty("defaultLongContext", DEFAULT_LONG_CONTEXT);
         existing.addProperty("defaultReasoning", DEFAULT_REASONING_EFFORT);
+        existing.addProperty("mcpAccess", mcpAccess);
         existing.addProperty("updatedAt", ts);
         // Refresh model only if user hasn't customised it away from a known preset model.
         if (!existing.has("model") || existing.get("model").isJsonNull()
@@ -593,7 +605,8 @@ public class SupervisorAgentManager {
                 || "gpt-5.5".equals(m);
     }
 
-    private JsonObject buildBuiltInAgent(String id, String name, String description, String model, long ts) {
+    private JsonObject buildBuiltInAgent(String id, String name, String description, String model,
+                                         long ts, boolean mcpAccess) {
         JsonObject agent = new JsonObject();
         agent.addProperty("id", id);
         agent.addProperty("name", name);
@@ -601,10 +614,22 @@ public class SupervisorAgentManager {
         agent.addProperty("model", model);
         agent.addProperty("defaultLongContext", DEFAULT_LONG_CONTEXT);
         agent.addProperty("defaultReasoning", DEFAULT_REASONING_EFFORT);
+        agent.addProperty("mcpAccess", mcpAccess);
         agent.addProperty("builtIn", true);
         agent.addProperty("createdAt", ts);
         agent.addProperty("updatedAt", ts);
         return agent;
+    }
+
+    /**
+     * Read the {@code mcpAccess} flag from an agent config. When true (seeded on
+     * bug-supervisor / unit-test-supervisor / api-test-supervisor), the daemon
+     * attaches ALL {@code claude mcp add} servers to that supervisor session.
+     */
+    public static boolean isMcpAccess(JsonObject agent) {
+        return agent != null && agent.has("mcpAccess")
+                && !agent.get("mcpAccess").isJsonNull()
+                && agent.get("mcpAccess").getAsBoolean();
     }
 
     // v3: built-in supervisor personas live as classpath resources under

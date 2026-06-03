@@ -247,6 +247,41 @@
   font-style: italic;
 }
 
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--vscode-input-border, #3c3c3c);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.segmentBtn {
+  padding: 4px 16px;
+  font-size: 12px;
+  background: var(--vscode-input-background, #2a2a2a);
+  color: var(--vscode-descriptionForeground, #888);
+  border: none;
+  cursor: pointer;
+
+  & + & {
+    border-left: 1px solid var(--vscode-input-border, #3c3c3c);
+  }
+
+  &:hover:not(:disabled):not(.segmentBtnActive) {
+    background: var(--vscode-button-hoverBackground, #3a3a3a);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+.segmentBtnActive {
+  background: var(--vscode-button-background, #0e639c);
+  color: var(--vscode-button-foreground, #fff);
+  font-weight: 600;
+}
+
 .warnText {
   font-size: 11px;
   color: #dcdcaa;

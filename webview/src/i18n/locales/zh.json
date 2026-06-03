@@ -433,9 +433,18 @@
         "toggleOff": "已关闭",
         "toggleHint": "开启后才能编辑下方字段并启动同步",
         "needSdkWarning": "请先在上方下载 mutagen 工具，才能使用同步功能。",
+        "transport": {
+          "title": "传输方式",
+          "ssh": "SSH",
+          "docker": "Docker",
+          "sshHint": "通过 SSH 连接远端主机同步，需要主机、端口与密码。",
+          "dockerHint": "通过本地 Docker 守护进程同步到容器，无需 SSH 主机 / 端口 / 密码，例如 docker://root@f9803c0471fb/workspace/workplace_hyy"
+        },
         "name": "同步名称",
         "localPath": "本地路径",
         "remoteUser": "远端用户",
+        "dockerContainer": "容器名称 / ID",
+        "dockerUser": "容器用户",
         "remoteHost": "远端主机",
         "remotePath": "远端路径",
         "password": "SSH 密码",

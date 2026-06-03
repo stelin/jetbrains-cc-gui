@@ -337,9 +337,26 @@
   to   { transform: translateY(0);    opacity: 1; }
 }
 
+// Scrollable middle region: when the reason / question / choices exceed the
+// dialog's max-height, this area scrolls while the title and actions row stay
+// pinned. `min-height: 0` is required so the flex child may shrink below its
+// content size and actually scroll instead of overflowing the dialog.
+.escalateScroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  // Keep the scrollbar in a gutter so it doesn't crowd the choice cards.
+  padding-right: 6px;
+  margin-right: -6px;
+}
+
 .escalateTitle {
   font-size: 14px;
   font-weight: 600;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -560,6 +577,7 @@
   align-items: center;
   gap: 8px;
   margin-top: 2px;
+  flex-shrink: 0;
 }
 
 .escalateSubmit {

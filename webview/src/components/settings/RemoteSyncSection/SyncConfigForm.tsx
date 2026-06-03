@@ -6,6 +6,8 @@ export interface SyncConfig {
   enabled: boolean;
   name: string;
   localPath: string;
+  transport: SyncTransport;
+  dockerContainer: string;
   remoteUser: string;
   remoteHost: string;
   remotePort: number;
@@ -16,6 +18,12 @@ export interface SyncConfig {
 
 export type SyncMode = 'two-way-safe' | 'two-way-resolved' | 'one-way-replica';
 export type RemoteOs = 'auto' | 'windows' | 'unix';
+export type SyncTransport = 'ssh' | 'docker';
+
+const TRANSPORTS: { value: SyncTransport; labelKey: string }[] = [
+  { value: 'ssh',    labelKey: 'settings.remoteSync.form.transport.ssh' },
+  { value: 'docker', labelKey: 'settings.remoteSync.form.transport.docker' },
+];
 
 interface Props {
   config: SyncConfig;
@@ -50,6 +58,7 @@ export function SyncConfigForm({ config, hasPassword, sdkInstalled, onPersist, o
   }, [config]);
 
   const disabled = !draft.enabled;
+  const isDocker = draft.transport === 'docker';
 
   const update = useCallback(<K extends keyof SyncConfig>(key: K, value: SyncConfig[K]) => {
     setDraft((d) => ({ ...d, [key]: value }));
@@ -97,6 +106,32 @@ export function SyncConfigForm({ config, hasPassword, sdkInstalled, onPersist, o
       )}
 
       <div className={styles.formRow}>
+        <label className={styles.formLabel}>{t('settings.remoteSync.form.transport.title')}</label>
+        <div className={styles.segmented}>
+          {TRANSPORTS.map((tr) => (
+            <button
+              key={tr.value}
+              type="button"
+              className={`${styles.segmentBtn} ${draft.transport === tr.value ? styles.segmentBtnActive : ''}`}
+              disabled={disabled}
+              onClick={() => {
+                if (draft.transport === tr.value) return;
+                update('transport', tr.value);
+                persistField('transport', tr.value);
+              }}
+            >
+              {t(tr.labelKey)}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className={styles.formHint}>
+        {isDocker
+          ? t('settings.remoteSync.form.transport.dockerHint')
+          : t('settings.remoteSync.form.transport.sshHint')}
+      </div>
+
+      <div className={styles.formRow}>
         <label className={styles.formLabel}>{t('settings.remoteSync.form.name')}</label>
         <input
           type="text"
@@ -122,12 +157,32 @@ export function SyncConfigForm({ config, hasPassword, sdkInstalled, onPersist, o
         />
       </div>
 
+      {isDocker && (
+        <div className={styles.formRow}>
+          <label className={styles.formLabel}>{t('settings.remoteSync.form.dockerContainer')}</label>
+          <input
+            type="text"
+            className={styles.input}
+            placeholder="my-container  /  f9803c0471fb"
+            value={draft.dockerContainer}
+            disabled={disabled}
+            onChange={(e) => update('dockerContainer', e.target.value)}
+            onBlur={onBlurField('dockerContainer')}
+            spellCheck={false}
+          />
+        </div>
+      )}
+
       <div className={styles.formRow}>
-        <label className={styles.formLabel}>{t('settings.remoteSync.form.remoteUser')}</label>
+        <label className={styles.formLabel}>
+          {isDocker
+            ? t('settings.remoteSync.form.dockerUser')
+            : t('settings.remoteSync.form.remoteUser')}
+        </label>
         <input
           type="text"
           className={styles.input}
-          placeholder="Administrator"
+          placeholder={isDocker ? 'root（可选 / optional）' : 'Administrator'}
           value={draft.remoteUser}
           disabled={disabled}
           onChange={(e) => update('remoteUser', e.target.value)}
@@ -136,30 +191,32 @@ export function SyncConfigForm({ config, hasPassword, sdkInstalled, onPersist, o
         />
       </div>
 
-      <div className={styles.formRow}>
-        <label className={styles.formLabel}>{t('settings.remoteSync.form.remoteHost')}</label>
-        <input
-          type="text"
-          className={styles.input}
-          placeholder="172.20.1.210"
-          value={draft.remoteHost}
-          disabled={disabled}
-          onChange={(e) => update('remoteHost', e.target.value)}
-          onBlur={onBlurField('remoteHost')}
-          spellCheck={false}
-        />
-        <span className={styles.formInlineLabel}>:</span>
-        <input
-          type="number"
-          className={styles.inputNarrow}
-          min={1}
-          max={65535}
-          value={draft.remotePort}
-          disabled={disabled}
-          onChange={(e) => onPortChange(e.target.value)}
-          onBlur={onPortBlur}
-        />
-      </div>
+      {!isDocker && (
+        <div className={styles.formRow}>
+          <label className={styles.formLabel}>{t('settings.remoteSync.form.remoteHost')}</label>
+          <input
+            type="text"
+            className={styles.input}
+            placeholder="172.20.1.210"
+            value={draft.remoteHost}
+            disabled={disabled}
+            onChange={(e) => update('remoteHost', e.target.value)}
+            onBlur={onBlurField('remoteHost')}
+            spellCheck={false}
+          />
+          <span className={styles.formInlineLabel}>:</span>
+          <input
+            type="number"
+            className={styles.inputNarrow}
+            min={1}
+            max={65535}
+            value={draft.remotePort}
+            disabled={disabled}
+            onChange={(e) => onPortChange(e.target.value)}
+            onBlur={onPortBlur}
+          />
+        </div>
+      )}
 
       <div className={styles.formRow}>
         <label className={styles.formLabel}>{t('settings.remoteSync.form.remoteOs.title')}</label>
@@ -193,39 +250,41 @@ export function SyncConfigForm({ config, hasPassword, sdkInstalled, onPersist, o
         />
       </div>
 
-      <div className={styles.formRow}>
-        <label className={styles.formLabel}>{t('settings.remoteSync.form.password')}</label>
-        <input
-          type="password"
-          className={styles.input}
-          placeholder={hasPassword
-            ? (t('settings.remoteSync.form.passwordSaved') as string)
-            : ''}
-          value={password}
-          disabled={disabled}
-          onChange={(e) => setPassword(e.target.value)}
-          autoComplete="off"
-        />
-        <button
-          type="button"
-          className={styles.btn}
-          disabled={disabled || password.length === 0}
-          onClick={onPasswordSave}
-        >
-          {t('settings.remoteSync.form.passwordSave')}
-        </button>
-        {hasPassword && (
+      {!isDocker && (
+        <div className={styles.formRow}>
+          <label className={styles.formLabel}>{t('settings.remoteSync.form.password')}</label>
+          <input
+            type="password"
+            className={styles.input}
+            placeholder={hasPassword
+              ? (t('settings.remoteSync.form.passwordSaved') as string)
+              : ''}
+            value={password}
+            disabled={disabled}
+            onChange={(e) => setPassword(e.target.value)}
+            autoComplete="off"
+          />
           <button
             type="button"
             className={styles.btn}
-            disabled={disabled}
-            onClick={onPasswordClear}
+            disabled={disabled || password.length === 0}
+            onClick={onPasswordSave}
           >
-            {t('settings.remoteSync.form.passwordClear')}
+            {t('settings.remoteSync.form.passwordSave')}
           </button>
-        )}
-      </div>
-      {showPwHint && (
+          {hasPassword && (
+            <button
+              type="button"
+              className={styles.btn}
+              disabled={disabled}
+              onClick={onPasswordClear}
+            >
+              {t('settings.remoteSync.form.passwordClear')}
+            </button>
+          )}
+        </div>
+      )}
+      {!isDocker && showPwHint && (
         <div className={styles.formHint}>{t('settings.remoteSync.form.passwordHintSaved')}</div>
       )}
 

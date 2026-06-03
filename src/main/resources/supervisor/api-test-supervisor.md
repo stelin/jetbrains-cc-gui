@@ -65,13 +65,17 @@ service_spec:
 - 【框架类】或【编码规范类】非空 → 通过；后续 `fix_feedback` 改代码 inject_prompt 必须显式列出适用技能 + 硬规则原文。
 - 都为空 → 「无技能兜底模式」，记 `decisionAppend(action='no_skill_fallback', category='A', confidence='low')`。绝不因没技能就跳过修复。
 
-## 第六步：验证 MCP 自检（兼作中间件健康探针）
+## 第六步：MCP 能力自检（首轮必做一次，兼作中间件线索）
 
-读 system prompt 是否挂载了只读验证 MCP（如 `mcp__mysql-ro__*` / `mcp__redis-ro__*`）：
-- **已挂载** → 调一次最小只读探针（如 `SELECT 1` / `PING`）确认通：
-  - 通 → 记 `decisionAppend(action='verify_mcp_ready', category='A')`，Step 4 用它独立核验副作用
-  - **不通** → 同时坐实「中间件连不上」：见 §决策矩阵，DB/Redis 本身不可用属环境受限
-- **未挂载** → 验证降级：Step 4 改为"读主 AI 回报的 DB/Redis 查询结果"，记 `decisionAppend(action='verify_mcp_absent', category='A', confidence='low')`，**不阻塞**
+daemon 已把你能用的全部 MCP（用户用 `claude mcp add` 配置的，如 MySQL / Redis）挂到本会话，并在 system prompt 注入了「# 可用 MCP」段（server 名 + 连接状态 + 工具名）。首轮：
+
+1. **列全部**：把「# 可用 MCP」段原样列进 narration，让用户看到你能用哪些 MCP 及其 connected/unavailable 状态（连通性来自 daemon 握手，**不要**主动跑 `SELECT 1` / `PING` 探活）。
+2. **核对预期**：检查预期用于核验副作用的 MySQL / Redis 是否在且 connected。
+3. **预期 connected** → 记 `update_state(decisionAppend={action:'mcp_ready', category:'A', confidence:'high'})`，Step 4 用它独立核验副作用。
+4. **缺失 / unavailable** → 记 `decisionAppend({action:'mcp_absent', category:'A', confidence:'low'})`，Step 4 降级为读主 AI 回报；这同时是「中间件可能连不上」的线索（与起服务失败判别互证，见 §决策矩阵 T）。**不问人、不阻塞**。
+5. system prompt **没有**「# 可用 MCP」段（未启用接入）→ 直接降级，不自检、不报错。
+
+> 按约定 MCP 只用于查 / 核验，**不写库**（工具名见「# 可用 MCP」段，按实际 server 名调用，不要假设固定名字）。
 
 ## 叠加规则
 
@@ -205,11 +209,11 @@ report_turn_completion 上报 curlResults：
 
 1. **状态码**：有效请求应 2xx；非法请求应 4xx（校验生效）
 2. **body schema**：与接口清单 `response` 对齐（关键字段在、类型对）
-3. **副作用（反幻觉硬规则）**：对 `side_effects.db` / `redis`，**亲自调只读验证 MCP** 查实际落库：
-   - DB：`mcp__mysql-ro__*` 跑 `SELECT ...`（只读）确认行/字段
-   - Redis：`mcp__redis-ro__*` 跑 `GET/HGETALL/EXISTS` 确认 key
+3. **副作用（反幻觉硬规则）**：对 `side_effects.db` / `redis`，**亲自调 MCP** 查实际落库（工具名取自「# 可用 MCP」段的实际 server 名）：
+   - DB：用 MySQL MCP 跑 `SELECT ...`（只查，不写）确认行/字段
+   - Redis：用 Redis MCP 跑 `GET/HGETALL/EXISTS` 确认 key
    - **MQ**：默认成功，不核验
-   - 验证 MCP 未挂载（第六步降级）→ 改为核对主 AI 回报里的查询结果，记 `decisionAppend(confidence='low')`
+   - MCP 未挂载 / 不可用（第六步降级）→ 改为核对主 AI 回报里的查询结果，记 `decisionAppend(confidence='low')`
 
 ## 4.2 分诊与自愈
 

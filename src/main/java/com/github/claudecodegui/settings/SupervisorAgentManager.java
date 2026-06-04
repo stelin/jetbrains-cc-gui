@@ -50,6 +50,15 @@ public class SupervisorAgentManager {
     public static final int MIN_AUTO_COMPACT_THRESHOLD = 50;
     public static final int MAX_AUTO_COMPACT_THRESHOLD = 95;
 
+    /**
+     * Workflow concurrency ceiling (coding-plan §14.1 / DN4). Default 2, hard
+     * upper bound 3 — the orchestration engine clamps a workflow's requested
+     * concurrency into {@code [1, getWorkflowMaxConcurrency()]}.
+     */
+    public static final int DEFAULT_WORKFLOW_MAX_CONCURRENCY = 2;
+    public static final int MIN_WORKFLOW_MAX_CONCURRENCY = 1;
+    public static final int MAX_WORKFLOW_MAX_CONCURRENCY = 3;
+
     private final Gson gson;
     private final ConfigPathManager pathManager;
 
@@ -277,6 +286,35 @@ public class SupervisorAgentManager {
         config.addProperty("autoCompactThreshold", threshold);
         writeConfig(config);
         LOG.info("[SupervisorAgentManager] Set autoCompactThreshold=" + threshold);
+    }
+
+    /**
+     * Read the workflow concurrency ceiling (coding-plan §14.1 / DN4). Always
+     * clamped to {@code [MIN, MAX]} (1..3); returns {@link #DEFAULT_WORKFLOW_MAX_CONCURRENCY}
+     * when unset or invalid.
+     */
+    public int getWorkflowMaxConcurrency() throws IOException {
+        JsonObject config = readConfig();
+        if (config.has("workflowMaxConcurrency") && !config.get("workflowMaxConcurrency").isJsonNull()) {
+            try {
+                int v = config.get("workflowMaxConcurrency").getAsInt();
+                return Math.max(MIN_WORKFLOW_MAX_CONCURRENCY, Math.min(v, MAX_WORKFLOW_MAX_CONCURRENCY));
+            } catch (Exception ignored) { /* fall through to default */ }
+        }
+        return DEFAULT_WORKFLOW_MAX_CONCURRENCY;
+    }
+
+    /** Persist the workflow concurrency ceiling. Out-of-range values throw. */
+    public void setWorkflowMaxConcurrency(int value) throws IOException {
+        if (value < MIN_WORKFLOW_MAX_CONCURRENCY || value > MAX_WORKFLOW_MAX_CONCURRENCY) {
+            throw new IllegalArgumentException(
+                "workflowMaxConcurrency must be between "
+                + MIN_WORKFLOW_MAX_CONCURRENCY + " and " + MAX_WORKFLOW_MAX_CONCURRENCY);
+        }
+        JsonObject config = readConfig();
+        config.addProperty("workflowMaxConcurrency", value);
+        writeConfig(config);
+        LOG.info("[SupervisorAgentManager] Set workflowMaxConcurrency=" + value);
     }
 
     /**

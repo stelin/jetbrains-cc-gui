@@ -678,7 +678,7 @@ const App = () => {
 
   // ── Render ──
   return (
-    <WorkflowProvider>
+    <WorkflowProvider addToast={addToast}>
     <PairProvider>
       <PairAppBridge
         setSettingsInitialTab={setSettingsInitialTab}

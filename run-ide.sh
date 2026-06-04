@@ -6,4 +6,4 @@
 cd "$(dirname "$0")" || exit 1
 
 echo "==> 正在启动沙盒 IDE (./gradlew clean runIde) ..."
-exec ./gradlew runIde "$@"
+exec ./gradlew clean runIde "$@"

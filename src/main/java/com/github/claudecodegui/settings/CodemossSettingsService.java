@@ -834,6 +834,20 @@ public class CodemossSettingsService {
         return supervisorAgentManager;
     }
 
+    /**
+     * Workflow concurrency ceiling (coding-plan §14.1 / DN4). Stored in the
+     * supervisor config family ({@code supervisor-agents.json}); clamped to
+     * {@code [1,3]} with default 2. Never throws — falls back to the default on
+     * any read error so the orchestration engine can always resolve a ceiling.
+     */
+    public int getWorkflowMaxConcurrency() {
+        try {
+            return supervisorAgentManager.getWorkflowMaxConcurrency();
+        } catch (Exception e) {
+            return SupervisorAgentManager.DEFAULT_WORKFLOW_MAX_CONCURRENCY;
+        }
+    }
+
     // ==================== Prompts Management ====================
 
     /**

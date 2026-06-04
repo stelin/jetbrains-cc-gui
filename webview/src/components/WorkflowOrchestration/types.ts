@@ -43,7 +43,15 @@ export interface WorkflowDefinition {
   id: string;
   name: string;
   nodes: WorkflowNode[];
+  /** Per-workflow concurrency (1..capabilities.maxConcurrency). Default 2. */
+  maxConcurrency?: number;
   updatedAt?: number;
+}
+
+/** Engine capabilities pushed by Java via window.onWorkflowCapabilities. */
+export interface WorkflowCapabilities {
+  mode: string;          // 'local' | 'remote'
+  maxConcurrency: number; // hard ceiling (≤3)
 }
 
 export interface NodeRuntime {

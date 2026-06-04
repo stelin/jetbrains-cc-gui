@@ -51,8 +51,19 @@
   background: var(--accent-primary, #007fd4);
   color: #fff; border-color: transparent;
 }
+.dirtyBadge {
+  font-size: 10px; padding: 2px 8px; border-radius: 10px;
+  color: var(--color-warning, #e2c08d);
+  border: 1px solid var(--color-warning, #e2c08d);
+  background: rgba(226, 192, 141, 0.08);
+}
 
 .headerActions { display: flex; align-items: center; gap: 8px; }
+.concurrency {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--text-tertiary, #858585);
+}
+.concurrencyValue { color: var(--text-primary, #cccccc); font-weight: 600; }
 
 .pageBody {
   display: grid;
@@ -115,6 +126,13 @@
 .runningDot {
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--accent-primary, #007fd4); animation: wfpulse 1.4s ease-in-out infinite;
+}
+.runningBadge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 1px 7px 1px 5px; border-radius: 9px;
+  color: #fff; background: var(--accent-primary, #007fd4);
+  font-size: 9px; line-height: 1.5;
+  .runningDot { background: #fff; }
 }
 .listDeleteBtn {
   opacity: 0; background: transparent; border: none; cursor: pointer;

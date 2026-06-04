@@ -139,6 +139,16 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
         daemonCoordinator.setControlMessageHandler(handler);
     }
 
+    /**
+     * Inject a daemon lifecycle listener (ready / died), applied to the current
+     * daemon bridge and remembered for future ones. Used by DN9 (§16.5): the
+     * supervisor's dedicated bridge funnels its workflow node to WAITING_HUMAN
+     * when its daemon dies (RemoteBridge gateway_error/SSE-close or local exit).
+     */
+    public void setLifecycleListener(IBridge.DaemonLifecycleListener listener) {
+        daemonCoordinator.setLifecycleListener(listener);
+    }
+
     @Override
     public void cleanupAllProcesses() {
         shutdownDaemon();

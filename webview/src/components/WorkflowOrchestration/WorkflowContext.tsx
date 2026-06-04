@@ -7,7 +7,10 @@ import {
   useRef,
   useState,
 } from 'react';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { sendBridgeEvent } from '../../utils/bridge';
+import { hasCycle } from './layout';
 import type {
   SupervisorAgent,
   SupervisorAgentListPayload,
@@ -17,6 +20,7 @@ import {
   type WorkflowExecution,
   type WorkflowNode,
   type WorkflowEscalation,
+  type WorkflowCapabilities,
   createWorkflow,
   createNode,
   uid,
@@ -41,6 +45,7 @@ interface WorkflowContextValue {
   execution: WorkflowExecution | null;
   agents: SupervisorAgent[];
   escalations: WorkflowEscalation[];
+  capabilities: WorkflowCapabilities;
   // selection / editing (local draft)
   selectWorkflow(id: string | null): void;
   newWorkflow(): void;
@@ -49,10 +54,13 @@ interface WorkflowContextValue {
   removeNode(name: string): void;
   addNode(): WorkflowNode;
   // persistence / run (→ Java)
-  saveDraft(): void;
+  /** Validate + persist the draft. Returns false (and toasts why) when invalid. */
+  saveDraft(): boolean;
   deleteWorkflow(id: string): void;
   runWorkflow(id: string): void;
   abortWorkflow(): void;
+  /** Re-pull authoritative state from Java (definitions + capabilities + live run). */
+  refreshState(): void;
   jumpToNode(name: string): void;
   openReport(name: string): void;
   dismissEscalation(key: string): void;
@@ -60,6 +68,10 @@ interface WorkflowContextValue {
   agentName(id: string): string;
   isRunning: boolean;
   runningOf(id: string): boolean;
+  /** Draft exists as a persisted definition (in the left list). */
+  isSaved: boolean;
+  /** Draft has unsaved edits vs its persisted definition (or is brand new). */
+  isDirty: boolean;
 }
 
 const WorkflowContext = createContext<WorkflowContextValue | null>(null);
@@ -95,16 +107,141 @@ function seedExample(): WorkflowDefinition {
   return wf;
 }
 
-export function WorkflowProvider({ children }: { children: React.ReactNode }) {
+type ToastType = 'info' | 'success' | 'warning' | 'error';
+type AddToast = (message: string, type?: ToastType) => void;
+
+/**
+ * Full-definition validation gate (run before persisting). The user's rule:
+ * a workflow only saves when every node is complete. Returns the first problem
+ * so the toast can point at the exact node.
+ */
+function validateWorkflowDef(def: WorkflowDefinition, t: TFunction): { ok: boolean; error?: string } {
+  if (!def.name || !def.name.trim()) {
+    return { ok: false, error: t('workflow.validate.nameRequired', '请填写工作流名称') };
+  }
+  if (!def.nodes || def.nodes.length === 0) {
+    return { ok: false, error: t('workflow.validate.noNodes', '工作流至少需要一个节点') };
+  }
+  const names = new Set<string>();
+  for (const n of def.nodes) {
+    if (!n.name || !n.name.trim()) {
+      return { ok: false, error: t('workflow.validate.nodeNameRequired', '存在未命名的节点') };
+    }
+    if (names.has(n.name)) {
+      return { ok: false, error: t('workflow.validate.nodeNameDup', '存在重名节点：{{name}}', { name: n.name }) };
+    }
+    names.add(n.name);
+  }
+  for (const n of def.nodes) {
+    if (!n.supervisorId) {
+      return { ok: false, error: t('workflow.validate.supervisorRequired', '节点「{{name}}」未选择监督者', { name: n.name }) };
+    }
+    const hasPlan = (n.plan && n.plan.trim()) || (n.planPath && n.planPath.trim());
+    if (!hasPlan) {
+      return { ok: false, error: t('workflow.validate.planRequired', '节点「{{name}}」缺少任务内容', { name: n.name }) };
+    }
+    for (const dep of n.dependsOn || []) {
+      if (!names.has(dep)) {
+        return { ok: false, error: t('workflow.validate.depMissing', '节点「{{name}}」依赖了不存在的节点：{{dep}}', { name: n.name, dep }) };
+      }
+    }
+  }
+  if (hasCycle(def.nodes)) {
+    return { ok: false, error: t('workflow.validate.cycle', '依赖关系中存在环，请检查连线') };
+  }
+  return { ok: true };
+}
+
+/**
+ * Order-insensitive canonical form for dirty-checking. Java (Gson) and the
+ * front-end emit object keys in different orders and may add/omit optional
+ * fields, so a raw JSON.stringify would false-positive "dirty" after a backend
+ * echo. We project only the persisted fields, in a fixed shape.
+ */
+function canonDef(d: WorkflowDefinition): string {
+  const nodes = [...(d.nodes || [])]
+    .map((n) => ({
+      name: n.name,
+      supervisorId: n.supervisorId || '',
+      plan: n.plan || '',
+      planPath: n.planPath || '',
+      model: n.model || '',
+      longContext: !!n.longContext,
+      reasoning: n.reasoning || '',
+      dependsOn: [...(n.dependsOn || [])].sort(),
+      posX: n.posX ?? null,
+      posY: n.posY ?? null,
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  return JSON.stringify({ name: d.name || '', maxConcurrency: d.maxConcurrency ?? 2, nodes });
+}
+
+function defsEqual(a: WorkflowDefinition, b: WorkflowDefinition): boolean {
+  return canonDef(a) === canonDef(b);
+}
+
+/**
+ * The whole editor uses node.name as the node's identity (canvas layout, edges,
+ * React keys, tab name). Duplicate names collapse onto one another — a node
+ * goes invisible and the workflow can't save. This self-heals a definition with
+ * dup names by suffixing the later occurrences ("X" → "X2", "X3"). Upstream
+ * dependsOn references keep pointing at the first occurrence, which is the
+ * sensible default. Returns whether anything changed so the caller can warn.
+ */
+function dedupeNodeNames(def: WorkflowDefinition): { def: WorkflowDefinition; changed: boolean } {
+  const seen = new Set<string>();
+  let changed = false;
+  const nodes = (def.nodes || []).map((n) => {
+    let name = n.name;
+    if (seen.has(name)) {
+      let i = 2;
+      while (seen.has(`${n.name}${i}`)) i += 1;
+      name = `${n.name}${i}`;
+      changed = true;
+    }
+    seen.add(name);
+    return name === n.name ? n : { ...n, name };
+  });
+  return { def: changed ? { ...def, nodes } : def, changed };
+}
+
+export function WorkflowProvider({ children, addToast }: { children: React.ReactNode; addToast?: AddToast }) {
+  const { t } = useTranslation();
   const [definitions, setDefinitions] = useState<WorkflowDefinition[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draft, setDraft] = useState<WorkflowDefinition | null>(null);
   const [execution, setExecution] = useState<WorkflowExecution | null>(null);
   const [agents, setAgents] = useState<SupervisorAgent[]>([]);
   const [escalations, setEscalations] = useState<WorkflowEscalation[]>([]);
+  const [capabilities, setCapabilities] = useState<WorkflowCapabilities>({ mode: 'local', maxConcurrency: 2 });
 
   const definitionsRef = useRef(definitions);
   definitionsRef.current = definitions;
+
+  // Latest-value refs so the once-mounted bridge callbacks always use current
+  // values without re-subscribing.
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const addToastRef = useRef(addToast);
+  addToastRef.current = addToast;
+  const tRef = useRef(t);
+  tRef.current = t;
+
+  const notify = useCallback((message: string, type: ToastType = 'info') => {
+    addToastRef.current?.(message, type);
+  }, []);
+
+  /** Send a workflow_* event to Java, logging the round-trip for diagnostics. */
+  const wfSend = useCallback((event: string, content = '') => {
+    // eslint-disable-next-line no-console
+    console.info('[wf→java]', event, content);
+    const ok = sendBridgeEvent(event, content);
+    if (!ok) {
+      // eslint-disable-next-line no-console
+      console.warn('[wf→java] not delivered (bridge unavailable):', event);
+    }
+    return ok;
+  }, []);
 
   // ── initial load (localStorage + seed) ──────────────────────────────
   useEffect(() => {
@@ -116,8 +253,14 @@ export function WorkflowProvider({ children }: { children: React.ReactNode }) {
     }
     setDefinitions(defs);
     setSelectedId(defs[0]?.id ?? null);
-    setDraft(defs[0] ? structuredCloneSafe(defs[0]) : null);
-  }, []);
+    if (defs[0]) {
+      const { def, changed } = dedupeNodeNames(structuredCloneSafe(defs[0]));
+      setDraft(def);
+      if (changed) notify(tRef.current('workflow.dedup', '检测到重名节点，已自动重命名，请检查后保存'), 'warning');
+    } else {
+      setDraft(null);
+    }
+  }, [notify]);
 
   // ── Java → JS callbacks (chained; backend authoritative when present) ─
   useEffect(() => {
@@ -125,6 +268,7 @@ export function WorkflowProvider({ children }: { children: React.ReactNode }) {
     const prevExec = window.onWorkflowExecutionUpdate;
     const prevEsc = window.onWorkflowEscalation;
     const prevOp = window.onWorkflowOperationResult;
+    const prevCaps = window.onWorkflowCapabilities;
     const prevAgents = window.updateSupervisorAgents;
 
     window.onWorkflowDefinitions = (json: string) => {
@@ -139,6 +283,8 @@ export function WorkflowProvider({ children }: { children: React.ReactNode }) {
     };
     window.onWorkflowExecutionUpdate = (json: string) => {
       prevExec?.(json);
+      // eslint-disable-next-line no-console
+      console.info('[wf←java] onWorkflowExecutionUpdate', json);
       try {
         setExecution(JSON.parse(json) as WorkflowExecution);
       } catch { /* ignore */ }
@@ -152,7 +298,29 @@ export function WorkflowProvider({ children }: { children: React.ReactNode }) {
     };
     window.onWorkflowOperationResult = (json: string) => {
       prevOp?.(json);
-      // Result handling is best-effort; failures surface via the run/save UI.
+      // eslint-disable-next-line no-console
+      console.info('[wf←java] onWorkflowOperationResult', json);
+      // Surface backend results so run/save/delete are never a black box.
+      // (Previously a no-op — validation/lock failures were swallowed.)
+      try {
+        const r = JSON.parse(json) as { success?: boolean; operation?: string; error?: string };
+        const tt = tRef.current;
+        if (r.success === false) {
+          notify(r.error || tt('workflow.opFailed', '操作失败'), 'error');
+        } else if (r.success === true && r.operation === 'run') {
+          notify(tt('workflow.runStarted', '工作流已启动'), 'success');
+        }
+        // save/delete success is toasted locally (avoid duplicate toasts).
+      } catch { /* ignore */ }
+    };
+    window.onWorkflowCapabilities = (json: string) => {
+      prevCaps?.(json);
+      // eslint-disable-next-line no-console
+      console.info('[wf←java] onWorkflowCapabilities', json);
+      try {
+        const c = JSON.parse(json) as WorkflowCapabilities;
+        if (c && typeof c.maxConcurrency === 'number') setCapabilities({ mode: c.mode ?? 'local', maxConcurrency: c.maxConcurrency });
+      } catch { /* ignore */ }
     };
     window.updateSupervisorAgents = (json: string) => {
       prevAgents?.(json);
@@ -162,8 +330,8 @@ export function WorkflowProvider({ children }: { children: React.ReactNode }) {
       } catch { /* ignore */ }
     };
 
-    // Ask Java for current state (no-op until backend exists).
-    sendBridgeEvent('workflow_list');
+    // Ask Java for current state (authoritative definitions + capabilities).
+    wfSend('workflow_list');
     if (window.sendToJava) window.sendToJava('get_supervisor_agents:');
 
     return () => {
@@ -171,6 +339,7 @@ export function WorkflowProvider({ children }: { children: React.ReactNode }) {
       window.onWorkflowExecutionUpdate = prevExec;
       window.onWorkflowEscalation = prevEsc;
       window.onWorkflowOperationResult = prevOp;
+      window.onWorkflowCapabilities = prevCaps;
       window.updateSupervisorAgents = prevAgents;
     };
   }, []);
@@ -178,9 +347,12 @@ export function WorkflowProvider({ children }: { children: React.ReactNode }) {
   // ── selection / draft editing ───────────────────────────────────────
   const selectWorkflow = useCallback((id: string | null) => {
     setSelectedId(id);
-    const def = definitionsRef.current.find((d) => d.id === id) ?? null;
-    setDraft(def ? structuredCloneSafe(def) : null);
-  }, []);
+    const found = definitionsRef.current.find((d) => d.id === id) ?? null;
+    if (!found) { setDraft(null); return; }
+    const { def, changed } = dedupeNodeNames(structuredCloneSafe(found));
+    setDraft(def);
+    if (changed) notify(tRef.current('workflow.dedup', '检测到重名节点，已自动重命名，请检查后保存'), 'warning');
+  }, [notify]);
 
   const newWorkflow = useCallback(() => {
     const wf = createWorkflow('未命名工作流');
@@ -234,21 +406,28 @@ export function WorkflowProvider({ children }: { children: React.ReactNode }) {
   }, [draft]);
 
   // ── persistence / run ───────────────────────────────────────────────
-  const saveDraft = useCallback(() => {
-    setDraft((d) => {
-      if (!d) return d;
-      const saved = { ...d, updatedAt: Date.now() };
-      setDefinitions((prev) => {
-        const exists = prev.some((x) => x.id === saved.id);
-        const next = exists ? prev.map((x) => (x.id === saved.id ? saved : x)) : [...prev, saved];
-        persistDefinitions(next);
-        return next;
-      });
-      setSelectedId(saved.id);
-      sendBridgeEvent('workflow_save', JSON.stringify(saved));
-      return saved;
+  const saveDraft = useCallback((): boolean => {
+    const d = draftRef.current;
+    if (!d) return false;
+    // Gate: a workflow only saves when the whole definition validates.
+    const v = validateWorkflowDef(d, tRef.current);
+    if (!v.ok) {
+      notify(v.error || tRef.current('workflow.opFailed', '保存失败'), 'warning');
+      return false;
+    }
+    const saved: WorkflowDefinition = { ...d, maxConcurrency: d.maxConcurrency ?? 2, updatedAt: Date.now() };
+    setDraft(saved);
+    setDefinitions((prev) => {
+      const exists = prev.some((x) => x.id === saved.id);
+      const next = exists ? prev.map((x) => (x.id === saved.id ? saved : x)) : [...prev, saved];
+      persistDefinitions(next);
+      return next;
     });
-  }, []);
+    setSelectedId(saved.id);
+    wfSend('workflow_save', JSON.stringify(saved));
+    notify(tRef.current('workflow.saved', '已保存'), 'success');
+    return true;
+  }, [notify, wfSend]);
 
   const deleteWorkflow = useCallback((id: string) => {
     setDefinitions((prev) => {
@@ -256,7 +435,8 @@ export function WorkflowProvider({ children }: { children: React.ReactNode }) {
       persistDefinitions(next);
       return next;
     });
-    sendBridgeEvent('workflow_delete', JSON.stringify({ id }));
+    wfSend('workflow_delete', JSON.stringify({ id }));
+    notify(tRef.current('workflow.deleted', '已删除'), 'success');
     setSelectedId((cur) => {
       if (cur !== id) return cur;
       const remaining = definitionsRef.current.filter((x) => x.id !== id);
@@ -264,23 +444,33 @@ export function WorkflowProvider({ children }: { children: React.ReactNode }) {
       setDraft(nextId ? structuredCloneSafe(remaining[0]) : null);
       return nextId;
     });
-  }, []);
+  }, [wfSend, notify]);
 
   const runWorkflow = useCallback((id: string) => {
-    sendBridgeEvent('workflow_run', JSON.stringify({ id }));
-  }, []);
+    wfSend('workflow_run', JSON.stringify({ id }));
+  }, [wfSend]);
 
   const abortWorkflow = useCallback(() => {
-    sendBridgeEvent('workflow_abort', JSON.stringify({}));
-  }, []);
+    wfSend('workflow_abort', JSON.stringify({}));
+  }, [wfSend]);
+
+  // Re-pull the authoritative snapshot from Java. The provider's one-shot mount
+  // request can miss the live run (bridge not ready at app start, or the run
+  // began in another tab/webview), leaving the page on "Editing" while a
+  // workflow is actually RUNNING. requestList() re-pushes definitions +
+  // capabilities + the running execution, so callers (e.g. opening the workflow
+  // page) get a fresh state.
+  const refreshState = useCallback(() => {
+    wfSend('workflow_list');
+  }, [wfSend]);
 
   const jumpToNode = useCallback((name: string) => {
-    sendBridgeEvent('workflow_jump_node', JSON.stringify({ nodeName: name }));
-  }, []);
+    wfSend('workflow_jump_node', JSON.stringify({ nodeName: name }));
+  }, [wfSend]);
 
   const openReport = useCallback((name: string) => {
-    sendBridgeEvent('workflow_open_report', JSON.stringify({ nodeName: name }));
-  }, []);
+    wfSend('workflow_open_report', JSON.stringify({ nodeName: name }));
+  }, [wfSend]);
 
   const dismissEscalation = useCallback((key: string) => {
     setEscalations((q) => q.filter((e) => e.key !== key));
@@ -297,16 +487,24 @@ export function WorkflowProvider({ children }: { children: React.ReactNode }) {
     [isRunning, execution],
   );
 
+  // Saved = draft matches a persisted definition; dirty = brand-new or edited.
+  const savedDef = useMemo(
+    () => (draft ? definitions.find((d) => d.id === draft.id) ?? null : null),
+    [draft, definitions],
+  );
+  const isSaved = !!savedDef;
+  const isDirty = !!draft && (!savedDef || !defsEqual(draft, savedDef));
+
   const value = useMemo<WorkflowContextValue>(() => ({
-    definitions, selectedId, draft, execution, agents, escalations,
+    definitions, selectedId, draft, execution, agents, escalations, capabilities,
     selectWorkflow, newWorkflow, updateDraft, upsertNode, removeNode, addNode,
-    saveDraft, deleteWorkflow, runWorkflow, abortWorkflow, jumpToNode, openReport,
-    dismissEscalation, agentName, isRunning, runningOf,
+    saveDraft, deleteWorkflow, runWorkflow, abortWorkflow, refreshState, jumpToNode, openReport,
+    dismissEscalation, agentName, isRunning, runningOf, isSaved, isDirty,
   }), [
-    definitions, selectedId, draft, execution, agents, escalations,
+    definitions, selectedId, draft, execution, agents, escalations, capabilities,
     selectWorkflow, newWorkflow, updateDraft, upsertNode, removeNode, addNode,
-    saveDraft, deleteWorkflow, runWorkflow, abortWorkflow, jumpToNode, openReport,
-    dismissEscalation, agentName, isRunning, runningOf,
+    saveDraft, deleteWorkflow, runWorkflow, abortWorkflow, refreshState, jumpToNode, openReport,
+    dismissEscalation, agentName, isRunning, runningOf, isSaved, isDirty,
   ]);
 
   return <WorkflowContext.Provider value={value}>{children}</WorkflowContext.Provider>;

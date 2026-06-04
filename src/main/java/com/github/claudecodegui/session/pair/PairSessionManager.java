@@ -10,6 +10,7 @@ import com.github.claudecodegui.session.pair.rotation.MainAIRotationCoordinator;
 import com.github.claudecodegui.session.pair.rotation.RotationCoordinator;
 import com.github.claudecodegui.session.pair.rotation.RotationDecider;
 import com.github.claudecodegui.session.pair.rotation.RotationTriggers;
+import com.github.claudecodegui.session.pair.workflow.SupervisorWorkflowManager;
 import com.github.claudecodegui.settings.CodemossSettingsService;
 import com.google.gson.JsonObject;
 import com.intellij.openapi.Disposable;
@@ -299,6 +300,27 @@ public final class PairSessionManager implements Disposable {
         // (mainAi.* rotation commands stay on the main-AI daemon).
         ClaudeSDKBridge supervisorSdkBridge = new ClaudeSDKBridge(project);
         SupervisorBridge bridge = new SupervisorBridge(supervisorSdkBridge, pairId, params.agentId);
+
+        // DN9 (§16.5): if this supervisor's dedicated daemon dies, funnel its
+        // workflow node (if any) to WAITING_HUMAN so one dead container doesn't
+        // stall the whole flow. onNodeDaemonDown is a no-op for non-workflow
+        // pairs (windowId/pairId resolve to no node), so this is safe for every
+        // pair. Registered before startWithHandoff — the coordinator remembers
+        // it and applies it to the daemon bridge on creation.
+        final String dn9WindowId = params.ownerWindowId;
+        final String dn9PairId = pairId;
+        bridge.setDaemonLifecycleListener(
+                new com.github.claudecodegui.provider.common.IBridge.DaemonLifecycleListener() {
+                    @Override public void onDaemonReady() { /* no workflow action on ready */ }
+                    @Override public void onDaemonDied() {
+                        try {
+                            SupervisorWorkflowManager.getInstance(project)
+                                    .onNodeDaemonDown(dn9WindowId, dn9PairId, "远程 daemon 崩溃");
+                        } catch (Exception e) {
+                            LOG.warn("[PairSessionManager] DN9 onNodeDaemonDown dispatch failed: " + e.getMessage());
+                        }
+                    }
+                });
         PairSession session = new PairSession(
                 pairId,
                 params.mainSessionId,

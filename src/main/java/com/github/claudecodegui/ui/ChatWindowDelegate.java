@@ -25,6 +25,7 @@ import com.github.claudecodegui.handler.SettingsHandler;
 import com.github.claudecodegui.handler.SkillHandler;
 import com.github.claudecodegui.handler.TabHandler;
 import com.github.claudecodegui.handler.WindowEventHandler;
+import com.github.claudecodegui.handler.WorkflowHandler;
 import com.github.claudecodegui.handler.file.FileExportHandler;
 import com.github.claudecodegui.handler.file.FileHandler;
 import com.github.claudecodegui.handler.file.UndoFileHandler;
@@ -118,9 +119,27 @@ public class ChatWindowDelegate {
      * still live. Set during {@link #initializeHandlers()}.
      */
     private PairHandler pairHandler;
+    /**
+     * Kept so {@link #dispose()} can unbind this tab's workflow broadcast sink
+     * from {@code SupervisorWorkflowManager} before {@code MessageDispatcher.clear()}
+     * runs on tab close — otherwise the engine would push to a disposed browser
+     * (coding-plan §9 / §12.3). Set during {@link #initializeHandlers()}.
+     */
+    private WorkflowHandler workflowHandler;
 
     public ChatWindowDelegate(DelegateHost host) {
         this.host = host;
+    }
+
+    /**
+     * This tab's Pair lifecycle handler. Exposed so a workflow node launch can
+     * start the node's supervisor through the node tab's own
+     * {@link PairHandler#startPairWired} — binding the node's supervisor
+     * transport to this tab's webview/context (see IdeNodeLauncher). Non-null
+     * after {@link #initializeHandlers()} (run in the ClaudeChatWindow ctor).
+     */
+    public PairHandler getPairHandler() {
+        return pairHandler;
     }
 
     public void loadNodePathFromSettings() {
@@ -289,6 +308,8 @@ public class ChatWindowDelegate {
         messageDispatcher.registerHandler(new SupervisorAgentHandler(handlerContext));
         this.pairHandler = new PairHandler(handlerContext);
         messageDispatcher.registerHandler(this.pairHandler);
+        this.workflowHandler = new WorkflowHandler(handlerContext);
+        messageDispatcher.registerHandler(this.workflowHandler);
         messageDispatcher.registerHandler(new PromptHandler(handlerContext));
         messageDispatcher.registerHandler(new TabHandler(handlerContext));
         messageDispatcher.registerHandler(new RewindHandler(handlerContext));
@@ -557,6 +578,14 @@ public class ChatWindowDelegate {
     }
 
     public void dispose() {
+        // Unbind the workflow broadcast sink BEFORE MessageDispatcher.clear()
+        // (called later in ClaudeChatWindow.dispose) so the engine stops pushing
+        // to this tab's soon-to-be-disposed browser (coding-plan §9 / §12.3).
+        if (workflowHandler != null) {
+            try { workflowHandler.dispose(); }
+            catch (Exception e) { LOG.warn("[Workflow] handler dispose failed: " + e.getMessage()); }
+            workflowHandler = null;
+        }
         if (statusResetTask != null && !statusResetTask.isDone()) {
             statusResetTask.cancel(false);
             statusResetTask = null;

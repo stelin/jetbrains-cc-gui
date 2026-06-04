@@ -30,7 +30,11 @@ export default function WorkflowList({
             <div className={styles.listItemMain}>
               <div className={styles.listItemName}>{def.name}</div>
               <div className={styles.listItemMeta}>
-                {runningId === def.id && <span className={styles.runningDot} />}
+                {runningId === def.id && (
+                  <span className={styles.runningBadge}>
+                    <span className={styles.runningDot} /> {t('workflow.state.running', 'Running')}
+                  </span>
+                )}
                 {t('workflow.nodeCount', '{{n}} nodes', { n: def.nodes.length })}
               </div>
             </div>

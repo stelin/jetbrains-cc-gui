@@ -257,6 +257,17 @@ public class SupervisorBridge {
         this.preCompactHandler = handler;
     }
 
+    /**
+     * DN9 (§16.5): subscribe to this supervisor's dedicated daemon lifecycle
+     * (ready / died) by passing through to its {@link ClaudeSDKBridge}. The
+     * workflow engine registers an {@code onDaemonDied} handler that funnels the
+     * owning node to WAITING_HUMAN. No-op effect for non-workflow pairs.
+     */
+    public void setDaemonLifecycleListener(
+            com.github.claudecodegui.provider.common.IBridge.DaemonLifecycleListener listener) {
+        sdkBridge.setLifecycleListener(listener);
+    }
+
     private void bufferMessage(JsonObject parsed) {
         synchronized (messageBuffer) {
             if (messageBuffer.size() >= MSG_BUFFER_CAP) {

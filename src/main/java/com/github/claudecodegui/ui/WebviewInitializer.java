@@ -98,6 +98,30 @@ public class WebviewInitializer {
     }
 
     /**
+     * Kick the OSR surface to paint when the browser lives in an already-showing
+     * container (workflow cockpit / detached fresh window) — the
+     * {@code SHOWING_CHANGED} hierarchy listener can't catch the synchronous
+     * add-while-showing. Done in TWO EDT cycles on purpose: cycle 1 runs
+     * {@code revalidate()} to lay out + size the fresh OSR view; cycle 2 (after
+     * layout settled) issues the CEF repaint — kicking before the view is sized
+     * paints into a 0×0 surface and leaves it black.
+     */
+    private static void kickOsrPaint(WebviewHost host) {
+        ApplicationManager.getApplication().invokeLater(() -> {
+            JBCefBrowser b = host.getBrowser();
+            JComponent c = b != null ? b.getComponent() : null;
+            if (host.isDisposed() || c == null || !c.isShowing()) return;
+            c.revalidate();   // lay out → size the OSR view
+            c.repaint();
+            ApplicationManager.getApplication().invokeLater(() -> {
+                if (host.isDisposed() || !c.isShowing()) return;
+                forceCefRepaint(b.getCefBrowser());   // paint, now that the view has a size
+                c.repaint();
+            });
+        });
+    }
+
+    /**
      * Create and configure UI components (browser, JS bridge, drag-and-drop).
      */
     public void createUIComponents() {
@@ -318,6 +342,12 @@ public class WebviewInitializer {
                     cefBrowser.executeJavaScript(languageConfigInjection, cefBrowser.getURL(), 0);
                     LOG.info("[LanguageSync] Language config injected into frontend");
 
+                    // Cockpit / detached fresh window: kick the OSR surface once
+                    // the page is actually loaded. The on-add showing-kick can
+                    // fire before load completes; this guarantees a paint with
+                    // real content. Gated on isShowing → no-op for unselected tabs.
+                    kickOsrPaint(host);
+
                     LOG.debug("onLoadEnd completed, waiting for frontend_ready signal");
                 }
             }, browser.getCefBrowser());
@@ -397,6 +427,19 @@ public class WebviewInitializer {
                     browserComponent.repaint();
                 });
             });
+
+            // 2026-06 (workflow cockpit / detached fresh windows): when the
+            // browser is added to a container that is ALREADY showing (a node's
+            // floating WorkflowNodeFrame, visible before the chat window is
+            // attached), the hidden→showing transition fires SYNCHRONOUSLY during
+            // the add() above — i.e. BEFORE the hierarchy listener was registered
+            // — so the OSR repaint-kick is missed and the surface stays black.
+            // (A tool-window tab isn't showing at creation, so its listener still
+            // catches the later select→show.) Kick the initial paint explicitly
+            // here for the already-showing case; a no-op for the tab path.
+            if (browserComponent.isShowing()) {
+                kickOsrPaint(host);
+            }
 
         } catch (IllegalStateException e) {
             if (e.getMessage() != null && e.getMessage().contains("JCEF")) {

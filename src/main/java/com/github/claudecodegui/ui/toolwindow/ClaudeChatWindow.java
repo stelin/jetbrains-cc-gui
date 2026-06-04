@@ -330,6 +330,27 @@ public class ClaudeChatWindow {
         return claudeSDKBridge;
     }
 
+    /**
+     * This tab's delegate. Exposed so a workflow node launch can reach the node
+     * tab's own {@code PairHandler} ({@code getChatWindowDelegate().getPairHandler()})
+     * and start the node's supervisor through the standard, fully-wired
+     * {@code pair_start} path bound to this tab's webview (see IdeNodeLauncher).
+     */
+    public ChatWindowDelegate getChatWindowDelegate() {
+        return chatWindowDelegate;
+    }
+
+    /**
+     * Per-tab stable identifier (see {@link #windowId}). Exposed so the workflow
+     * engine ({@code SupervisorWorkflowManager}) can scope a node's Pair back to
+     * the tab it created — used as {@code StartPairParams.ownerWindowId} and as
+     * the key for {@code PairSessionManager.stopPairsOwnedBy} on abort.
+     * See {@code docs/workflow/coding-plan.md} §12.2.
+     */
+    public String getWindowId() {
+        return windowId;
+    }
+
     public CodexSDKBridge getCodexSDKBridge() {
         return codexSDKBridge;
     }

@@ -23,8 +23,15 @@ const callBridge = (payload: string) => {
     window.sendToJava(payload);
     return true;
   }
-  // Track warned payloads to avoid spam, but don't log to console
-  BRIDGE_UNAVAILABLE_WARNED.add(payload);
+  // Bridge not injected yet (webview opened outside the IDE host, or before
+  // WebviewInitializer ran). Warn once per event type so a dropped message is
+  // visible in the console instead of failing silently.
+  const event = payload.split(':', 1)[0] || payload;
+  if (!BRIDGE_UNAVAILABLE_WARNED.has(event)) {
+    BRIDGE_UNAVAILABLE_WARNED.add(event);
+    // eslint-disable-next-line no-console
+    console.warn('[bridge] window.sendToJava unavailable — dropped message:', event);
+  }
   return false;
 };
 

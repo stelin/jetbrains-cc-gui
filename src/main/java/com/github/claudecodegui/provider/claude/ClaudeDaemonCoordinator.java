@@ -34,6 +34,7 @@ class ClaudeDaemonCoordinator {
     private volatile long daemonRetryAfter = 0;
     private volatile CompletableFuture<?> prewarmFuture;
     private volatile ControlMessageHandler controlMessageHandler;
+    private volatile IBridge.DaemonLifecycleListener lifecycleListener;
     private volatile String lastStartFailureCode;
     private volatile String lastStartFailureMessage;
 
@@ -103,6 +104,11 @@ class ClaudeDaemonCoordinator {
                 if (handler != null) {
                     newBridge.setControlMessageHandler(handler);
                 }
+                IBridge.DaemonLifecycleListener ll = lifecycleListener;
+                if (ll != null) {
+                    try { newBridge.setLifecycleListener(ll); }
+                    catch (Exception e) { log.debug("setLifecycleListener failed: " + e.getMessage()); }
+                }
                 if (newBridge.start()) {
                     daemonBridge = newBridge;
                     daemonRetryAfter = 0;
@@ -144,6 +150,21 @@ class ClaudeDaemonCoordinator {
         if (current != null) {
             try { current.setControlMessageHandler(handler); }
             catch (Exception e) { log.debug("setControlMessageHandler failed: " + e.getMessage()); }
+        }
+    }
+
+    /**
+     * Inject a daemon lifecycle listener (ready / died). Like
+     * {@link #setControlMessageHandler}: applied to any existing bridge and
+     * remembered for future bridge instances. Used by DN9 (§16.5) so a
+     * supervisor pair's dead daemon funnels its workflow node to WAITING_HUMAN.
+     */
+    void setLifecycleListener(IBridge.DaemonLifecycleListener listener) {
+        this.lifecycleListener = listener;
+        IBridge current = daemonBridge;
+        if (current != null) {
+            try { current.setLifecycleListener(listener); }
+            catch (Exception e) { log.debug("setLifecycleListener failed: " + e.getMessage()); }
         }
     }
 

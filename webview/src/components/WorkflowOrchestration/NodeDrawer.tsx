@@ -22,10 +22,12 @@ interface NodeDrawerProps {
   /** Remove an upstream dependency (edges are drawn on the canvas). */
   onRemoveDep: (dep: string) => void;
   onOpenSupervisorManager?: () => void;
+  /** True when another node already uses this name (node name = unique tab name). */
+  isNameTaken?: (name: string) => boolean;
 }
 
 export default function NodeDrawer({
-  node, agents, runtime, readOnly, onChange, onDelete, onClose, onJump, onOpenReport, onRemoveDep, onOpenSupervisorManager,
+  node, agents, runtime, readOnly, onChange, onDelete, onClose, onJump, onOpenReport, onRemoveDep, onOpenSupervisorManager, isNameTaken,
 }: NodeDrawerProps) {
   const { t } = useTranslation();
 
@@ -53,6 +55,13 @@ export default function NodeDrawer({
     const newName = nameInput.trim();
     if (!newName) { setNameError(t('workflow.err.nameRequired', 'Name is required')); setNameInput(node.name); return; }
     if (newName === node.name) { setNameError(null); return; }
+    if (isNameTaken?.(newName)) {
+      // Reject the rename: a duplicate name would collapse two nodes onto one
+      // another on the canvas (name = node identity / tab name).
+      setNameError(t('workflow.err.nameDup', '名称已被使用'));
+      setNameInput(node.name);
+      return;
+    }
     setNameError(null);
     onChange({ ...node, name: newName }, node.name);
   };

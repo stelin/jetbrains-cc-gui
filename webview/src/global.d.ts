@@ -488,6 +488,7 @@ interface Window {
   onWorkflowExecutionUpdate?: (json: string) => void;  // WorkflowExecution (full snapshot)
   onWorkflowEscalation?: (json: string) => void;       // { nodeName, reason }
   onWorkflowOperationResult?: (json: string) => void;  // { success, operation?, error? }
+  onWorkflowCapabilities?: (json: string) => void;     // { mode, maxConcurrency }
 
   // Pair lifecycle callbacks (Phase B):
   onPairStarted?: (json: string) => void;

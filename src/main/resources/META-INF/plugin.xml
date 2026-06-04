@@ -84,6 +84,9 @@
         <!-- Resume mutagen remote sync session after IDE restart -->
         <postStartupActivity implementation="com.github.claudecodegui.startup.RemoteSyncStartup"/>
 
+        <!-- Mark stale RUNNING workflow executions ABORTED after IDE restart (D17) -->
+        <postStartupActivity implementation="com.github.claudecodegui.startup.WorkflowStartupRecovery"/>
+
         <!-- StatusBar widget for task notification -->
         <statusBarWidgetFactory id="ClaudeStatusBarWidget"
                                 implementation="com.github.claudecodegui.notifications.ClaudeStatusBarWidget$Factory"/>

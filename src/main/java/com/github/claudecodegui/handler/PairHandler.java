@@ -359,121 +359,12 @@ public class PairHandler extends BaseMessageHandler {
             }
 
             if (agentId == null) throw new IllegalArgumentException("pair_start requires agentId");
-            if (context.getProject() == null) throw new IllegalStateException("no project context");
-            if (context.getClaudeSDKBridge() == null) {
-                throw new IllegalStateException(
-                        "Claude SDK bridge unavailable — supervisor requires the Claude provider "
-                        + "to be initialised before enabling Pair.");
-            }
 
-            PairSessionManager mgr = PairSessionManager.getInstance(context.getProject());
-            PairSession session = mgr.startPair(
-                    new PairSessionManager.StartPairParams(
-                            sessionId, agentId, planPath,
-                            modelOverride, longContextOverride, reasoningOverride,
-                            context.getWindowId()),
-                    context.getClaudeSDKBridge()
-            );
-
-            // 2026-05-24: bind the live ClaudeSession to the pair so the
-            // rotation decider can resolve it on auto-trigger without a
-            // separate session registry. Nullable in headless tests.
-            if (context.getSession() != null) {
-                session.setClaudeSession(context.getSession());
-            }
-
-            // Bind webview bridge so ActionRouter can drive UI.
-            session.getActionRouter().setWebviewBridge(new WebviewBridgeImpl());
-
-            // Protocol v2 (2026-05-24): wire autonomy-mode trackers. Both are
-            // always created — budget without limits is a no-op cost-wise but
-            // still tracks counters for the UI / completion report.
-            // Contract State Machine v3 (2026-05-25): DirectiveTracker
-            // construction removed — ContractRegistry (wired in
-            // PairSessionManager) handles all directive timing, retry, and
-            // R1/R2/R3 escalation. The supervisor receives a structured
-            // DECISION_REQUEST contract instead of the old directive_lost
-            // event when a contract goes 3-strikes.
-            com.github.claudecodegui.session.pair.PairBudgetTracker bt =
-                    new com.github.claudecodegui.session.pair.PairBudgetTracker(session.getPairId(), budget);
-            session.setBudgetTracker(bt);
-            // Stage C (2026-05-25): BudgetWatcher facade for uniform watcher
-            // access alongside HealthWatcher / RotationWatcher.
-            session.setBudgetWatcher(
-                    new com.github.claudecodegui.session.pair.watcher.BudgetWatcher(bt));
-
-            // v4 unified pipeline: forward each raw SDK message streamed by the
-            // daemon during a supervisor turn to the webview. The webview maps
-            // content blocks (text, thinking, tool_use, tool_result) into pane
-            // entries the same way it does for main-AI messages — no
-            // wrapper-side reconstruction needed.
-            //
-            // We also intercept the assistant/result usage field here and route
-            // it through UsagePushService.broadcast — the same entry point the
-            // main AI uses — so the TokenIndicator updates mid-turn with the
-            // same percentage formula and model-context-limit table. Without
-            // this intercept the indicator stays at the baseline while the
-            // supervisor is still thinking.
-            //
-            // 2026-05-24: feed envelopes through a SupervisorMessageBatcher
-            // instead of doing one invokeLater(callJavaScript) per message.
-            // A 30s tick can emit dozens of envelopes (each Read tool_result
-            // up to ~50KB), and on remote mode SSE delivers them in bursts —
-            // unthrottled they saturate the EDT and trigger WebviewWatchdog
-            // reload, which wipes the supervisor pane.
-            final PairSession sessionRef = session;
-            SupervisorMessageBatcher batcher = new SupervisorMessageBatcher(
-                    gson,
-                    arrJson -> pushToWebview("window.onSupervisorMessageBatch", arrJson)
-            );
-            session.setMessageBatcher(batcher);
-            session.getSupervisorBridge().setMessageHandler(rawMsg -> {
-                JsonObject sdkUsage = extractSdkUsage(rawMsg);
-                if (sdkUsage != null) {
-                    UsagePushService.broadcast(
-                            sdkUsage,
-                            sessionRef.getModel(),
-                            "supervisor",
-                            sessionRef.getAgentId(),
-                            context
-                    );
-                }
-                batcher.enqueue(rawMsg);
-            });
-
-            // 2026-05-28: live per-turn output-token estimate → supervisor pane's
-            // WaitingIndicator "↓ N tokens". Separate channel from the usage
-            // broadcast above (which drives the context %) so the ticker can
-            // update on every stream tick without recomputing the context window.
-            session.getSupervisorBridge().setLiveUsageHandler(usage ->
-                    pushToWebview("window.onSupervisorLiveUsage", gson.toJson(usage)));
-
-            JsonObject result = new JsonObject();
-            result.addProperty("pairId", session.getPairId());
-            result.addProperty("agentId", session.getAgentId());
-            result.addProperty("agentName", session.getAgentName());
-            result.addProperty("mainSessionId", session.getMainSessionId() == null ? "" : session.getMainSessionId());
-            pushToWebview("window.onPairStarted", gson.toJson(result));
-
-            // Seed the TokenIndicator with a 0-tokens snapshot so the right-pane
-            // composer shows the correct context limit (e.g. 1M) immediately,
-            // instead of the fallback "0 / 200k" until the first SDK message
-            // arrives with usage. Passes null rawUsage so broadcast treats it
-            // as "0 tokens used" while still resolving maxTokens from the model.
-            UsagePushService.broadcast(
-                    null,
-                    session.getModel(),
-                    "supervisor",
-                    session.getAgentId(),
-                    context
-            );
-
-            // NOTE: We intentionally do NOT auto-publish a `start` event anymore.
-            // The Supervisor session is ready and waiting silently. It will only
-            // begin coordinating after the user sends their first message via the
-            // right-pane composer (pair_send_user_input → publishUserInput).
-            // This avoids the "is there a plan?" escalate dialog firing the moment
-            // the user clicks Enable.
+            PairSessionManager.StartPairParams params = new PairSessionManager.StartPairParams(
+                    sessionId, agentId, planPath,
+                    modelOverride, longContextOverride, reasoningOverride,
+                    context.getWindowId());
+            startPairWired(params, budget);
         } catch (Exception e) {
             // Include full stack so transient NPEs (e.g. daemon not yet ready,
             // missing agent config) surface clearly in idea.log.
@@ -484,6 +375,140 @@ public class PairHandler extends BaseMessageHandler {
                     : "Internal error: " + e.getClass().getSimpleName();
             sendError("pair_start", msg);
         }
+    }
+
+    /**
+     * Start a supervisor Pair AND wire it to THIS tab's webview transport, then
+     * return the live session. Shared by two callers so a Pair started outside
+     * the webview-driven {@code pair_start} IPC still gets the identical wiring:
+     *
+     * <ul>
+     *   <li>the right-pane composer ({@link #handleStartImpl}), and</li>
+     *   <li>a workflow node launch — {@code IdeNodeLauncher} invokes this on the
+     *       <b>node tab's own</b> PairHandler so the node's supervisor output
+     *       (message batches, live usage, ActionRouter UI injects, onPairStarted)
+     *       is bound to the node tab's webview/context. Before this, the node
+     *       launcher called {@code startPair()} directly and skipped all of the
+     *       wiring below, so the node's supervisor ran with no transport to its
+     *       pane (blank "等待协调者事件" / Tick 0).</li>
+     * </ul>
+     *
+     * <p>All transport here targets {@code context} — the tab that owns this
+     * PairHandler — so calling it on the node tab's handler wires the node tab.
+     * Runs off the EDT (the caller's responsibility): {@code startPair} does a
+     * ~20s daemon handshake. Throws on start failure; the caller reports it.
+     */
+    public PairSession startPairWired(PairSessionManager.StartPairParams params,
+            com.github.claudecodegui.session.pair.protocol.PairBudget budget) throws Exception {
+        if (context.getProject() == null) throw new IllegalStateException("no project context");
+        if (context.getClaudeSDKBridge() == null) {
+            throw new IllegalStateException(
+                    "Claude SDK bridge unavailable — supervisor requires the Claude provider "
+                    + "to be initialised before enabling Pair.");
+        }
+
+        PairSessionManager mgr = PairSessionManager.getInstance(context.getProject());
+        PairSession session = mgr.startPair(params, context.getClaudeSDKBridge());
+
+        // 2026-05-24: bind the live ClaudeSession to the pair so the
+        // rotation decider can resolve it on auto-trigger without a
+        // separate session registry. Nullable in headless tests.
+        if (context.getSession() != null) {
+            session.setClaudeSession(context.getSession());
+        }
+
+        // Bind webview bridge so ActionRouter can drive UI.
+        session.getActionRouter().setWebviewBridge(new WebviewBridgeImpl());
+
+        // Protocol v2 (2026-05-24): wire autonomy-mode trackers. Both are
+        // always created — budget without limits is a no-op cost-wise but
+        // still tracks counters for the UI / completion report.
+        // Contract State Machine v3 (2026-05-25): DirectiveTracker
+        // construction removed — ContractRegistry (wired in
+        // PairSessionManager) handles all directive timing, retry, and
+        // R1/R2/R3 escalation. The supervisor receives a structured
+        // DECISION_REQUEST contract instead of the old directive_lost
+        // event when a contract goes 3-strikes.
+        com.github.claudecodegui.session.pair.PairBudgetTracker bt =
+                new com.github.claudecodegui.session.pair.PairBudgetTracker(session.getPairId(), budget);
+        session.setBudgetTracker(bt);
+        // Stage C (2026-05-25): BudgetWatcher facade for uniform watcher
+        // access alongside HealthWatcher / RotationWatcher.
+        session.setBudgetWatcher(
+                new com.github.claudecodegui.session.pair.watcher.BudgetWatcher(bt));
+
+        // v4 unified pipeline: forward each raw SDK message streamed by the
+        // daemon during a supervisor turn to the webview. The webview maps
+        // content blocks (text, thinking, tool_use, tool_result) into pane
+        // entries the same way it does for main-AI messages — no
+        // wrapper-side reconstruction needed.
+        //
+        // We also intercept the assistant/result usage field here and route
+        // it through UsagePushService.broadcast — the same entry point the
+        // main AI uses — so the TokenIndicator updates mid-turn with the
+        // same percentage formula and model-context-limit table. Without
+        // this intercept the indicator stays at the baseline while the
+        // supervisor is still thinking.
+        //
+        // 2026-05-24: feed envelopes through a SupervisorMessageBatcher
+        // instead of doing one invokeLater(callJavaScript) per message.
+        // A 30s tick can emit dozens of envelopes (each Read tool_result
+        // up to ~50KB), and on remote mode SSE delivers them in bursts —
+        // unthrottled they saturate the EDT and trigger WebviewWatchdog
+        // reload, which wipes the supervisor pane.
+        final PairSession sessionRef = session;
+        SupervisorMessageBatcher batcher = new SupervisorMessageBatcher(
+                gson,
+                arrJson -> pushToWebview("window.onSupervisorMessageBatch", arrJson)
+        );
+        session.setMessageBatcher(batcher);
+        session.getSupervisorBridge().setMessageHandler(rawMsg -> {
+            JsonObject sdkUsage = extractSdkUsage(rawMsg);
+            if (sdkUsage != null) {
+                UsagePushService.broadcast(
+                        sdkUsage,
+                        sessionRef.getModel(),
+                        "supervisor",
+                        sessionRef.getAgentId(),
+                        context
+                );
+            }
+            batcher.enqueue(rawMsg);
+        });
+
+        // 2026-05-28: live per-turn output-token estimate → supervisor pane's
+        // WaitingIndicator "↓ N tokens". Separate channel from the usage
+        // broadcast above (which drives the context %) so the ticker can
+        // update on every stream tick without recomputing the context window.
+        session.getSupervisorBridge().setLiveUsageHandler(usage ->
+                pushToWebview("window.onSupervisorLiveUsage", gson.toJson(usage)));
+
+        JsonObject result = new JsonObject();
+        result.addProperty("pairId", session.getPairId());
+        result.addProperty("agentId", session.getAgentId());
+        result.addProperty("agentName", session.getAgentName());
+        result.addProperty("mainSessionId", session.getMainSessionId() == null ? "" : session.getMainSessionId());
+        pushToWebview("window.onPairStarted", gson.toJson(result));
+
+        // Seed the TokenIndicator with a 0-tokens snapshot so the right-pane
+        // composer shows the correct context limit (e.g. 1M) immediately,
+        // instead of the fallback "0 / 200k" until the first SDK message
+        // arrives with usage. Passes null rawUsage so broadcast treats it
+        // as "0 tokens used" while still resolving maxTokens from the model.
+        UsagePushService.broadcast(
+                null,
+                session.getModel(),
+                "supervisor",
+                session.getAgentId(),
+                context
+        );
+
+        // NOTE: We intentionally do NOT auto-publish a `start` event here.
+        // The Supervisor session is ready and waiting silently. The composer
+        // path begins coordinating on the user's first message; the workflow
+        // path is kicked off by SupervisorWorkflowManager (publishUserInput of
+        // the assembled node plan) once pairStarted fires.
+        return session;
     }
 
     private void handleStop(String content) {

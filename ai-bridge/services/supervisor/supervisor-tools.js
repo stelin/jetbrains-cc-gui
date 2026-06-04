@@ -46,6 +46,7 @@ const ACTION_TYPES = [
     // never transitions the plan to DONE and trips the Liveness takeover.
     'complete_plan',
     'wait_for_contract',
+    'complete_workflow_node',
 ];
 
 /**
@@ -94,6 +95,12 @@ function buildEmitActionSchema(z) {
         summary: z.string().optional().describe(
             'Used when action is complete_plan. A short wrap-up of what the plan accomplished; '
             + 'becomes the COMPLETION_REPORT.md header.'
+        ),
+        node_status: z.enum(['done', 'blocked']).optional().describe(
+            'Required when action is complete_workflow_node.'
+        ),
+        changed_files: z.array(z.string()).optional().describe(
+            'complete_workflow_node + done: files this node created/modified.'
         ),
         contractId: z.string().optional().describe(
             'Required when action is wait_for_contract. The id of the OPEN contract you are '
@@ -174,6 +181,19 @@ export function normalizeAction(args) {
             // summary is optional — the Java side classifies completion severity
             // from Plan.steps[] regardless, so a missing summary is not an error.
             if (typeof args.summary === 'string') payload.summary = args.summary;
+            break;
+        case 'complete_workflow_node':
+            // node_status is mandatory; summary is optional, and changed_files is
+            // only meaningful on a `done` completion.
+            if (args.node_status !== 'done' && args.node_status !== 'blocked') {
+                error = 'complete_workflow_node requires node_status = done|blocked';
+            } else {
+                payload.node_status = args.node_status;
+                if (typeof args.summary === 'string') payload.summary = args.summary;
+                if (args.node_status === 'done' && Array.isArray(args.changed_files)) {
+                    payload.changed_files = args.changed_files;
+                }
+            }
             break;
         case 'wait_for_contract':
             if (typeof args.contractId === 'string' && args.contractId.length > 0) {

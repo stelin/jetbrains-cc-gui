@@ -9,6 +9,9 @@ import com.github.claudecodegui.session.pair.contract.ContractType;
 import com.github.claudecodegui.session.pair.plan.Plan;
 import com.github.claudecodegui.session.pair.plan.PlanStateMachine;
 import com.github.claudecodegui.session.pair.plan.PlanStep;
+import com.github.claudecodegui.session.pair.workflow.NodeStatus;
+import com.github.claudecodegui.session.pair.workflow.SupervisorWorkflowManager;
+import com.github.claudecodegui.session.pair.workflow.WorkflowActionParser;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -481,6 +484,16 @@ public class ActionRouter {
                 // PairSessionManager writes COMPLETION_REPORT.md.
                 handleCompletePlan(payload);
                 break;
+            case "complete_workflow_node":
+                // P2 (coding-plan §12.1): the SINGLE node→engine channel (DN1).
+                // done  → reuse complete_plan (writes COMPLETION_REPORT + plan→DONE),
+                //         then report DONE + changed_files to the workflow engine.
+                // blocked → escalate this pair to a human, then report WAITING_HUMAN.
+                // onNodeReport no-ops when this pair isn't a workflow node, so a
+                // stray emit from a regular supervisor degrades to complete_plan /
+                // escalate behaviour without touching the engine.
+                handleCompleteWorkflowNode(payload);
+                break;
             case "wait_for_contract":
                 // v3.1 (2026-05-26): typed wait — supervisor declares it's
                 // waiting for a specific OPEN contract to come back. Rejected
@@ -553,6 +566,37 @@ public class ActionRouter {
                 ? payload.get("summary").getAsString() : null;
         sm.onPlanCompleted(summary);
         LOG.info("[ActionRouter] " + pair.getPairId() + " complete_plan → plan " + current.id + " transitioned to DONE");
+    }
+
+    /**
+     * P2 (coding-plan §12.1): the supervisor's {@code complete_workflow_node}
+     * report — the single node→engine channel (DN1). This is the first production
+     * caller of {@link SupervisorWorkflowManager#onNodeReport}, closing the loop
+     * the P1 skeleton stubbed out.
+     *
+     * <p>done → reuse {@link #handleCompletePlan} (writes COMPLETION_REPORT, plan
+     * → DONE) then report DONE + changed_files. blocked → escalate this pair to a
+     * human ({@code onEscalatedToHuman}) then report WAITING_HUMAN. The engine
+     * ignores the report when this pair is not a workflow node.
+     */
+    private void handleCompleteWorkflowNode(JsonObject payload) {
+        WorkflowActionParser.ParsedNodeReport report = WorkflowActionParser.parse(payload);
+        SupervisorWorkflowManager mgr = SupervisorWorkflowManager.getInstance(project);
+        if (report.status == NodeStatus.DONE) {
+            handleCompletePlan(payload);
+            mgr.onNodeReport(pair.getPairId(), NodeStatus.DONE, report.summary, report.changedFiles);
+            LOG.info("[ActionRouter] " + pair.getPairId()
+                    + " complete_workflow_node(done) → onNodeReport DONE, changed="
+                    + (report.changedFiles == null ? 0 : report.changedFiles.size()));
+        } else {
+            PlanStateMachine sm = pair.getPlanStateMachine();
+            if (sm != null) {
+                sm.onEscalatedToHuman(report.summary);
+            }
+            mgr.onNodeReport(pair.getPairId(), NodeStatus.WAITING_HUMAN, report.summary, null);
+            LOG.info("[ActionRouter] " + pair.getPairId()
+                    + " complete_workflow_node(blocked) → onNodeReport WAITING_HUMAN");
+        }
     }
 
     /**

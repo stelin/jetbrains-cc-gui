@@ -22,13 +22,22 @@ interface WorkflowViewProps {
 export default function WorkflowView({ onClose, onOpenSupervisorManager }: WorkflowViewProps) {
   const { t } = useTranslation();
   const {
-    definitions, selectedId, draft, execution, isRunning, runningOf,
+    definitions, selectedId, draft, execution, isRunning, runningOf, capabilities,
+    isSaved, isDirty,
     selectWorkflow, newWorkflow, updateDraft, upsertNode, removeNode, addNode,
-    saveDraft, deleteWorkflow, runWorkflow, abortWorkflow, jumpToNode, openReport,
+    saveDraft, deleteWorkflow, runWorkflow, abortWorkflow, refreshState, jumpToNode, openReport,
   } = useWorkflowContext();
 
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   useEffect(() => { setSelectedNode(null); }, [draft?.id]);
+
+  // Re-pull the authoritative run state every time the workflow page opens. The
+  // provider's one-shot mount fetch can miss the live execution (bridge not
+  // ready at app start, or the run began in another tab/webview), which left the
+  // page showing "Editing" — and any Run rejected with "已有工作流在运行" — while a
+  // workflow was actually RUNNING. By now the bridge is ready, so requestList()
+  // re-syncs the running execution (mirrors the agents re-fetch below).
+  useEffect(() => { refreshState(); }, [refreshState]);
 
   // Own the supervisor-agents subscription here: this view is mounted exactly
   // when the editor is visible, so its chained handler is the active one and a
@@ -48,7 +57,10 @@ export default function WorkflowView({ onClose, onOpenSupervisorManager }: Workf
 
   const running = !!draft && runningOf(draft.id);
   const lockedByOther = isRunning && !!draft && execution?.workflowId !== draft.id;
-  const canRun = !!draft && draft.nodes.length > 0 && !lockedByOther && !running;
+  const runningName = definitions.find((d) => d.id === execution?.workflowId)?.name ?? '';
+  // Must be saved (in the left list) with no pending edits before running.
+  const canRun = !!draft && isSaved && !isDirty && draft.nodes.length > 0 && !lockedByOther && !running;
+  const canSave = !!draft && !running && isDirty;
 
   const handleNodeChange = useCallback((updated: WorkflowNode, originalName: string) => {
     upsertNode(updated, originalName);
@@ -79,11 +91,15 @@ export default function WorkflowView({ onClose, onOpenSupervisorManager }: Workf
     if (target) upsertNode({ ...target, dependsOn: target.dependsOn.filter((d) => d !== parent) }, child);
   }, [draft, upsertNode]);
 
+  const handleSave = useCallback(() => {
+    saveDraft();   // validates + persists + toasts (success or the reason it failed)
+  }, [saveDraft]);
+
   const handleRun = useCallback(() => {
+    // Run is gated on a clean, saved draft — no implicit save here.
     if (!draft || !canRun) return;
-    saveDraft();
     runWorkflow(draft.id);
-  }, [draft, canRun, saveDraft, runWorkflow]);
+  }, [draft, canRun, runWorkflow]);
 
   const stateLabel = running
     ? t(`workflow.state.${(execution?.state ?? 'RUNNING').toLowerCase()}`, execution?.state ?? 'RUNNING')
@@ -107,27 +123,70 @@ export default function WorkflowView({ onClose, onOpenSupervisorManager }: Workf
               disabled={running}
               maxLength={40}
               onChange={(e) => updateDraft({ name: e.target.value })}
-              onBlur={() => { if (draft) saveDraft(); }}
             />
           ) : (
             <span className={styles.title}>{t('workflow.title', 'Workflow Orchestration')}</span>
           )}
           <span className={`${styles.stateBadge} ${running ? styles.stateBadgeRunning : ''}`}>{stateLabel}</span>
+          {!running && draft && isDirty && (
+            <span className={styles.dirtyBadge} title={t('workflow.unsavedHint', '有未保存的修改，保存后才能运行')}>
+              {t('workflow.unsaved', '未保存')}
+            </span>
+          )}
         </div>
         <div className={styles.headerActions}>
+          <label className={styles.concurrency}>
+            {t('workflow.concurrency.label', 'Concurrency')}
+            {running ? (
+              <span className={styles.concurrencyValue}>{execution?.concurrency ?? draft?.maxConcurrency ?? 2}</span>
+            ) : (
+              <select
+                value={draft?.maxConcurrency ?? 2}
+                disabled={!draft}
+                onChange={(e) => { const n = Number(e.target.value); updateDraft({ maxConcurrency: n }); }}
+              >
+                {Array.from({ length: Math.max(1, capabilities.maxConcurrency) }, (_, i) => i + 1).map((n) => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
+              </select>
+            )}
+          </label>
           {running ? (
             <button className={styles.dangerBtn} onClick={abortWorkflow}>
               <span className="codicon codicon-debug-stop" /> {t('workflow.abort', 'Abort')}
             </button>
           ) : (
-            <button
-              className={styles.runBtn}
-              onClick={handleRun}
-              disabled={!canRun}
-              title={lockedByOther ? t('workflow.lockedRunning', 'Another workflow is running') : ''}
-            >
-              <span className="codicon codicon-play" /> {t('workflow.run', 'Run')}
-            </button>
+            <>
+              <button
+                className={styles.secondaryBtn}
+                onClick={handleSave}
+                disabled={!canSave}
+                title={!draft
+                  ? ''
+                  : isDirty ? t('workflow.save', 'Save') : t('workflow.saveHintClean', '没有未保存的修改')}
+              >
+                <span className="codicon codicon-save" /> {t('workflow.save', 'Save')}
+              </button>
+              <button
+                className={styles.runBtn}
+                onClick={handleRun}
+                disabled={!canRun}
+                title={lockedByOther
+                  ? t('workflow.lockedRunning', 'Another workflow is running')
+                  : (!isSaved || isDirty) ? t('workflow.runNeedsSave', '请先保存工作流') : ''}
+              >
+                <span className="codicon codicon-play" /> {t('workflow.run', 'Run')}
+              </button>
+              {isRunning && (
+                <button
+                  className={styles.dangerBtn}
+                  onClick={abortWorkflow}
+                  title={t('workflow.stopRunningHint', '停止正在运行的工作流：{{name}}', { name: runningName })}
+                >
+                  <span className="codicon codicon-debug-stop" /> {t('workflow.stop', 'Stop')}
+                </button>
+              )}
+            </>
           )}
         </div>
       </div>
@@ -179,6 +238,7 @@ export default function WorkflowView({ onClose, onOpenSupervisorManager }: Workf
               onOpenReport={() => openReport(currentNode.name)}
               onRemoveDep={(dep) => handleDeleteEdge(dep, currentNode.name)}
               onOpenSupervisorManager={onOpenSupervisorManager}
+              isNameTaken={(name) => draft.nodes.some((n) => n.name !== currentNode.name && n.name === name)}
             />
           ) : (
             <div className={styles.inspectorEmpty}>

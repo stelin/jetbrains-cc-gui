@@ -257,6 +257,14 @@ interface PairContextValue {
     attachments?: Array<{ path: string }>
   ) => void;
   dequeueSupervisorMessage: (agentId: string, id: string) => void;
+  /**
+   * Per-supervisor composer draft. Lifted into the (always-mounted) provider so
+   * the typed-but-unsent text survives navigating away from the chat view
+   * (Settings / Workflow / History) and back — the SupervisorChatInput itself
+   * unmounts on navigation, so local state would be lost. Cleared on pair stop.
+   */
+  draftByAgentId: Record<string, string>;
+  setSupervisorDraft: (agentId: string, value: string | ((prev: string) => string)) => void;
   // Phase 5 (2026-05-24): autonomy-mode toggle. Read from pairStatus when
   // present; locally cached so the AutonomyToggle has an optimistic value
   // before the next status push round-trip.
@@ -354,6 +362,7 @@ export function PairProvider({ children }: PairProviderProps) {
   // Per-agent user-input queue. Populated while thinking=true; auto-drained
   // head-first on thinking true→false. See enqueue/dequeue/flush below.
   const [queueByAgentId, setQueueByAgentId] = useState<Record<string, QueuedSupervisorMessage[]>>({});
+  const [draftByAgentId, setDraftByAgentId] = useState<Record<string, string>>({});
   const [modelOverrideByAgentId, setModelOverrideByAgentId] = useState<Record<string, string>>({});
   const [usageByAgentId, setUsageByAgentId] = useState<Record<string, SupervisorUsage>>({});
   const [longContextEnabled, setLongContextEnabledState] = useState<boolean>(() => {
@@ -417,6 +426,7 @@ export function PairProvider({ children }: PairProviderProps) {
       setModelOverrideByAgentId({});
       setReasoningByAgentId({});
       setQueueByAgentId({});
+      setDraftByAgentId({});
       return;
     }
     // Seed per-agent defaults on activation:
@@ -766,6 +776,21 @@ export function PairProvider({ children }: PairProviderProps) {
     []
   );
 
+  // Persist the per-supervisor composer draft in the provider so it survives the
+  // chat view unmounting on navigation. Accepts a value or an updater (the
+  // composer uses the functional form for @-path splices).
+  const setSupervisorDraft = useCallback(
+    (agentId: string, value: string | ((prev: string) => string)) => {
+      setDraftByAgentId((prev) => {
+        const cur = prev[agentId] ?? '';
+        const next = typeof value === 'function' ? value(cur) : value;
+        if (next === cur) return prev;
+        return { ...prev, [agentId]: next };
+      });
+    },
+    []
+  );
+
   // Auto-flush: when an agent's thinking flag flips true→false and its queue
   // is non-empty, pop the head and re-emit via sendUserInputToSupervisor. A
   // tiny setTimeout lets React commit the dequeue + lets the daemon receive
@@ -887,6 +912,7 @@ export function PairProvider({ children }: PairProviderProps) {
       // covers both "supervisor restart" and "agent switch" — per design:
       // queued messages do not survive either event.
       setQueueByAgentId({});
+      setDraftByAgentId({});   // drop the composer draft for the stopped/switched supervisor
     };
 
     /**
@@ -1361,6 +1387,8 @@ export function PairProvider({ children }: PairProviderProps) {
       queueByAgentId,
       enqueueSupervisorMessage,
       dequeueSupervisorMessage,
+      draftByAgentId,
+      setSupervisorDraft,
       autonomyMode,
       setAutonomyMode,
     }),
@@ -1394,6 +1422,8 @@ export function PairProvider({ children }: PairProviderProps) {
       queueByAgentId,
       enqueueSupervisorMessage,
       dequeueSupervisorMessage,
+      draftByAgentId,
+      setSupervisorDraft,
       autonomyMode,
       setAutonomyMode,
     ]
@@ -1442,6 +1472,8 @@ export function usePairContext(): PairContextValue {
     queueByAgentId: {},
     enqueueSupervisorMessage: () => { /* no-op */ },
     dequeueSupervisorMessage: () => { /* no-op */ },
+    draftByAgentId: {},
+    setSupervisorDraft: () => { /* no-op */ },
     // Phase 5 (2026-05-24): autonomy defaults — fall back to "full" (matches
     // Java's 2026-05-25 default) so the UI doesn't show a confusing "unset"
     // state outside a Provider.

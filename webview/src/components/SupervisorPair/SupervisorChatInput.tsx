@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import type {
   SelectedSupervisor,
@@ -134,6 +134,8 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
     queueByAgentId,
     enqueueSupervisorMessage,
     dequeueSupervisorMessage,
+    draftByAgentId,
+    setSupervisorDraft,
     pairId,
   } = usePairContext();
   const usage = usageByAgentId[supervisor.agentId];
@@ -143,7 +145,15 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
   const isSupervisorBusy = thinkingByAgentId[supervisor.agentId] ?? false;
   const supervisorQueue = queueByAgentId[supervisor.agentId] ?? [];
 
-  const [draft, setDraft] = useState('');
+  // Draft lives in PairContext (keyed by agentId) — not local state — so the
+  // typed-but-unsent text survives navigating to Settings/Workflow/History and
+  // back, which unmounts this component. setDraft accepts a value or updater
+  // (the @-path splice uses the functional form).
+  const draft = draftByAgentId[supervisor.agentId] ?? '';
+  const setDraft = useCallback(
+    (value: string | ((prev: string) => string)) => setSupervisorDraft(supervisor.agentId, value),
+    [setSupervisorDraft, supervisor.agentId],
+  );
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   /**

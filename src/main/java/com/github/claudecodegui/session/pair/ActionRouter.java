@@ -310,6 +310,17 @@ public class ActionRouter {
     public void dispatch(JsonObject actionWrapper) {
         if (actionWrapper == null) return;
 
+        // Quota-reset auto-resume (RateLimitWatcher): classify this completed
+        // supervisor turn from its natural text BEFORE the (possibly downgraded
+        // `wait`) action processing flips the plan to WAITING — so the resume is
+        // scheduled first and the workflow DN2 watchdog keeps the node RUNNING.
+        // A normal turn here clears any pending rate-limit state (self-heal).
+        try {
+            String natural = actionWrapper.has("naturalText") && !actionWrapper.get("naturalText").isJsonNull()
+                    ? actionWrapper.get("naturalText").getAsString() : null;
+            pair.getRateLimitWatcher().onSupervisorTurnText(natural);
+        } catch (Exception ignored) { /* best-effort */ }
+
         // Any ACTION arrival means thinking ended.
         webview.onThinking(pair.getAgentId(), false);
 

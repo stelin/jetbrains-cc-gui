@@ -272,6 +272,28 @@ public class PlanStateMachine {
         return true;
     }
 
+    /**
+     * Resume a NON-user WAITING plan after a rate-limit pause. The
+     * {@code RateLimitWatcher} calls this right before re-sending the fixed
+     * resume prompt, so the supervisor's resulting emit_action routes against an
+     * ACTIVE plan rather than a WAITING one. Leaves a genuine user pause alone.
+     * Does NOT fire transition events (mirrors {@code onUserPaused}) — the resume
+     * turn that follows drives the next real transition.
+     *
+     * @return true if a WAITING plan was flipped back to ACTIVE.
+     */
+    public synchronized boolean onRateLimitResumed() {
+        if (current == null) return false;
+        if (current.state != Plan.PlanState.WAITING) return false;
+        if ("user".equals(current.metadata.get("pauseReason"))) return false;
+        current.state = Plan.PlanState.ACTIVE;
+        current.subState = Plan.ActiveSubState.PENDING_DECISION;
+        current.lastTransitionAt = System.currentTimeMillis();
+        current.metadata.remove("pauseReason");
+        current.metadata.remove("escalationReason");
+        return true;
+    }
+
     public synchronized void onUserCancel(String reason) {
         if (current == null) return;
         if (current.isTerminal()) return;

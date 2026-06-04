@@ -159,6 +159,13 @@ public class EventBus {
         return "user_input".equals(type) || "human_response".equals(type);
     }
 
+    /** True when a supervisor postEvent error looks like an API rate limit (429). */
+    private static boolean is429(String err) {
+        if (err == null) return false;
+        String lower = err.toLowerCase();
+        return lower.contains("429") || lower.contains("rate_limit") || lower.contains("rate limit");
+    }
+
     /**
      * Returns true if the periodic monitor path should handle publishes. The
      * flag is read every call so it can be toggled at runtime via the Registry
@@ -407,6 +414,15 @@ public class EventBus {
             String firstError = tryPostEvent(event);
             if (firstError == null) {
                 return CompletableFuture.completedFuture(null);
+            }
+
+            // Quota-reset auto-resume (RateLimitWatcher): a 429 / rate_limit
+            // transport error → schedule a backoff auto-resume (5/10/20/40/60min,
+            // then hourly). Self-clears once a turn succeeds (ActionRouter.dispatch
+            // → onSupervisorTurnText → onNormalTurn).
+            if (is429(firstError)) {
+                try { pair.getRateLimitWatcher().on429(); }
+                catch (Exception ignored) { /* best-effort */ }
             }
 
             // If the failure is "daemon-side runtime missing" (e.g. remote

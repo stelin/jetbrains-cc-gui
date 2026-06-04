@@ -73,6 +73,7 @@ public class PairSession {
 
     private volatile EventBus eventBus;       // wired by PairSessionManager
     private volatile ActionRouter actionRouter;
+    private volatile RateLimitWatcher rateLimitWatcher;   // lazy; see getRateLimitWatcher()
     private volatile boolean disposed = false;
 
     // Protocol v2 (2026-05-24): autonomy-mode trackers.
@@ -224,9 +225,31 @@ public class PairSession {
     public ActionRouter getActionRouter() { return actionRouter; }
     public void setActionRouter(ActionRouter router) { this.actionRouter = router; }
 
+    /**
+     * Per-pair rate-limit auto-resume watchdog (lazily created on first use, so a
+     * pair that never hits a limit costs nothing). See {@link RateLimitWatcher}.
+     */
+    public RateLimitWatcher getRateLimitWatcher() {
+        RateLimitWatcher w = rateLimitWatcher;
+        if (w == null) {
+            synchronized (this) {
+                w = rateLimitWatcher;
+                if (w == null) {
+                    w = new RateLimitWatcher(this);
+                    rateLimitWatcher = w;
+                }
+            }
+        }
+        return w;
+    }
+
     public boolean isDisposed() { return disposed; }
     public void markDisposed() {
         this.disposed = true;
+        RateLimitWatcher rlw = this.rateLimitWatcher;
+        if (rlw != null) {
+            try { rlw.dispose(); } catch (Exception ignored) { }
+        }
         // Contract State Machine v3 (2026-05-25): DirectiveTracker removed —
         // ContractRegistry below owns all directive timing now.
         // Contract State Machine v3 (2026-05-25): dispose order matters —

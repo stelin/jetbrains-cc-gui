@@ -742,6 +742,10 @@ public class PairHandler extends BaseMessageHandler {
             if (session.getEventBus() != null) {
                 session.getEventBus().publishUserInput(text);
             }
+            // The user took over → cancel any pending rate-limit auto-resume so we
+            // don't double-drive the supervisor when the quota clears.
+            try { session.getRateLimitWatcher().onUserSend(); }
+            catch (Exception ignored) { /* best-effort */ }
         } catch (Exception e) {
             LOG.warn("[PairHandler] pair_send_user_input failed: "
                     + (e.getMessage() != null ? e.getMessage() : e.getClass().getName()), e);

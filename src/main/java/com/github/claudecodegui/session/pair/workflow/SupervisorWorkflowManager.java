@@ -739,6 +739,15 @@ public final class SupervisorWorkflowManager implements Disposable {
                 return;
             }
             if (!isWatchdogStall(now)) return;
+            // Don't escalate while a rate-limit auto-resume is pending: the node
+            // is legitimately waiting for the quota reset, not stalled — it stays
+            // RUNNING and the RateLimitWatcher re-pushes the task when it clears.
+            NodeHandle h2 = handles.get(nodeName);
+            if (h2 != null && h2.pair != null) {
+                try {
+                    if (h2.pair.getRateLimitWatcher().isWaitingForReset()) return;
+                } catch (Exception ignored) { /* best-effort */ }
+            }
             Object er = now.metadata == null ? null : now.metadata.get("escalationReason");
             String reason = (er instanceof String && !((String) er).isEmpty())
                     ? (String) er : "看门狗：监督者无响应";

@@ -30,6 +30,19 @@
     "nodeCount": "{{n}} nodes",
     "newWorkflow": "New workflow",
     "runBar": "{{done}}/{{total}} done · concurrency {{conc}}",
+    "pausedBar": "Restored — {{done}}/{{total}} done, {{waiting}} need you",
+    "resume": "Resume",
+    "resumed": "Workflow resumed",
+    "resumeHint": "Resume the interrupted workflow and continue not-yet-started nodes",
+    "redispatch": {
+      "label": "Re-dispatch",
+      "restart": "Force restart",
+      "sent": "Re-dispatched",
+      "tip": "Re-send the task to this node; rebuilds the supervisor if wedged",
+      "confirm": "This node may have made partial changes. Re-dispatching re-runs the supervisor against the current repo state, with no rollback. Continue?",
+      "confirmRestart": "Force restart will stop the current supervisor and recreate it. Continue?",
+      "needResume": "Resume the workflow first"
+    },
     "escalation": "Node \"{{node}}\" needs you",
     "jumpToTab": "Open tab",
     "viewReport": "Report",
@@ -38,11 +51,13 @@
     "state": {
       "editing": "Editing",
       "running": "Running",
+      "paused": "Paused (awaiting resume)",
       "completed": "Completed",
       "aborted": "Aborted"
     },
     "status": {
       "pending": "Pending",
+      "scheduled": "Scheduled",
       "ready": "Queued",
       "running": "Running",
       "waitingHuman": "Needs you",
@@ -69,7 +84,21 @@
       "dropFiles": "Drop files to insert @path",
       "planPlaceholder": "The task this node hands to its supervisor…",
       "delete": "Delete",
-      "done": "Done"
+      "done": "Done",
+      "timing": {
+        "label": "Execution timing",
+        "immediate": "Immediately",
+        "relative": "Delay",
+        "absolute": "At a time",
+        "minutes": "minutes after upstream (0–300)",
+        "pickDate": "Pick date",
+        "pickTime": "Pick time",
+        "relativeRO": "Delay {{m}} min",
+        "absoluteRO": "At {{at}}",
+        "dueAt": "starts at {{at}}",
+        "countdown": "in {{left}} ({{at}})",
+        "startingSoon": "starting…"
+      }
     },
     "validate": {
       "nameRequired": "Please enter a workflow name",
@@ -79,6 +108,8 @@
       "supervisorRequired": "Node \"{{name}}\" has no supervisor selected",
       "planRequired": "Node \"{{name}}\" is missing its task content",
       "depMissing": "Node \"{{name}}\" depends on a non-existent node: {{dep}}",
+      "delayRange": "Node \"{{name}}\" delay must be 0–300 minutes",
+      "scheduledRequired": "Node \"{{name}}\" has no scheduled time selected",
       "cycle": "The dependencies contain a cycle — check the edges"
     },
     "err": {

@@ -22,10 +22,11 @@ interface WorkflowViewProps {
 export default function WorkflowView({ onClose, onOpenSupervisorManager }: WorkflowViewProps) {
   const { t } = useTranslation();
   const {
-    definitions, selectedId, draft, execution, isRunning, runningOf, capabilities,
+    definitions, selectedId, draft, execution, executionStatuses, isRunning, isPaused, runningOf, capabilities,
     isSaved, isDirty,
     selectWorkflow, newWorkflow, updateDraft, upsertNode, removeNode, addNode,
-    saveDraft, deleteWorkflow, runWorkflow, abortWorkflow, refreshState, jumpToNode, openReport,
+    saveDraft, deleteWorkflow, runWorkflow, abortWorkflow, resumeWorkflow, redispatchNode,
+    refreshState, jumpToNode, openReport,
   } = useWorkflowContext();
 
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
@@ -56,7 +57,9 @@ export default function WorkflowView({ onClose, onOpenSupervisorManager }: Workf
   const agentNameLocal = useCallback((id: string) => agents.find((a) => a.id === id)?.name ?? id ?? '', [agents]);
 
   const running = !!draft && runningOf(draft.id);
-  const lockedByOther = isRunning && !!draft && execution?.workflowId !== draft.id;
+  // A RUNNING or PAUSED (restored) execution holds the single-workflow lock, so
+  // another workflow can't be started until it's resumed/aborted.
+  const lockedByOther = (isRunning || isPaused) && !!draft && execution?.workflowId !== draft.id;
   const runningName = definitions.find((d) => d.id === execution?.workflowId)?.name ?? '';
   // Must be saved (in the left list) with no pending edits before running.
   const canRun = !!draft && isSaved && !isDirty && draft.nodes.length > 0 && !lockedByOther && !running;
@@ -152,9 +155,20 @@ export default function WorkflowView({ onClose, onOpenSupervisorManager }: Workf
             )}
           </label>
           {running ? (
-            <button className={styles.dangerBtn} onClick={abortWorkflow}>
-              <span className="codicon codicon-debug-stop" /> {t('workflow.abort', 'Abort')}
-            </button>
+            <>
+              {isPaused && draft && (
+                <button
+                  className={styles.runBtn}
+                  onClick={() => resumeWorkflow(draft.id)}
+                  title={t('workflow.resumeHint', '恢复被中断的工作流，并续跑未开始的节点')}
+                >
+                  <span className="codicon codicon-debug-continue" /> {t('workflow.resume', '恢复运行')}
+                </button>
+              )}
+              <button className={styles.dangerBtn} onClick={abortWorkflow}>
+                <span className="codicon codicon-debug-stop" /> {t('workflow.abort', 'Abort')}
+              </button>
+            </>
           ) : (
             <>
               <button
@@ -196,7 +210,7 @@ export default function WorkflowView({ onClose, onOpenSupervisorManager }: Workf
         <WorkflowList
           definitions={definitions}
           selectedId={selectedId}
-          runningId={isRunning ? (execution?.workflowId ?? null) : null}
+          statuses={executionStatuses}
           onSelect={selectWorkflow}
           onNew={newWorkflow}
           onDelete={deleteWorkflow}
@@ -236,9 +250,11 @@ export default function WorkflowView({ onClose, onOpenSupervisorManager }: Workf
               onClose={() => setSelectedNode(null)}
               onJump={() => jumpToNode(currentNode.name)}
               onOpenReport={() => openReport(currentNode.name)}
+              onRedispatch={(mode) => redispatchNode(currentNode.name, mode)}
               onRemoveDep={(dep) => handleDeleteEdge(dep, currentNode.name)}
               onOpenSupervisorManager={onOpenSupervisorManager}
               isNameTaken={(name) => draft.nodes.some((n) => n.name !== currentNode.name && n.name === name)}
+              isPaused={isPaused}
             />
           ) : (
             <div className={styles.inspectorEmpty}>

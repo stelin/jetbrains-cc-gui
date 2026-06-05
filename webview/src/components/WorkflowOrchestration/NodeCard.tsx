@@ -12,6 +12,8 @@ interface StatusMeta {
 
 export function statusMeta(status: NodeStatus | undefined): StatusMeta {
   switch (status) {
+    case 'SCHEDULED':
+      return { cls: styles.statusScheduled, icon: 'codicon-watch', i18nKey: 'workflow.status.scheduled', fallback: 'Scheduled' };
     case 'READY':
       return { cls: styles.statusReady, icon: 'codicon-clock', i18nKey: 'workflow.status.ready', fallback: 'Queued' };
     case 'RUNNING':

@@ -13,9 +13,10 @@ interface RunStatusBarProps {
  */
 export default function RunStatusBar({ onExpand }: RunStatusBarProps) {
   const { t } = useTranslation();
-  const { execution, isRunning, abortWorkflow, definitions } = useWorkflowContext();
+  const { execution, isRunning, isPaused, abortWorkflow, resumeWorkflow, definitions } = useWorkflowContext();
 
-  if (!isRunning || !execution) return null;
+  // Show while actively RUNNING or PAUSED (restored after restart, awaiting resume).
+  if ((!isRunning && !isPaused) || !execution) return null;
 
   const nodes = Object.values(execution.nodes);
   const total = nodes.length;
@@ -31,20 +32,27 @@ export default function RunStatusBar({ onExpand }: RunStatusBarProps) {
 
   return (
     <div className={styles.statusBar}>
-      <span className="codicon codicon-sync" />
+      <span className={`codicon ${isPaused ? 'codicon-debug-pause' : 'codicon-sync'}`} />
       <span className={styles.statusBarText}>
         <span className={styles.statusBarName}>{name}</span>
         {' · '}
-        {t('workflow.runBar', '{{done}}/{{total}} done · concurrency {{conc}}', {
-          done, total, conc: execution.concurrency,
-        })}
-        {waiting > 0 && (
+        {isPaused
+          ? t('workflow.pausedBar', '已恢复，{{done}}/{{total}} 完成，{{waiting}} 个节点待处理', { done, total, waiting })
+          : t('workflow.runBar', '{{done}}/{{total}} done · concurrency {{conc}}', {
+            done, total, conc: execution.concurrency,
+          })}
+        {!isPaused && waiting > 0 && (
           <span className={styles.warnPill}>
             <span className="codicon codicon-warning" /> {waiting} {t('workflow.status.waitingHuman', 'Needs you')}
           </span>
         )}
       </span>
       <span className={styles.statusBarActions}>
+        {isPaused && (
+          <button className={styles.linkBtn} onClick={() => resumeWorkflow(execution.workflowId)}>
+            {t('workflow.resume', '恢复运行')}
+          </button>
+        )}
         <button className={styles.linkBtn} onClick={onExpand}>{t('workflow.expand', 'Expand')}</button>
         <button className={styles.dangerLinkBtn} onClick={handleAbort}>{t('workflow.abort', 'Abort')}</button>
       </span>

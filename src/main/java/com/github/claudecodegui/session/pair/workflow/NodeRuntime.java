@@ -5,12 +5,14 @@ import java.util.List;
 /**
  * Mutable per-node runtime state held inside a {@link WorkflowExecution}.
  *
- * <p>The non-{@code transient} fields are exactly what travels over
- * {@code window.onWorkflowExecutionUpdate} (mirrors the front-end
- * {@code NodeRuntime}). The two {@code transient} fields are engine-internal
- * plumbing fed into downstream nodes' plans (§13) and MUST NOT leak into the
- * wire snapshot — Gson skips {@code transient} fields, and the front-end model
- * has no equivalent. See {@code docs/workflow/coding-plan.md} §5.
+ * <p>All fields travel over {@code window.onWorkflowExecutionUpdate} (mirrors the
+ * front-end {@code NodeRuntime}). {@link #changedFiles} / {@link #summary} feed
+ * downstream nodes' plans (§13); they used to be {@code transient}, but to keep
+ * the downstream context complete after an IDE restart they are now persisted to
+ * {@code execution.json} too (DN11 — see
+ * {@code docs/workflow/resume-and-redispatch-plan.md} §2.4). They only carry data
+ * on DONE nodes, so the extra wire bytes are negligible and the front-end simply
+ * ignores the unknown fields.
  *
  * <p>Threading: all writes happen on the {@code wf-scheduler} thread (§15).
  */
@@ -23,11 +25,18 @@ public class NodeRuntime {
     public String completionReportPath;
     public String escalationReason;
 
-    /** Files this node created/modified (from the report tool); feeds下游. Not serialized. */
-    public transient List<String> changedFiles;
+    /**
+     * When {@link #status} is {@link NodeStatus#SCHEDULED}, the absolute instant
+     * (epoch ms) this node is due to start (D26). Stored absolute so it survives
+     * restart and re-arms correctly on resume. Null otherwise.
+     */
+    public Long scheduledStartAt;
 
-    /** Completion/blocked说明 (from the report tool); feeds下游. Not serialized. */
-    public transient String summary;
+    /** Files this node created/modified (from the report tool); feeds下游. */
+    public List<String> changedFiles;
+
+    /** Completion/blocked说明 (from the report tool); feeds下游. */
+    public String summary;
 
     public NodeRuntime() {
         /* gson */

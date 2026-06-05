@@ -37,6 +37,20 @@ public class WorkflowNode {
     /** Names of upstream nodes this node depends on; defines the串/并行 edges. */
     public List<String> dependsOn = new ArrayList<>();
 
+    /**
+     * Execution timing (D25 — list-status-and-node-scheduling-plan §3.1):
+     * {@code "none"} (or null) = start immediately when deps are done;
+     * {@code "relative"} = wait {@link #delayMinutes} after the last dep completes;
+     * {@code "absolute"} = start at {@link #scheduledAt}.
+     */
+    public String delayMode;
+
+    /** Relative mode: minutes to wait after upstream completes, clamped to [0, 300] (5h). */
+    public Integer delayMinutes;
+
+    /** Absolute mode: target start instant (epoch ms; picked in local time, stored as epoch). */
+    public Long scheduledAt;
+
     /** Manual canvas position;透传 through the engine, never interpreted. */
     public Double posX;
     public Double posY;

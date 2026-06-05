@@ -68,6 +68,9 @@ public final class SupervisorWorkflowManager implements Disposable {
     /** Default per-workflow concurrency when {@code def.maxConcurrency} is null. */
     static final int DEFAULT_WF_CONCURRENCY = 2;
 
+    /** D28: hard ceiling on a node's relative start delay (5 hours). */
+    static final int MAX_DELAY_MINUTES = 300;
+
     /** MVP cap on injected upstream COMPLETION_REPORT.md text (P-future: smarter裁剪). */
     static final int UPSTREAM_REPORT_CAP = 4000;
 
@@ -110,12 +113,32 @@ public final class SupervisorWorkflowManager implements Disposable {
 
     // ─── scheduler-thread-only state ────────────────────────────────────
     private Semaphore slots;
+    /**
+     * Explicit set of nodes currently occupying a concurrency permit (D23 —
+     * resume-and-redispatch-plan §2.3). The single source of truth for "does this
+     * node hold a slot": a node is added when {@link #pump} (or a re-launch via
+     * {@link #redispatchNode}) acquires its permit, and removed when its slot is
+     * released on DONE. Status alone can no longer answer this — a restored
+     * {@code WAITING_HUMAN} node holds no permit (fresh {@link Semaphore}) while a
+     * live one does, and {@code onNodeTabClosed} drops the handle but keeps the
+     * permit. Mutated only on the {@code wf-scheduler} thread.
+     */
+    private final Set<String> slotHolders = new HashSet<>();
     private final Deque<String> readyQueue = new ArrayDeque<>();
     private final Map<String, WorkflowNode> nameToNode = new HashMap<>();
     // ────────────────────────────────────────────────────────────────────
 
     private final Map<String, String> pairToNode = new ConcurrentHashMap<>();
     private final Map<String, NodeHandle> handles = new ConcurrentHashMap<>();
+
+    /** Per-node start timers for SCHEDULED nodes (D25/DN14). Keyed by node name. */
+    private final java.util.concurrent.ScheduledExecutorService nodeTimers =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "wf-node-timer");
+                t.setDaemon(true);
+                return t;
+            });
+    private final Map<String, java.util.concurrent.ScheduledFuture<?>> scheduledFutures = new ConcurrentHashMap<>();
 
     // ─── construction ───────────────────────────────────────────────────
 
@@ -198,8 +221,9 @@ public final class SupervisorWorkflowManager implements Disposable {
             return;
         }
         WorkflowExecution e = exec;
-        if (e != null && e.state == WorkflowState.RUNNING && id.equals(e.workflowId)) {
-            broadcastOpResult("delete", false, "工作流正在运行，无法删除");
+        if (isLocked(e) && id.equals(e.workflowId)) {
+            broadcastOpResult("delete", false,
+                    e.state == WorkflowState.PAUSED ? "工作流待恢复，无法删除" : "工作流正在运行，无法删除");
             return;
         }
         store.delete(id);
@@ -211,10 +235,20 @@ public final class SupervisorWorkflowManager implements Disposable {
     public void requestList(@NotNull HandlerContext.JsCallback sink) {
         pushTo(sink, "window.onWorkflowDefinitions", gson.toJson(store.loadAll()));
         pushTo(sink, "window.onWorkflowCapabilities", capabilitiesJson());
+        pushTo(sink, "window.onWorkflowStatuses", statusesJson());   // D24: list badges
         WorkflowExecution e = exec;
-        if (e != null && e.state == WorkflowState.RUNNING) {
+        if (isLocked(e)) {   // RUNNING or PAUSED (restored, awaiting resume)
             pushTo(sink, "window.onWorkflowExecutionUpdate", gson.toJson(e));
         }
+    }
+
+    /**
+     * True when an execution holds the single-workflow lock: actively {@code RUNNING}
+     * or {@code PAUSED} (restored after restart, awaiting {@link #resumeWorkflow}).
+     * Used by start/delete/abort/list guards so a paused run can't be clobbered.
+     */
+    private static boolean isLocked(@Nullable WorkflowExecution e) {
+        return e != null && (e.state == WorkflowState.RUNNING || e.state == WorkflowState.PAUSED);
     }
 
     // ─── run / abort / jump / report (scheduler thread; §8) ──────────────
@@ -222,12 +256,13 @@ public final class SupervisorWorkflowManager implements Disposable {
     /** §8.2 — single-workflow lock + cycle check + clamp concurrency, then pump. */
     public void startWorkflow(@Nullable String id) {
         submit(() -> {
-            if (exec != null && exec.state == WorkflowState.RUNNING) {
-                broadcastOpResult("run", false, "已有工作流在运行");
-                // Re-sync any webview that lost the running snapshot (bridge race
-                // / opened after the run began): without this it stays on
+            if (isLocked(exec)) {
+                broadcastOpResult("run", false,
+                        exec.state == WorkflowState.PAUSED ? "有待恢复的工作流，请先恢复或中止" : "已有工作流在运行");
+                // Re-sync any webview that lost the running/paused snapshot (bridge
+                // race / opened after the run began): without this it stays on
                 // "Editing" and keeps getting rejected with no way to see — or
-                // stop — the workflow that holds the lock.
+                // resume/stop — the workflow that holds the lock.
                 broadcastExec();
                 return;
             }
@@ -249,6 +284,7 @@ public final class SupervisorWorkflowManager implements Disposable {
                     1, ceiling());
             exec = newExecution(def, n);
             slots = new Semaphore(n);
+            slotHolders.clear();
             readyQueue.clear();
             pairToNode.clear();
             handles.clear();
@@ -266,30 +302,41 @@ public final class SupervisorWorkflowManager implements Disposable {
             enqueueReady();
             persist();
             broadcastExec();
+            broadcastStatuses();   // → RUNNING badge in list
             broadcastOpResult("run", true, null);
             pump();
         });
     }
 
-    /** §8.7 — stop active pairs, mark live nodes ABORTED, freeze execution. */
+    /**
+     * §8.7 — stop active pairs, mark live nodes ABORTED, freeze execution. Also
+     * usable on a {@code PAUSED} (restored-but-not-resumed) execution — there are
+     * simply no live handles to stop, so the user can discard a restored run
+     * without resuming it first.
+     */
     public void abortWorkflow() {
         submit(() -> {
-            if (exec == null || exec.state != WorkflowState.RUNNING) return;
+            if (exec == null || !isLocked(exec)) return;
+            cancelAllTimers();   // kill any pending SCHEDULED start timers
             for (NodeHandle h : handles.values()) {
                 if (h != null && h.windowId != null) launcher.stop(h.windowId);
             }
             for (Map.Entry<String, NodeRuntime> e : exec.nodes.entrySet()) {
                 NodeRuntime r = e.getValue();
                 if (r.status == NodeStatus.RUNNING || r.status == NodeStatus.READY
+                        || r.status == NodeStatus.SCHEDULED
                         || r.status == NodeStatus.WAITING_HUMAN || r.status == NodeStatus.PENDING) {
                     r.status = NodeStatus.ABORTED;
+                    r.scheduledStartAt = null;
                     launcher.setNodeStatus(e.getKey(), NodeStatus.ABORTED);   // cockpit: grey border (window kept)
                 }
             }
             exec.state = WorkflowState.ABORTED;
+            slotHolders.clear();
             LOG.info("[Workflow] ABORTED wf=" + exec.workflowId);
             persist();
             broadcastExec();   // tabs retained (D13)
+            broadcastStatuses();   // → ABORTED badge in list
         });
     }
 
@@ -323,16 +370,18 @@ public final class SupervisorWorkflowManager implements Disposable {
                 if (h != null && h.pairDir != null) {
                     rt.completionReportPath = h.pairDir.resolve("COMPLETION_REPORT.md").toString();
                 }
-                if (slots != null) slots.release();
+                if (slotHolders.remove(name) && slots != null) slots.release();   // D23: only release a permit we hold
                 launcher.setNodeStatus(name, NodeStatus.DONE);   // cockpit: green ✓ (window kept)
                 LOG.info("[Workflow] node " + name + " DONE report=" + rt.completionReportPath);
                 enqueueReady();
-                if (allNodesDone()) {
+                boolean completed = allNodesDone();
+                if (completed) {
                     exec.state = WorkflowState.COMPLETED;
                     LOG.info("[Workflow] COMPLETED wf=" + exec.workflowId);
                 }
                 persist();
                 broadcastExec();
+                if (completed) broadcastStatuses();   // → COMPLETED badge in list
                 if (exec.state == WorkflowState.RUNNING) pump();
             } else {  // WAITING_HUMAN / blocked — do NOT free the slot, do NOT advance (D11)
                 rt.status = NodeStatus.WAITING_HUMAN;
@@ -364,13 +413,110 @@ public final class SupervisorWorkflowManager implements Disposable {
 
     // ─── scheduler internals (scheduler thread only) ─────────────────────
 
-    /** §8.3 — rolling enqueue (DN3): any PENDING node with all deps DONE → READY. */
+    /**
+     * §8.3 — rolling enqueue (DN3): any PENDING node with all deps DONE becomes
+     * eligible. With node scheduling (D25), the moment a node's deps first complete
+     * we compute its due time once: due now → {@code READY}; due later →
+     * {@code SCHEDULED} with a timer (the timer flips it to READY when it fires).
+     * Because this only ever promotes PENDING nodes, the relative-delay reference
+     * point (last dep DONE) is captured exactly once.
+     */
     private void enqueueReady() {
+        long now = System.currentTimeMillis();
+        for (Map.Entry<String, NodeRuntime> e : exec.nodes.entrySet()) {
+            String name = e.getKey();
+            NodeRuntime r = e.getValue();
+            if (r.status != NodeStatus.PENDING || !allDepsDone(name)) continue;
+            long dueAt = computeDueAt(name, now);
+            if (dueAt <= now) {
+                r.status = NodeStatus.READY;
+                r.scheduledStartAt = null;
+                readyQueue.add(name);
+            } else {
+                r.status = NodeStatus.SCHEDULED;   // DN13: holds no slot until READY
+                r.scheduledStartAt = dueAt;
+                armTimer(name, dueAt);
+            }
+        }
+    }
+
+    /**
+     * Effective start instant for a node whose deps just completed: {@code absolute}
+     * → its configured epoch; {@code relative} → {@code now + delayMinutes}
+     * (clamped to {@link #MAX_DELAY_MINUTES}); otherwise → {@code now} (immediate).
+     */
+    private long computeDueAt(String name, long now) {
+        WorkflowNode n = nameToNode.get(name);
+        if (n == null) return now;
+        if ("absolute".equals(n.delayMode) && n.scheduledAt != null) {
+            return n.scheduledAt;
+        }
+        if ("relative".equals(n.delayMode) && n.delayMinutes != null && n.delayMinutes > 0) {
+            int m = Math.min(n.delayMinutes, MAX_DELAY_MINUTES);
+            return now + m * 60_000L;
+        }
+        return now;
+    }
+
+    // ─── node start timers (D25/DN14) ────────────────────────────────────
+
+    /** Arm (or re-arm) a SCHEDULED node's start timer; fires {@link #fireScheduled} on the scheduler thread. */
+    private void armTimer(String name, long dueAt) {
+        cancelTimer(name);
+        long delay = Math.max(0, dueAt - System.currentTimeMillis());
+        try {
+            scheduledFutures.put(name, nodeTimers.schedule(
+                    () -> submit(() -> fireScheduled(name)), delay, java.util.concurrent.TimeUnit.MILLISECONDS));
+        } catch (Exception ignored) {
+            /* nodeTimers shut down (project closing) */
+        }
+    }
+
+    private void cancelTimer(String name) {
+        java.util.concurrent.ScheduledFuture<?> f = scheduledFutures.remove(name);
+        if (f != null) f.cancel(false);
+    }
+
+    private void cancelAllTimers() {
+        for (java.util.concurrent.ScheduledFuture<?> f : scheduledFutures.values()) {
+            if (f != null) f.cancel(false);
+        }
+        scheduledFutures.clear();
+    }
+
+    /** Timer callback (scheduler thread): a SCHEDULED node's delay elapsed → READY → pump. Idempotent. */
+    private void fireScheduled(String name) {
+        if (exec == null || exec.state != WorkflowState.RUNNING) return;
+        scheduledFutures.remove(name);
+        NodeRuntime r = exec.nodes.get(name);
+        if (r == null || r.status != NodeStatus.SCHEDULED) return;   // aborted / redispatched away
+        r.status = NodeStatus.READY;
+        r.scheduledStartAt = null;
+        readyQueue.add(name);
+        LOG.info("[Workflow] node " + name + " SCHEDULED → READY (timer fired)");
+        persist();
+        broadcastExec();
+        pump();
+    }
+
+    /**
+     * Re-arm timers for nodes restored as {@code SCHEDULED} (resume after restart —
+     * DN14). A node whose due time already passed during downtime goes straight to
+     * {@code READY}; one still in the future is re-armed for the remaining wait.
+     * Caller pumps afterwards.
+     */
+    private void rearmScheduledTimers() {
+        long now = System.currentTimeMillis();
         for (Map.Entry<String, NodeRuntime> e : exec.nodes.entrySet()) {
             NodeRuntime r = e.getValue();
-            if (r.status == NodeStatus.PENDING && allDepsDone(e.getKey())) {
+            if (r.status != NodeStatus.SCHEDULED) continue;
+            long dueAt = r.scheduledStartAt != null ? r.scheduledStartAt : now;
+            if (dueAt <= now) {
                 r.status = NodeStatus.READY;
+                r.scheduledStartAt = null;
                 readyQueue.add(e.getKey());
+            } else {
+                armTimer(e.getKey(), dueAt);
             }
         }
     }
@@ -394,6 +540,7 @@ public final class SupervisorWorkflowManager implements Disposable {
                 slots.release();
                 break;
             }
+            slotHolders.add(name);   // D23: this node now occupies a permit
             LOG.info("[Workflow] pump acquired slot for " + name + ", ready=" + readyQueue);
             startNode(nameToNode.get(name));
         }
@@ -831,28 +978,213 @@ public final class SupervisorWorkflowManager implements Disposable {
     }
 
     /**
-     * Startup recovery (§17 / D17): a workflow left {@code RUNNING} when the IDE
-     * shut down has lost all its pairs/tabs and is NOT auto-resumed — mark its
-     * persisted execution (and any non-terminal node) {@code ABORTED}. Runs on
-     * the scheduler thread over the on-disk copies only; never touches the live
-     * {@link #exec} (which is null at startup).
+     * Startup recovery (D18/D20 — resume-and-redispatch-plan §3.1). A workflow
+     * left {@code RUNNING} when the IDE shut down has lost all its pairs/cockpit
+     * windows; instead of discarding it ({@code ABORTED}, the old D17 behaviour)
+     * we reload it into the live {@link #exec} as {@code PAUSED} — the DAG and
+     * node statuses are fully restored, the single-workflow lock is held, but the
+     * engine does NOT schedule (no cockpit, no pump) until the user clicks 「恢复运行」
+     * ({@link #resumeWorkflow}). Node-status mapping:
+     * <ul>
+     *   <li>{@code DONE} — kept (report on disk, downstream reads it);</li>
+     *   <li>{@code RUNNING} — half-done, pair is dead → {@code WAITING_HUMAN} with
+     *       an "IDE 重启" reason, awaiting a manual {@link #redispatchNode};</li>
+     *   <li>{@code READY} — never started a pair (no side effects) → back to
+     *       {@code PENDING} so resume re-queues it cleanly;</li>
+     *   <li>{@code PENDING} / {@code WAITING_HUMAN} — kept.</li>
+     * </ul>
+     *
+     * <p>The single-workflow lock means at most one execution is {@code RUNNING};
+     * if stale data somehow holds several, the first is restored and the rest are
+     * marked {@code ABORTED} on disk ({@link #abortPersistedOnly}). Runs on the
+     * scheduler thread; {@link #exec} is null at startup so adopting it is safe.
      */
-    public void recoverStaleExecutionsOnStartup() {
+    public void rehydrateOnStartup() {
         submit(() -> {
+            WorkflowExecution chosen = null;
+            WorkflowDefinition chosenDef = null;
             for (WorkflowDefinition def : store.loadAll()) {
                 if (def == null || def.id == null) continue;
                 WorkflowExecution e = store.loadExecution(def.id);
                 if (e == null || e.state != WorkflowState.RUNNING) continue;
-                if (e.nodes != null) {
-                    for (NodeRuntime r : e.nodes.values()) {
-                        if (r != null && r.status != NodeStatus.DONE) r.status = NodeStatus.ABORTED;
-                    }
+                if (chosen == null) {
+                    chosen = e;
+                    chosenDef = def;
+                } else {
+                    abortPersistedOnly(def.id, e);   // stale duplicate — discard
                 }
-                e.state = WorkflowState.ABORTED;
-                store.saveExecution(def.id, e);
-                LOG.info("[Workflow] startup recovery: wf=" + def.id
-                        + " stale RUNNING → ABORTED (pairs/tabs gone after restart)");
             }
+            if (chosen == null || chosenDef == null) return;
+
+            if (chosen.nodes != null) {
+                for (NodeRuntime r : chosen.nodes.values()) {
+                    if (r == null) continue;
+                    if (r.status == NodeStatus.RUNNING) {
+                        r.status = NodeStatus.WAITING_HUMAN;
+                        r.escalationReason = "IDE 重启，任务已中断，可重新下发";
+                        r.pairId = null;
+                        r.windowId = null;
+                    } else if (r.status == NodeStatus.READY) {
+                        r.status = NodeStatus.PENDING;   // re-queued on resume
+                    }
+                    // SCHEDULED kept as-is (with scheduledStartAt); resume re-arms its
+                    // timer (DN14). No timer is armed while PAUSED.
+                }
+            }
+
+            currentDef = chosenDef;
+            nameToNode.clear();
+            for (WorkflowNode n : chosenDef.nodesSafe()) nameToNode.put(n.name, n);
+            int n = chosen.concurrency > 0 ? chosen.concurrency : DEFAULT_WF_CONCURRENCY;
+            chosen.concurrency = n;
+            chosen.state = WorkflowState.PAUSED;
+            exec = chosen;
+            slots = new Semaphore(n);
+            slotHolders.clear();
+            cancelAllTimers();
+            readyQueue.clear();
+            pairToNode.clear();
+            handles.clear();
+
+            persist();
+            broadcastExec();   // best-effort; webview补拉 via workflow_list (requestList pushes PAUSED)
+            broadcastStatuses();   // → PAUSED badge in list
+            LOG.info("[Workflow] rehydrate wf=" + chosen.workflowId + " RUNNING → PAUSED (await resume)");
+        });
+    }
+
+    /** Discard a (duplicate / unchosen) persisted execution: non-terminal nodes → ABORTED, on disk only. */
+    private void abortPersistedOnly(String id, WorkflowExecution e) {
+        if (e.nodes != null) {
+            for (NodeRuntime r : e.nodes.values()) {
+                if (r != null && r.status != NodeStatus.DONE) r.status = NodeStatus.ABORTED;
+            }
+        }
+        e.state = WorkflowState.ABORTED;
+        store.saveExecution(id, e);
+        LOG.info("[Workflow] startup: extra stale RUNNING wf=" + id + " → ABORTED (single-workflow lock)");
+    }
+
+    /**
+     * §3.2 — one-click resume of a {@code PAUSED} (restored) execution. Opens the
+     * cockpit now (NOT at startup — D18: no auto windows), flips to {@code RUNNING}
+     * and pumps the "safe frontier" (never-started {@code PENDING} nodes whose deps
+     * are all DONE). Interrupted {@code WAITING_HUMAN} nodes are NOT auto-run — the
+     * user re-dispatches them individually ({@link #redispatchNode}); their
+     * downstream stays {@code PENDING} until they reach DONE.
+     */
+    public void resumeWorkflow(@Nullable String id) {
+        submit(() -> {
+            if (exec == null || exec.state != WorkflowState.PAUSED) {
+                broadcastOpResult("resume", false, "没有可恢复的工作流");
+                broadcastExec();
+                return;
+            }
+            if (id != null && !id.equals(exec.workflowId)) {
+                broadcastOpResult("resume", false, "工作流不匹配");
+                return;
+            }
+            if (currentDef == null) {
+                broadcastOpResult("resume", false, "工作流定义缺失，无法恢复");
+                return;
+            }
+            launcher.openCockpit(exec.concurrency);   // open windows only now
+            exec.state = WorkflowState.RUNNING;
+            slots = new Semaphore(exec.concurrency);
+            slotHolders.clear();
+            readyQueue.clear();
+            enqueueReady();                            // safe frontier (PENDING deps-done)
+            rearmScheduledTimers();                    // restored SCHEDULED nodes (DN14)
+            LOG.info("[Workflow] resume wf=" + exec.workflowId + " PAUSED → RUNNING, ready=" + readyQueue);
+            persist();
+            broadcastExec();
+            broadcastStatuses();   // → RUNNING badge in list
+            broadcastOpResult("resume", true, null);
+            pump();
+        });
+    }
+
+    /**
+     * §3.3 — re-dispatch a stuck/interrupted node (D21/D22/DN10). Adaptive:
+     * <ul>
+     *   <li>{@code mode="restart"} or no live pair → tear the old pair down and
+     *       re-launch the node from scratch (fresh plan assembly picks up the
+     *       latest upstream reports);</li>
+     *   <li>otherwise (a live pair exists) → just re-send the kickoff to the
+     *       existing supervisor (lightweight; the task "didn't land").</li>
+     * </ul>
+     * Only valid while {@code RUNNING} (DN10 — resume a PAUSED run first). If this
+     * node holds no permit and concurrency is full, it is queued (D22) and starts
+     * when a slot frees. No rollback (D4) — the front-end confirms first.
+     */
+    public void redispatchNode(@Nullable String name, @Nullable String mode) {
+        submit(() -> {
+            if (exec == null || exec.state != WorkflowState.RUNNING) {
+                broadcastOpResult("redispatch", false, "请先恢复运行工作流");
+                return;
+            }
+            WorkflowNode node = name == null ? null : nameToNode.get(name);
+            NodeRuntime rt = name == null ? null : exec.nodes.get(name);
+            if (node == null || rt == null) {
+                broadcastOpResult("redispatch", false, "节点不存在");
+                return;
+            }
+            if (rt.status == NodeStatus.DONE) {
+                broadcastOpResult("redispatch", false, "节点已完成，无需重新下发");
+                return;
+            }
+
+            // D27: re-dispatch means "run now" — drop any pending start timer/delay.
+            cancelTimer(name);
+            rt.scheduledStartAt = null;
+
+            NodeHandle h = handles.get(name);
+            boolean livePair = h != null && h.pair != null;
+            boolean forceRestart = "restart".equals(mode);
+
+            // Ensure this node holds exactly one permit (D22/D23).
+            if (!slotHolders.contains(name)) {
+                if (slots == null || !slots.tryAcquire()) {
+                    // Concurrency full → queue; pump() starts it when a slot frees.
+                    rt.status = NodeStatus.READY;
+                    rt.escalationReason = null;
+                    if (!readyQueue.contains(name)) readyQueue.add(name);
+                    launcher.setNodeStatus(name, NodeStatus.READY);
+                    persist();
+                    broadcastExec();
+                    broadcastOpResult("redispatch", true, "并发已满，已排队");
+                    pump();
+                    return;
+                }
+                slotHolders.add(name);
+            }
+
+            rt.escalationReason = null;
+
+            if (livePair && !forceRestart) {
+                // (a) lightweight re-kick — reuse the live pair, re-send its plan.
+                rt.status = NodeStatus.RUNNING;
+                launcher.setNodeStatus(name, NodeStatus.RUNNING);
+                sendKickoff(name, h, true);
+                scheduleKickoffRetry(name, h);
+                LOG.info("[Workflow] redispatch(re-kick) node=" + name
+                        + " pair=" + (h.pair != null ? h.pair.getPairId() : "?"));
+            } else {
+                // (b) heavyweight re-launch — kill old pair, drop handle/mapping,
+                // re-run startNode (it does NOT acquire a slot; we already hold one).
+                if (h != null && h.windowId != null) launcher.stop(h.windowId);
+                handles.remove(name);
+                if (rt.pairId != null) pairToNode.remove(rt.pairId);
+                rt.pairId = null;
+                rt.windowId = null;
+                rt.status = NodeStatus.READY;          // pairStarted flips READY→RUNNING
+                launcher.setNodeStatus(name, NodeStatus.READY);
+                startNode(node);
+                LOG.info("[Workflow] redispatch(re-launch) node=" + name + " forceRestart=" + forceRestart);
+            }
+            persist();
+            broadcastExec();
+            broadcastOpResult("redispatch", true, null);
         });
     }
 
@@ -889,6 +1221,35 @@ public final class SupervisorWorkflowManager implements Disposable {
 
     private void broadcastDefinitions() {
         broadcast("window.onWorkflowDefinitions", gson.toJson(store.loadAll()));
+        broadcastStatuses();   // definitions changed → refresh per-workflow status badges
+    }
+
+    /**
+     * D24/DN15 — push each workflow's latest execution state ({@code {wfId: state}})
+     * so the left list can badge running / paused / completed / aborted across
+     * restarts. The live execution uses its in-memory state (freshest); the rest
+     * are read from {@code execution.json}. Called only at workflow-level state
+     * changes (not per-node) to avoid re-reading every execution on each tick.
+     */
+    private void broadcastStatuses() {
+        broadcast("window.onWorkflowStatuses", statusesJson());
+    }
+
+    private String statusesJson() {
+        JsonObject o = new JsonObject();
+        WorkflowExecution live = exec;
+        for (WorkflowDefinition def : store.loadAll()) {
+            if (def == null || def.id == null) continue;
+            WorkflowState st;
+            if (live != null && def.id.equals(live.workflowId)) {
+                st = live.state;
+            } else {
+                WorkflowExecution e = store.loadExecution(def.id);
+                st = e != null ? e.state : null;
+            }
+            if (st != null) o.addProperty(def.id, st.name());
+        }
+        return gson.toJson(o);
     }
 
     private void escalate(String name, String reason) {
@@ -1047,6 +1408,11 @@ public final class SupervisorWorkflowManager implements Disposable {
         } catch (Exception ignored) {
             /* best-effort */
         }
+        try {
+            nodeTimers.shutdownNow();
+        } catch (Exception ignored) {
+            /* best-effort */
+        }
     }
 
     // ─── test-only accessors ─────────────────────────────────────────────
@@ -1064,5 +1430,11 @@ public final class SupervisorWorkflowManager implements Disposable {
     @org.jetbrains.annotations.TestOnly
     List<String> readyQueueForTest() {
         return new ArrayList<>(readyQueue);
+    }
+
+    /** Drive a SCHEDULED node's timer synchronously (avoids waiting real wall-clock). */
+    @org.jetbrains.annotations.TestOnly
+    void fireScheduledForTest(String name) {
+        submit(() -> fireScheduled(name));
     }
 }

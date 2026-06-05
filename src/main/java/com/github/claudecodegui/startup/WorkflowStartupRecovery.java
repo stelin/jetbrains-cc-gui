@@ -10,13 +10,16 @@ import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
 /**
- * Workflow startup recovery (coding-plan §17 / §24 / D17): a supervisor
- * workflow left {@code RUNNING} when the IDE shut down has lost all its pairs
- * and tabs and is NOT auto-resumed. On project open, mark any such persisted
- * execution {@code ABORTED} so the overview reflects reality on next view.
+ * Workflow startup recovery (D18/D20 — resume-and-redispatch-plan §3.1): a
+ * supervisor workflow left {@code RUNNING} when the IDE shut down has lost all
+ * its pairs/cockpit windows. On project open, reload it into a {@code PAUSED}
+ * state — the DAG and node statuses are fully restored and the lock is held, but
+ * nothing runs until the user clicks 「恢复运行」. (Previously this discarded the
+ * run as {@code ABORTED}, the old D17 behaviour.)
  *
- * <p>Delegates to {@link SupervisorWorkflowManager#recoverStaleExecutionsOnStartup()},
- * which runs the scan on its own scheduler thread over on-disk copies only.
+ * <p>Delegates to {@link SupervisorWorkflowManager#rehydrateOnStartup()}, which
+ * runs on its own scheduler thread and adopts the on-disk copy into the live
+ * execution.
  */
 public class WorkflowStartupRecovery implements ProjectActivity {
 
@@ -26,7 +29,7 @@ public class WorkflowStartupRecovery implements ProjectActivity {
     @Override
     public Object execute(@NotNull Project project, @NotNull Continuation<? super Unit> continuation) {
         try {
-            SupervisorWorkflowManager.getInstance(project).recoverStaleExecutionsOnStartup();
+            SupervisorWorkflowManager.getInstance(project).rehydrateOnStartup();
         } catch (Exception e) {
             LOG.warn("[Workflow] startup recovery dispatch failed: " + e.getMessage());
         }

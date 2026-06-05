@@ -295,6 +295,8 @@ public class ClaudeMessageHandler implements MessageCallback {
         if (!content.startsWith("{")) {
             return;
         }
+        // Deadlock fix (2026-06-04): an assistant message is main-AI activity.
+        noteMainAIActivity();
 
         try {
             // Parse the complete JSON message
@@ -471,6 +473,8 @@ public class ClaudeMessageHandler implements MessageCallback {
         if (content == null || content.isEmpty()) {
             return;
         }
+        // Deadlock fix (2026-06-04): streaming text is main-AI activity.
+        noteMainAIActivity();
         // If previously thinking, content output means thinking is complete
         if (isThinking) {
             isThinking = false;
@@ -631,6 +635,10 @@ public class ClaudeMessageHandler implements MessageCallback {
         if (!content.startsWith("{")) {
             return;
         }
+        // Deadlock fix (2026-06-04): a tool_result means the main AI got data
+        // back and is resuming — it's activity, and it clears any awaiting-user
+        // latch (e.g. an AskUserQuestion answer just came back).
+        clearMainAIAwaitingUser();
 
         try {
             JsonObject toolResultBlock = gson.fromJson(content, JsonObject.class);
@@ -1374,6 +1382,139 @@ public class ClaudeMessageHandler implements MessageCallback {
     }
 
     /**
+     * Deadlock fix (2026-06-04): bump the attached pair's main-AI activity clock
+     * so {@code DeadlockGuard} can tell honest work from a silent / parked turn.
+     * No-op when no pair is attached.
+     */
+    private void noteMainAIActivity() {
+        // Throttle: this fires per content-delta (per token); ms granularity is
+        // plenty for the guard's minutes-scale silence threshold, so skip the
+        // pair lookup if we already noted activity in the last second.
+        long now = System.currentTimeMillis();
+        if (now - lastActivityNoteMs < 1000L) return;
+        lastActivityNoteMs = now;
+        try {
+            com.github.claudecodegui.session.pair.PairSession pair = findAttachedPair();
+            if (pair == null) return;
+            com.github.claudecodegui.session.pair.MainAIMonitor m = pair.getMainAIMonitor();
+            if (m != null) m.noteActivity();
+        } catch (Throwable ignored) { /* never propagate */ }
+    }
+
+    /** Throttle marker for {@link #noteMainAIActivity()} (single-threaded per session). */
+    private long lastActivityNoteMs = 0L;
+
+    /**
+     * Deadlock fix (2026-06-04): a tool_result means the main AI got data back
+     * and is resuming — count it as activity and drop the awaiting-user latch
+     * (e.g. an AskUserQuestion answer just landed).
+     */
+    private void clearMainAIAwaitingUser() {
+        try {
+            com.github.claudecodegui.session.pair.PairSession pair = findAttachedPair();
+            if (pair == null) return;
+            com.github.claudecodegui.session.pair.MainAIMonitor m = pair.getMainAIMonitor();
+            if (m != null) {
+                m.noteActivity();
+                m.clearAwaitingUser();
+            }
+        } catch (Throwable ignored) { /* never propagate */ }
+    }
+
+    /**
+     * Deadlock fix (2026-06-04): a main-AI tool_use that can block on the user
+     * (AskUserQuestion / ExitPlanMode plan-approval) suspends the SDK turn
+     * without ever firing turn_end. We only set the awaiting-user LATCH here and
+     * let {@code DeadlockGuard}'s tick be the waker.
+     *
+     * <p>2026-06-04 fix: we deliberately do NOT wake the supervisor eagerly from
+     * the tool_use. The tool may be denied by a PreToolUse hook (e.g.
+     * {@code AskUserQuestion denied}) or otherwise return immediately — in which
+     * case a tool_result lands within ~1s and {@link #clearMainAIAwaitingUser}
+     * drops the latch. An eager wake fired a false "main AI is blocked" signal
+     * that made the supervisor try to wait on an already-discharged contract.
+     * The guard tick (≤30s) reads {@code isAwaitingUser()} AFTER any such quick
+     * clear, so it acts only on a turn that is GENUINELY parked. No-op for
+     * non-blocking tools / no pair.
+     */
+    private void notifyMainAIAwaitingUserFromTool(String toolName, JsonObject input) {
+        if (toolName == null) return;
+        String lower = toolName.toLowerCase();
+        String kind;
+        if (lower.contains("askuserquestion") || lower.contains("ask_user")) {
+            kind = "ask_user";
+        } else if (lower.contains("exitplanmode") || lower.contains("exit_plan")) {
+            kind = "plan_approval";
+        } else {
+            return;
+        }
+        try {
+            com.github.claudecodegui.session.pair.PairSession pair = findAttachedPair();
+            if (pair == null) return;
+            String question = extractAwaitingUserQuestion(kind, input);
+            com.github.claudecodegui.session.pair.MainAIMonitor m = pair.getMainAIMonitor();
+            if (m != null) m.markAwaitingUser(kind, question);
+        } catch (Throwable ignored) { /* never propagate */ }
+    }
+
+    private static String extractAwaitingUserQuestion(String kind, JsonObject input) {
+        if (input == null) return null;
+        try {
+            if ("plan_approval".equals(kind) && input.has("plan") && !input.get("plan").isJsonNull()) {
+                return input.get("plan").getAsString();
+            }
+            // AskUserQuestion: input.questions[].question
+            if (input.has("questions") && input.get("questions").isJsonArray()) {
+                StringBuilder sb = new StringBuilder();
+                for (var el : input.getAsJsonArray("questions")) {
+                    if (el == null || !el.isJsonObject()) continue;
+                    JsonObject q = el.getAsJsonObject();
+                    if (q.has("question") && !q.get("question").isJsonNull()) {
+                        if (sb.length() > 0) sb.append('\n');
+                        sb.append(q.get("question").getAsString());
+                    }
+                }
+                if (sb.length() > 0) return sb.toString();
+            }
+            if (input.has("question") && !input.get("question").isJsonNull()) {
+                return input.get("question").getAsString();
+            }
+        } catch (Exception ignored) { /* best-effort */ }
+        return null;
+    }
+
+    /**
+     * Deadlock fix (2026-06-04): arm the awaiting-user latch when a turn ends
+     * with a "本轮待确认事项" section AND there is still an open MAIN_AI contract
+     * (i.e. the supervisor hasn't been notified by a clean discharge). The
+     * turn_end event already carries the text; this latch is the backstop so
+     * DeadlockGuard wakes the supervisor rather than re-injecting a nudge.
+     */
+    private void maybeMarkAwaitingUserFromText(PairSession pair, String assistantText) {
+        if (pair == null || assistantText == null || assistantText.isEmpty()) return;
+        if (!assistantText.contains("本轮待确认事项")) return;
+        com.github.claudecodegui.session.pair.contract.ContractRegistry registry = pair.getContractRegistry();
+        boolean hasOpenMainAi = false;
+        if (registry != null) {
+            for (com.github.claudecodegui.session.pair.contract.Contract c : registry.getOpenContracts()) {
+                if (c.assignedTo == com.github.claudecodegui.session.pair.contract.ContractAssignee.MAIN_AI) {
+                    hasOpenMainAi = true;
+                    break;
+                }
+            }
+        }
+        // Contract already discharged → the supervisor was woken via turn_end;
+        // no backstop needed.
+        if (!hasOpenMainAi) return;
+        com.github.claudecodegui.session.pair.MainAIMonitor m = pair.getMainAIMonitor();
+        if (m != null) {
+            int idx = assistantText.indexOf("本轮待确认事项");
+            String excerpt = idx >= 0 ? assistantText.substring(idx) : assistantText;
+            m.markAwaitingUser("pending_confirmation", excerpt);
+        }
+    }
+
+    /**
      * Append a tool_use record to the in-flight turn buffer. Called from
      * {@link #handleAssistantMessage(String)} whenever a tool_use block is seen.
      */
@@ -1387,6 +1528,13 @@ public class ClaudeMessageHandler implements MessageCallback {
         }
         String name = toolBlock.has("name") && !toolBlock.get("name").isJsonNull()
                 ? toolBlock.get("name").getAsString() : "?";
+        // Deadlock fix (2026-06-04): a tool_use is main-AI activity; and a
+        // user-blocking tool (AskUserQuestion / ExitPlanMode) parks the turn
+        // without a turn_end — flag it + wake the supervisor immediately.
+        noteMainAIActivity();
+        JsonObject toolInput = toolBlock.has("input") && toolBlock.get("input").isJsonObject()
+                ? toolBlock.getAsJsonObject("input") : null;
+        notifyMainAIAwaitingUserFromTool(name, toolInput);
         String path = null;
         if (toolBlock.has("input") && toolBlock.get("input").isJsonObject()) {
             JsonObject input = toolBlock.getAsJsonObject("input");
@@ -1461,6 +1609,11 @@ public class ClaudeMessageHandler implements MessageCallback {
             }
             PairSession pair = findAttachedPair();
             if (pair == null || pair.getEventBus() == null) return;
+            // Deadlock fix (2026-06-04): a subagent boundary is main-AI activity
+            // — keeps a long multi-subagent turn from tripping the guard's
+            // silence detection.
+            com.github.claudecodegui.session.pair.MainAIMonitor mon = pair.getMainAIMonitor();
+            if (mon != null) mon.noteActivity();
             // Protocol v2 (2026-05-24): bump budget counter so cost tracking
             // reflects subagent calls (each is a separate model call → tokens).
             com.github.claudecodegui.session.pair.PairBudgetTracker bt = pair.getBudgetTracker();
@@ -1532,6 +1685,13 @@ public class ClaudeMessageHandler implements MessageCallback {
         // waiting for the 10min contract deadline. Targets the specific
         // 2026-05-25 stall scenario from docs/plans/2026-05-25-...md §17.1.
         checkContractDischargeOnTurnEnd(pair);
+
+        // Deadlock fix (2026-06-04): a turn that ends with a "本轮待确认事项"
+        // section is the design-supervisor.md prescribed "I need the user to
+        // confirm" path. Arm the awaiting-user latch so DeadlockGuard wakes the
+        // supervisor as a backstop (instead of re-injecting a nudge that would
+        // clobber the question) if the turn_end wake is lost.
+        maybeMarkAwaitingUserFromText(pair, assistantText);
 
         resetTurnBuffer();
     }

@@ -14,6 +14,13 @@ package com.github.claudecodegui.session.pair.workflow;
 public enum NodeStatus {
     /** Dependencies not yet satisfied. */
     PENDING,
+    /**
+     * Dependencies satisfied, but the node has a delay / scheduled start time that
+     * is still in the future (D25 — list-status-and-node-scheduling-plan §3). Holds
+     * no concurrency permit; a timer flips it to {@link #READY} when due. Mirrored
+     * in the front-end {@code NodeStatus} union.
+     */
+    SCHEDULED,
     /** Deps satisfied, queued waiting for a concurrency slot. */
     READY,
     /** Tab created + pair started. */

@@ -19,9 +19,9 @@ import static org.junit.Assert.assertNotNull;
 
 /**
  * P5 polish tests (coding-plan §17 / §16.5 / §24): user-closed node tab →
- * WAITING_HUMAN, IDE-restart stale-execution recovery → ABORTED, and the DN9
- * daemon-died callback chain (a mock {@link IBridge} firing {@code onDaemonDied}
- * routes through the registered listener into
+ * WAITING_HUMAN, IDE-restart recovery → PAUSED (D18/D20, restored not discarded),
+ * and the DN9 daemon-died callback chain (a mock {@link IBridge} firing
+ * {@code onDaemonDied} routes through the registered listener into
  * {@link SupervisorWorkflowManager#onNodeDaemonDown}).
  */
 public class SupervisorWorkflowManagerP5Test {
@@ -140,10 +140,10 @@ public class SupervisorWorkflowManagerP5Test {
         assertEquals("tab 被关闭", e.nodes.get("A").escalationReason);
     }
 
-    // ─── IDE restart recovery (§17 / D17) ───────────────────────────────
+    // ─── IDE restart recovery → PAUSED (D18/D20) ────────────────────────
 
     @Test
-    public void staleRunningExecutionMarkedAbortedOnStartup() throws IOException {
+    public void staleRunningExecutionRestoredToPausedOnStartup() throws IOException {
         Path tmp = Files.createTempDirectory("wf-p5-recover");
         WorkflowStore store = new WorkflowStore(tmp.resolve("store"));
         store.save(diamond());
@@ -163,15 +163,22 @@ public class SupervisorWorkflowManagerP5Test {
         SupervisorWorkflowManager mgr = new SupervisorWorkflowManager(
                 null, store, new FakeLauncher(tmp), directScheduler(), () -> known, () -> 3);
 
-        mgr.recoverStaleExecutionsOnStartup();
+        mgr.rehydrateOnStartup();
 
+        // Restored into the live execution AND persisted as PAUSED.
+        WorkflowExecution live = mgr.execForTest();
+        assertNotNull(live);
+        assertEquals(WorkflowState.PAUSED, live.state);
         WorkflowExecution recovered = store.loadExecution("wf1");
         assertNotNull(recovered);
-        assertEquals(WorkflowState.ABORTED, recovered.state);
-        // DONE preserved; non-terminal → ABORTED
+        assertEquals(WorkflowState.PAUSED, recovered.state);
+        // DONE preserved; RUNNING (half-done) → WAITING_HUMAN; PENDING kept.
         assertEquals(NodeStatus.DONE, recovered.nodes.get("A").status);
-        assertEquals(NodeStatus.ABORTED, recovered.nodes.get("B").status);
-        assertEquals(NodeStatus.ABORTED, recovered.nodes.get("C").status);
+        assertEquals(NodeStatus.WAITING_HUMAN, recovered.nodes.get("B").status);
+        assertEquals("IDE 重启，任务已中断，可重新下发", recovered.nodes.get("B").escalationReason);
+        assertEquals(NodeStatus.PENDING, recovered.nodes.get("C").status);
+        // Paused = not scheduling yet: no slots consumed.
+        assertEquals(2, mgr.availableSlotsForTest());
     }
 
     @Test
@@ -191,11 +198,148 @@ public class SupervisorWorkflowManagerP5Test {
         SupervisorWorkflowManager mgr = new SupervisorWorkflowManager(
                 null, store, new FakeLauncher(tmp), directScheduler(), () -> known, () -> 3);
 
-        mgr.recoverStaleExecutionsOnStartup();
+        mgr.rehydrateOnStartup();
 
+        // Only RUNNING executions are adopted; a COMPLETED one is left untouched.
+        assertEquals(null, mgr.execForTest());
         WorkflowExecution after = store.loadExecution("wf1");
         assertEquals(WorkflowState.COMPLETED, after.state);
         assertEquals(NodeStatus.DONE, after.nodes.get("A").status);
+    }
+
+    // ─── resume + re-dispatch (D18/D21/D22) ─────────────────────────────
+
+    /** Rehydrate a stale RUNNING diamond (A done, B interrupted, C pending) into PAUSED. */
+    private SupervisorWorkflowManager pausedDiamond(Path tmp) throws IOException {
+        WorkflowStore store = new WorkflowStore(tmp.resolve("store"));
+        store.save(diamond());
+        WorkflowExecution stale = new WorkflowExecution();
+        stale.workflowId = "wf1";
+        stale.state = WorkflowState.RUNNING;
+        stale.concurrency = 2;
+        NodeRuntime a = new NodeRuntime(); a.status = NodeStatus.DONE;
+        NodeRuntime b = new NodeRuntime(); b.status = NodeStatus.RUNNING;
+        NodeRuntime c = new NodeRuntime(); c.status = NodeStatus.PENDING;
+        stale.nodes.put("A", a); stale.nodes.put("B", b); stale.nodes.put("C", c);
+        store.saveExecution("wf1", stale);
+        Set<String> known = new HashSet<>(Arrays.asList("sup"));
+        SupervisorWorkflowManager mgr = new SupervisorWorkflowManager(
+                null, store, new FakeLauncher(tmp), directScheduler(), () -> known, () -> 3);
+        mgr.rehydrateOnStartup();
+        return mgr;
+    }
+
+    @Test
+    public void resumeDoesNotAutoRunInterruptedNode() throws IOException {
+        Path tmp = Files.createTempDirectory("wf-resume");
+        SupervisorWorkflowManager mgr = pausedDiamond(tmp);
+
+        mgr.resumeWorkflow("wf1");
+
+        WorkflowExecution e = mgr.execForTest();
+        assertEquals(WorkflowState.RUNNING, e.state);
+        // Interrupted B stays WAITING_HUMAN (manual re-dispatch); C blocked by B.
+        assertEquals(NodeStatus.WAITING_HUMAN, e.nodes.get("B").status);
+        assertEquals(NodeStatus.PENDING, e.nodes.get("C").status);
+        // Safe frontier here is empty (A done, B/C not eligible) → no slot used.
+        assertEquals(2, mgr.availableSlotsForTest());
+    }
+
+    @Test
+    public void redispatchRelaunchesInterruptedNodeAndConsumesOneSlot() throws IOException {
+        Path tmp = Files.createTempDirectory("wf-redispatch");
+        SupervisorWorkflowManager mgr = pausedDiamond(tmp);
+        mgr.resumeWorkflow("wf1");
+        WorkflowExecution e = mgr.execForTest();
+
+        // No live pair after restart → re-launch path; FakeLauncher drives it to RUNNING.
+        mgr.redispatchNode("B", "auto");
+        assertEquals(NodeStatus.RUNNING, e.nodes.get("B").status);
+        assertEquals("pair-B", e.nodes.get("B").pairId);
+        assertEquals(1, mgr.availableSlotsForTest());   // exactly one permit consumed
+
+        // Completing B releases the permit and advances the diamond's join node C.
+        mgr.onNodeReport("pair-B", NodeStatus.DONE, "ok", null);
+        assertEquals(NodeStatus.DONE, e.nodes.get("B").status);
+        assertEquals(NodeStatus.RUNNING, e.nodes.get("C").status);
+        assertEquals("pair-C", e.nodes.get("C").pairId);
+    }
+
+    @Test
+    public void redispatchWhilePausedIsRejected() throws IOException {
+        Path tmp = Files.createTempDirectory("wf-redispatch-paused");
+        SupervisorWorkflowManager mgr = pausedDiamond(tmp);   // still PAUSED, not resumed
+
+        mgr.redispatchNode("B", "auto");
+
+        // DN10: must resume first — node untouched, no slot consumed.
+        WorkflowExecution e = mgr.execForTest();
+        assertEquals(NodeStatus.WAITING_HUMAN, e.nodes.get("B").status);
+        assertEquals(2, mgr.availableSlotsForTest());
+    }
+
+    /** Two independent nodes, concurrency 1, both interrupted by a restart → PAUSED. */
+    private SupervisorWorkflowManager pausedPairConcurrency1(Path tmp) throws IOException {
+        WorkflowStore store = new WorkflowStore(tmp.resolve("store"));
+        WorkflowDefinition d = new WorkflowDefinition();
+        d.id = "wf1";
+        d.name = "twoIndependent";
+        d.maxConcurrency = 1;
+        d.nodes = new ArrayList<>(Arrays.asList(node("A"), node("B")));
+        store.save(d);
+        WorkflowExecution stale = new WorkflowExecution();
+        stale.workflowId = "wf1";
+        stale.state = WorkflowState.RUNNING;
+        stale.concurrency = 1;
+        NodeRuntime a = new NodeRuntime(); a.status = NodeStatus.RUNNING;
+        NodeRuntime b = new NodeRuntime(); b.status = NodeStatus.RUNNING;
+        stale.nodes.put("A", a); stale.nodes.put("B", b);
+        store.saveExecution("wf1", stale);
+        Set<String> known = new HashSet<>(Arrays.asList("sup"));
+        SupervisorWorkflowManager mgr = new SupervisorWorkflowManager(
+                null, store, new FakeLauncher(tmp), directScheduler(), () -> known, () -> 3);
+        mgr.rehydrateOnStartup();
+        return mgr;
+    }
+
+    @Test
+    public void redispatchQueuesWhenConcurrencyFull() throws IOException {
+        Path tmp = Files.createTempDirectory("wf-redispatch-full");
+        SupervisorWorkflowManager mgr = pausedPairConcurrency1(tmp);
+        mgr.resumeWorkflow("wf1");
+        WorkflowExecution e = mgr.execForTest();
+        assertEquals(1, mgr.availableSlotsForTest());
+
+        // A takes the only permit.
+        mgr.redispatchNode("A", "auto");
+        assertEquals(NodeStatus.RUNNING, e.nodes.get("A").status);
+        assertEquals(0, mgr.availableSlotsForTest());
+
+        // B can't get a permit → queued (D22), not started.
+        mgr.redispatchNode("B", "auto");
+        assertEquals(NodeStatus.READY, e.nodes.get("B").status);
+        assertEquals(0, mgr.availableSlotsForTest());
+
+        // A completes → permit frees → pump starts the queued B.
+        mgr.onNodeReport("pair-A", NodeStatus.DONE, "ok", null);
+        assertEquals(NodeStatus.RUNNING, e.nodes.get("B").status);
+        assertEquals("pair-B", e.nodes.get("B").pairId);
+        assertEquals(0, mgr.availableSlotsForTest());
+    }
+
+    @Test
+    public void slotsConservedAcrossRestartResumeRedispatchComplete() throws IOException {
+        Path tmp = Files.createTempDirectory("wf-slot-conserve");
+        SupervisorWorkflowManager mgr = pausedDiamond(tmp);
+        mgr.resumeWorkflow("wf1");
+        WorkflowExecution e = mgr.execForTest();
+
+        mgr.redispatchNode("B", "auto");
+        mgr.onNodeReport("pair-B", NodeStatus.DONE, "ok", null);   // → C pumped
+        mgr.onNodeReport("pair-C", NodeStatus.DONE, "ok", null);
+
+        assertEquals(WorkflowState.COMPLETED, e.state);
+        assertEquals(2, mgr.availableSlotsForTest());   // every permit returned
     }
 
     // ─── DN9 daemon-died callback chain (§16.5) ─────────────────────────

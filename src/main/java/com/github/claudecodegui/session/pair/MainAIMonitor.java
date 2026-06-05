@@ -64,6 +64,30 @@ public class MainAIMonitor {
     private final AtomicLong lastErrorAt = new AtomicLong(0L);
 
     /**
+     * Deadlock fix (2026-06-04): wall-clock of the most recent main-AI stream
+     * signal (assistant message / tool_use / tool_result / subagent_stop /
+     * delta). Lets {@code DeadlockGuard} tell a turn that is doing honest work
+     * (activity keeps refreshing) from one that has gone silent — either hung,
+     * or parked waiting for the user. The old guard only had
+     * {@link #isTurnInProgress()}, which stays {@code true} for a turn suspended
+     * on a user dialog, so it abstained forever.
+     */
+    private final AtomicLong lastActivityAt = new AtomicLong(0L);
+
+    /**
+     * Deadlock fix (2026-06-04): true while the main AI's turn is blocked
+     * waiting for a USER answer — AskUserQuestion / ExitPlanMode plan-approval /
+     * a permission prompt, or a turn that ended with a "本轮待确认事项" section.
+     * In this state the SDK turn may still look "in progress" to the runtime,
+     * so {@link #isTurnInProgress()} is NOT a reliable "main AI is busy" signal.
+     * Cleared when the next turn starts or a tool_result resumes the turn.
+     */
+    private volatile boolean awaitingUser = false;
+    private volatile long awaitingUserSince = 0L;
+    private volatile String awaitingUserKind = null;
+    private volatile String awaitingUserQuestion = null;
+
+    /**
      * 2026-05-24: back-references injected by PairSessionManager after
      * construction (the pair / coord / bridge graph is wired top-down). When
      * either is null the auto-rotation evaluation in {@link #onTurnEnd}
@@ -110,6 +134,64 @@ public class MainAIMonitor {
      *  turn is in flight. Used by DeadlockGuard for the grace-period check. */
     public long getTurnStartedAt() {
         return turnStartedAt.get();
+    }
+
+    /**
+     * Deadlock fix (2026-06-04): bump the main-AI activity clock. Called on any
+     * stream signal so DeadlockGuard can distinguish "doing honest work" from
+     * "gone silent (hung / parked on the user)".
+     */
+    public void noteActivity() {
+        lastActivityAt.set(System.currentTimeMillis());
+    }
+
+    /** Wall-clock ms of the most recent main-AI stream signal, or 0 if none
+     *  observed yet this session. */
+    public long getLastActivityAt() {
+        return lastActivityAt.get();
+    }
+
+    /** True while the main AI's turn is parked waiting for a USER answer. */
+    public boolean isAwaitingUser() {
+        return awaitingUser;
+    }
+
+    /** Wall-clock ms when the current awaiting-user episode began (0 if none). */
+    public long getAwaitingUserSince() {
+        return awaitingUserSince;
+    }
+
+    /** Best-effort kind tag of the current wait ("ask_user" / "plan_approval"
+     *  / "permission" / "pending_confirmation"), or null. */
+    public String getAwaitingUserKind() {
+        return awaitingUserKind;
+    }
+
+    /** Best-effort question/preview text of the current wait, or null. */
+    public String getAwaitingUserQuestion() {
+        return awaitingUserQuestion;
+    }
+
+    /**
+     * Deadlock fix (2026-06-04): mark the main AI as blocked waiting for the
+     * user. Idempotent — repeated calls keep the original {@code since} so
+     * DeadlockGuard can dedupe per episode.
+     */
+    public void markAwaitingUser(String kind, String question) {
+        if (!awaitingUser) {
+            awaitingUserSince = System.currentTimeMillis();
+        }
+        awaitingUser = true;
+        awaitingUserKind = kind;
+        awaitingUserQuestion = question;
+    }
+
+    /** Clear the awaiting-user state (the turn resumed or a new turn started). */
+    public void clearAwaitingUser() {
+        awaitingUser = false;
+        awaitingUserSince = 0L;
+        awaitingUserKind = null;
+        awaitingUserQuestion = null;
     }
 
     /** Tear down the eval executor. */
@@ -164,6 +246,10 @@ public class MainAIMonitor {
     public void onTurnStart() {
         long now = System.currentTimeMillis();
         turnStartedAt.set(now);
+        lastActivityAt.set(now);
+        // A fresh turn means any previous user-confirmation request has been
+        // answered or superseded — drop the awaiting-user latch.
+        clearAwaitingUser();
         try {
             l2Store.update(pairId, s -> {
                 if (s.mainAI == null) s.mainAI = new L2State.MainAIState();
@@ -181,6 +267,7 @@ public class MainAIMonitor {
     /** Patch point invoked from ClaudeMessageHandler.handleStreamEnd. */
     public void onTurnEnd() {
         long now = System.currentTimeMillis();
+        lastActivityAt.set(now);
         long startedAt = turnStartedAt.getAndSet(0L);
         long durationMs = startedAt > 0 ? (now - startedAt) : 0L;
         try {

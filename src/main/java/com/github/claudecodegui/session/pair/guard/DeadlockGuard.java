@@ -55,6 +55,22 @@ public class DeadlockGuard {
      */
     public static final long PENDING_DECISION_STUCK_MS = 60_000L;
 
+    /**
+     * Deadlock fix / watchdog patch (2026-06-04): a main-AI turn that is
+     * nominally "in progress" but has produced zero stream activity for this
+     * long is treated as parked — a silent hang, or a blocking dialog the
+     * webview didn't flag — rather than "busy doing honest work". Generous
+     * (3 min) so long silent Task subagents (which don't refresh activity
+     * between SubagentStop boundaries) are not misjudged; the recovery
+     * (waking the supervisor) is non-destructive anyway.
+     */
+    public static final long MAIN_AI_SILENCE_STUCK_MS = 180_000L;
+    /**
+     * Min interval between supervisor wakes for one ongoing awaiting-user stall,
+     * so a still-parked main AI does not spawn a DECISION_REQUEST every tick.
+     */
+    public static final long AWAITING_USER_RENUDGE_MS = 120_000L;
+
     private final PairSession pair;
     private final PlanStateMachine planSm;
     private final ContractRegistry registry;
@@ -68,6 +84,9 @@ public class DeadlockGuard {
      * forward and the guard becomes eligible to fire again on the next stall.
      */
     private volatile long lastLivenessNudgeForTransitionAt = 0L;
+    /** Dedupe handle for the awaiting-user supervisor wake (see
+     *  {@link #escalateAwaitingUserToSupervisor}). */
+    private volatile long lastAwaitingUserNudgeAt = 0L;
 
     public DeadlockGuard(PairSession pair, PlanStateMachine planSm, ContractRegistry registry) {
         this.pair = pair;
@@ -184,6 +203,21 @@ public class DeadlockGuard {
         // delivery but hasn't discharged the contract yet.
         if (!c.isOpen()) return;
 
+        // Deadlock fix / watchdog patch (2026-06-04): the main AI can stop and
+        // wait for the USER (AskUserQuestion / plan-approval / permission, or a
+        // turn that ended with a "本轮待确认事项" section). In that state the SDK
+        // turn stays "in progress" forever, so the isAssigneeTurnInProgress bail
+        // below used to make BOTH watchdog paths (30s tick + per-contract
+        // deadline) abstain indefinitely — the supervisor, parked on
+        // wait_for_contract, was never woken → permanent deadlock. We now detect
+        // it and wake the SUPERVISOR (the coordinator that should decide), NOT
+        // the main AI: the normal R1/R2 re-inject would clobber the very
+        // question the main AI is waiting on.
+        if (c.assignedTo == ContractAssignee.MAIN_AI && isMainAiBlockedOnUser(now)) {
+            escalateAwaitingUserToSupervisor(c, now);
+            return;
+        }
+
         if (isAssigneeTurnInProgress(c.assignedTo)) {
             return;
         }
@@ -249,6 +283,130 @@ public class DeadlockGuard {
                 LOG.warn("[DeadlockGuard] escalate failed for " + c.id + ": " + e.getMessage());
             }
         }
+    }
+
+    /**
+     * Deadlock fix (2026-06-04): the main AI is "blocked on the user" when it
+     * either explicitly raised a confirmation
+     * ({@link MainAIMonitor#isAwaitingUser()} — AskUserQuestion / plan-approval
+     * / permission / 待确认事项), OR its turn is nominally in progress but has
+     * produced NO stream activity for longer than {@link #MAIN_AI_SILENCE_STUCK_MS}
+     * (a silent hang, or a blocking dialog the webview didn't flag). Long honest
+     * work keeps refreshing {@code lastActivityAt}, so it does not trip the
+     * silence branch.
+     */
+    private boolean isMainAiBlockedOnUser(long now) {
+        MainAIMonitor m = pair.getMainAIMonitor();
+        if (m == null) return false;
+        if (m.isAwaitingUser()) return true;
+        if (!m.isTurnInProgress()) return false;
+        long last = m.getLastActivityAt();
+        if (last <= 0L) return false;
+        return (now - last) >= MAIN_AI_SILENCE_STUCK_MS;
+    }
+
+    /**
+     * Deadlock fix (2026-06-04): wake the supervisor when the main AI is parked
+     * waiting for the user. Issues a {@link ContractType#DECISION_REQUEST} to the
+     * SUPERVISOR (the coordinator that should decide) rather than re-injecting a
+     * nudge to the main AI. Deduped so one stuck episode produces at most one
+     * outstanding supervisor request:
+     * <ul>
+     *   <li>skip while a supervisor turn is already in flight;</li>
+     *   <li>skip while ANY supervisor-assigned contract is still open;</li>
+     *   <li>otherwise rate-limit to one issue per {@link #AWAITING_USER_RENUDGE_MS}.</li>
+     * </ul>
+     * If the woken supervisor itself stalls, the DECISION_REQUEST's own deadline
+     * carries it into the existing R3 → {@link #escalateWedgedSupervisorToHuman}
+     * path, so the pair always converges to either progress or a human.
+     */
+    private void escalateAwaitingUserToSupervisor(Contract mainAiContract, long now) {
+        // Supervisor already thinking → it will produce something; don't pile on.
+        if (pair.hasInflightTurn()) return;
+        // Already asked the supervisor and waiting for its answer.
+        for (Contract other : registry.getOpenContracts()) {
+            if (other.assignedTo == ContractAssignee.SUPERVISOR) return;
+        }
+        // Rate-limit repeated wakes for the same ongoing stall.
+        if (now - lastAwaitingUserNudgeAt < AWAITING_USER_RENUDGE_MS) return;
+        lastAwaitingUserNudgeAt = now;
+
+        MainAIMonitor m = pair.getMainAIMonitor();
+        String kind = m != null && m.getAwaitingUserKind() != null
+                ? m.getAwaitingUserKind() : "pending_confirmation";
+        String question = m != null && m.getAwaitingUserQuestion() != null
+                ? m.getAwaitingUserQuestion() : "(主 AI 未给出具体问题文本,请读它最近一轮回复末尾)";
+        long since = m != null && m.getAwaitingUserSince() > 0 ? m.getAwaitingUserSince() : now;
+        long waitedSec = Math.max(1L, (now - since) / 1000L);
+
+        Plan plan = planSm.getCurrent();
+        StringBuilder planSummary = new StringBuilder();
+        if (plan == null) {
+            planSummary.append("(no plan loaded)");
+        } else {
+            planSummary.append("Plan ").append(plan.id)
+                    .append(" state=").append(plan.state)
+                    .append("/").append(plan.subState);
+            PlanStep cur = plan.getCurrentStep();
+            if (cur != null) {
+                planSummary.append("\n- Step ").append(cur.index + 1)
+                        .append("/").append(plan.steps.size())
+                        .append(": ").append(cur.title);
+            }
+        }
+
+        String text = "[Pair 守护] 主 AI 已停下、正在等待用户确认 (" + waitedSec + " 秒, kind=" + kind
+                + "),它不会自己继续;而你(监督者)在等它的 turn_end —— 这是双向等待死锁。\n\n"
+                + "主 AI 的待确认内容:\n" + truncate(question, 1500) + "\n\n"
+                + "当前状态:\n- " + planSummary + "\n\n"
+                + "请本轮必须 emit_action,三选一,禁止仅 narration、禁止 wait:\n"
+                + "(a) emit_action(inject_prompt, {inlinePrompt:'<对每条待确认项的裁决/答复>', objective:'...'}) "
+                + "—— 你能裁决就直接答复主 AI,让它继续推进;\n"
+                + "(b) emit_action(escalate_to_human, {question:'<把待确认项转给用户>', choices:[...], blocking:true}) "
+                + "—— 需要真人拍板时升级;\n"
+                + "(c) emit_action(complete_plan, {summary:'...'}) —— 若这些确认意味着工作已可收尾。";
+
+        JsonObject payload = new JsonObject();
+        payload.addProperty("text", text);
+        payload.addProperty("reason", "main_ai_awaiting_user");
+        payload.addProperty("kind", kind);
+        payload.addProperty("awaitingUserMs", now - since);
+
+        try {
+            registry.issue(ContractIssueRequest.builder()
+                    .parentStepId(mainAiContract.parentStepId)
+                    .type(ContractType.DECISION_REQUEST)
+                    .assignedTo(ContractAssignee.SUPERVISOR)
+                    .payloadJson(payload.toString())
+                    .deadlineMs(5L * 60L * 1000L)
+                    .replaceExisting(false)
+                    .maxRetries(1)
+                    .build());
+            LOG.warn("[DeadlockGuard] " + pair.getPairId()
+                    + " main AI awaiting user (" + kind + ", " + waitedSec
+                    + "s) — DECISION_REQUEST enqueued for supervisor");
+        } catch (Exception e) {
+            LOG.warn("[DeadlockGuard] awaiting-user escalation failed: " + e.getMessage());
+        }
+
+        // Surface in the coordinator strip so the operator sees why the
+        // supervisor got woken.
+        try {
+            com.github.claudecodegui.session.pair.PairStatusPusher pusher = pair.getStatusPusher();
+            if (pusher != null) {
+                pusher.recordCoordinatorEvent(
+                        com.github.claudecodegui.session.pair.PairStatusSnapshot.CoordinatorEvent.Source.GUARD,
+                        "main_ai_awaiting_user",
+                        "主 AI 在等用户确认,已唤醒监督者裁决 (kind=" + kind + ")",
+                        mainAiContract.id);
+            }
+        } catch (Exception ignored) { /* best-effort */ }
+    }
+
+    private static String truncate(String s, int max) {
+        if (s == null) return "";
+        if (s.length() <= max) return s;
+        return s.substring(0, max) + "\n…(截断 " + (s.length() - max) + " 字)";
     }
 
     private boolean isAssigneeTurnInProgress(ContractAssignee assignee) {

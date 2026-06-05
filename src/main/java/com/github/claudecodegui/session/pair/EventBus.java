@@ -348,6 +348,16 @@ public class EventBus {
     }
 
     /**
+     * Deadlock fix (2026-06-04): "main AI is blocked waiting for the user" is no
+     * longer surfaced as an eager EventBus event. The single, debounced waker is
+     * {@code DeadlockGuard} — its tick reads {@code MainAIMonitor.isAwaitingUser()}
+     * (set on AskUserQuestion/ExitPlanMode tool_use or a "本轮待确认事项" turn-end)
+     * and, if the turn is GENUINELY still parked, issues a DECISION_REQUEST to
+     * the supervisor. An earlier eager publish here fired a false "blocked"
+     * signal whenever such a tool was denied by a hook and returned instantly.
+     */
+
+    /**
      * Notify the supervisor that a directive sent {@code timeoutMs} ago has
      * not been acknowledged by the main AI. Supervisor decides whether to
      * retry, skip the step, or escalate.

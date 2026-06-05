@@ -9,13 +9,14 @@
 
 export type NodeStatus =
   | 'PENDING'        // dependencies not yet satisfied
+  | 'SCHEDULED'      // deps satisfied, waiting for a delay / scheduled start time
   | 'READY'          // deps satisfied, queued waiting for a concurrency slot
   | 'RUNNING'        // tab created + pair started
   | 'WAITING_HUMAN'  // escalated / watchdog-stuck → needs a human
   | 'DONE'           // supervisor emitted complete_plan / all steps done
   | 'ABORTED';
 
-export type WorkflowState = 'EDITING' | 'RUNNING' | 'COMPLETED' | 'ABORTED';
+export type WorkflowState = 'EDITING' | 'RUNNING' | 'PAUSED' | 'COMPLETED' | 'ABORTED';
 
 export interface WorkflowNode {
   /** = tab name; unique within the workflow. */
@@ -34,6 +35,12 @@ export interface WorkflowNode {
   reasoning?: string;
   /** Names of upstream nodes this node depends on → defines串/并行. */
   dependsOn: string[];
+  /** Execution timing: 'none'(default)=immediate; 'relative'=delay after deps; 'absolute'=at a time. */
+  delayMode?: 'none' | 'relative' | 'absolute';
+  /** relative mode: minutes to wait after upstream completes (0..300). */
+  delayMinutes?: number;
+  /** absolute mode: target start instant (epoch ms; picked/displayed in local time). */
+  scheduledAt?: number;
   /** Manual canvas position (set by dragging). When unset, auto-layout applies. */
   posX?: number;
   posY?: number;
@@ -61,6 +68,8 @@ export interface NodeRuntime {
   completionReportPath?: string | null;
   /** Filled when status === 'WAITING_HUMAN'. */
   escalationReason?: string | null;
+  /** Filled when status === 'SCHEDULED': absolute instant (epoch ms) this node is due to start. */
+  scheduledStartAt?: number | null;
   /** Optional live output-token counter while RUNNING. */
   liveOutputTokens?: number;
 }

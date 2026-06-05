@@ -30,6 +30,19 @@
     "nodeCount": "{{n}} 个节点",
     "newWorkflow": "新建工作流",
     "runBar": "完成 {{done}}/{{total}} · 并发 {{conc}}",
+    "pausedBar": "已恢复，{{done}}/{{total}} 完成，{{waiting}} 个节点待处理",
+    "resume": "恢复运行",
+    "resumed": "已恢复运行",
+    "resumeHint": "恢复被中断的工作流，并续跑未开始的节点",
+    "redispatch": {
+      "label": "重新下发任务",
+      "restart": "强制重启节点",
+      "sent": "已重新下发任务",
+      "tip": "重发任务给该节点；卡死时会重建监督者",
+      "confirm": "该节点可能已产生部分改动，重新下发会让监督者在当前仓库状态上重跑，且不会回滚。确认继续？",
+      "confirmRestart": "强制重启会终止当前监督者并重新创建，确认继续？",
+      "needResume": "请先点「恢复运行」"
+    },
     "escalation": "节点「{{node}}」需要你处理",
     "jumpToTab": "跳转到标签页",
     "viewReport": "查看完成报告",
@@ -38,11 +51,13 @@
     "state": {
       "editing": "编辑中",
       "running": "运行中",
+      "paused": "已暂停（待恢复）",
       "completed": "已完成",
       "aborted": "已中止"
     },
     "status": {
       "pending": "依赖未满足",
+      "scheduled": "等待定时",
       "ready": "排队中",
       "running": "进行中",
       "waitingHuman": "待人工",
@@ -69,7 +84,21 @@
       "dropFiles": "拖入文件以插入 @路径",
       "planPlaceholder": "本节点交给监督者的任务……",
       "delete": "删除节点",
-      "done": "完成"
+      "done": "完成",
+      "timing": {
+        "label": "执行时机",
+        "immediate": "立即执行",
+        "relative": "延迟执行",
+        "absolute": "指定时间",
+        "minutes": "分钟（上游完成后，0–300）",
+        "pickDate": "选择日期",
+        "pickTime": "选择时间",
+        "relativeRO": "延迟 {{m}} 分钟",
+        "absoluteRO": "定时 {{at}}",
+        "dueAt": "将于 {{at}} 启动",
+        "countdown": "{{left}} 后执行（{{at}}）",
+        "startingSoon": "即将开始…"
+      }
     },
     "validate": {
       "nameRequired": "请填写工作流名称",
@@ -79,6 +108,8 @@
       "supervisorRequired": "节点「{{name}}」未选择监督者",
       "planRequired": "节点「{{name}}」缺少任务内容",
       "depMissing": "节点「{{name}}」依赖了不存在的节点：{{dep}}",
+      "delayRange": "节点「{{name}}」延迟需在 0–300 分钟之间",
+      "scheduledRequired": "节点「{{name}}」未选择定时执行时间",
       "cycle": "依赖关系中存在环，请检查连线"
     },
     "err": {

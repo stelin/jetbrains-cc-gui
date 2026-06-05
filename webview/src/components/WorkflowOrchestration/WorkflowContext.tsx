@@ -21,6 +21,7 @@ import {
   type WorkflowNode,
   type WorkflowEscalation,
   type WorkflowCapabilities,
+  type WorkflowState,
   createWorkflow,
   createNode,
   uid,
@@ -43,6 +44,8 @@ interface WorkflowContextValue {
   selectedId: string | null;
   draft: WorkflowDefinition | null;
   execution: WorkflowExecution | null;
+  /** Per-workflow latest execution state (id → state), for left-list badges. */
+  executionStatuses: Record<string, WorkflowState>;
   agents: SupervisorAgent[];
   escalations: WorkflowEscalation[];
   capabilities: WorkflowCapabilities;
@@ -59,6 +62,10 @@ interface WorkflowContextValue {
   deleteWorkflow(id: string): void;
   runWorkflow(id: string): void;
   abortWorkflow(): void;
+  /** Resume a PAUSED (restored-after-restart) execution — opens windows + pumps safe frontier. */
+  resumeWorkflow(id: string): void;
+  /** Re-dispatch a stuck/interrupted node. 'auto' = adaptive; 'restart' = force full re-launch. */
+  redispatchNode(name: string, mode?: 'auto' | 'restart'): void;
   /** Re-pull authoritative state from Java (definitions + capabilities + live run). */
   refreshState(): void;
   jumpToNode(name: string): void;
@@ -67,6 +74,8 @@ interface WorkflowContextValue {
   // helpers
   agentName(id: string): string;
   isRunning: boolean;
+  /** Execution restored after restart, awaiting one-click 「恢复运行」. */
+  isPaused: boolean;
   runningOf(id: string): boolean;
   /** Draft exists as a persisted definition (in the left list). */
   isSaved: boolean;
@@ -145,6 +154,15 @@ function validateWorkflowDef(def: WorkflowDefinition, t: TFunction): { ok: boole
         return { ok: false, error: t('workflow.validate.depMissing', '节点「{{name}}」依赖了不存在的节点：{{dep}}', { name: n.name, dep }) };
       }
     }
+    // execution timing (D25/D28)
+    if (n.delayMode === 'relative') {
+      const m = n.delayMinutes;
+      if (m == null || Number.isNaN(m) || m < 0 || m > 300) {
+        return { ok: false, error: t('workflow.validate.delayRange', '节点「{{name}}」延迟需在 0–300 分钟之间', { name: n.name }) };
+      }
+    } else if (n.delayMode === 'absolute' && !n.scheduledAt) {
+      return { ok: false, error: t('workflow.validate.scheduledRequired', '节点「{{name}}」未选择定时执行时间', { name: n.name }) };
+    }
   }
   if (hasCycle(def.nodes)) {
     return { ok: false, error: t('workflow.validate.cycle', '依赖关系中存在环，请检查连线') };
@@ -169,6 +187,9 @@ function canonDef(d: WorkflowDefinition): string {
       longContext: !!n.longContext,
       reasoning: n.reasoning || '',
       dependsOn: [...(n.dependsOn || [])].sort(),
+      delayMode: n.delayMode || 'none',
+      delayMinutes: n.delayMinutes ?? null,
+      scheduledAt: n.scheduledAt ?? null,
       posX: n.posX ?? null,
       posY: n.posY ?? null,
     }))
@@ -211,6 +232,7 @@ export function WorkflowProvider({ children, addToast }: { children: React.React
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draft, setDraft] = useState<WorkflowDefinition | null>(null);
   const [execution, setExecution] = useState<WorkflowExecution | null>(null);
+  const [executionStatuses, setExecutionStatuses] = useState<Record<string, WorkflowState>>({});
   const [agents, setAgents] = useState<SupervisorAgent[]>([]);
   const [escalations, setEscalations] = useState<WorkflowEscalation[]>([]);
   const [capabilities, setCapabilities] = useState<WorkflowCapabilities>({ mode: 'local', maxConcurrency: 2 });
@@ -265,6 +287,7 @@ export function WorkflowProvider({ children, addToast }: { children: React.React
   // ── Java → JS callbacks (chained; backend authoritative when present) ─
   useEffect(() => {
     const prevDefs = window.onWorkflowDefinitions;
+    const prevStatuses = window.onWorkflowStatuses;
     const prevExec = window.onWorkflowExecutionUpdate;
     const prevEsc = window.onWorkflowEscalation;
     const prevOp = window.onWorkflowOperationResult;
@@ -279,6 +302,13 @@ export function WorkflowProvider({ children, addToast }: { children: React.React
           setDefinitions(list);
           persistDefinitions(list);
         }
+      } catch { /* ignore */ }
+    };
+    window.onWorkflowStatuses = (json: string) => {
+      prevStatuses?.(json);
+      try {
+        const m = JSON.parse(json) as Record<string, WorkflowState>;
+        if (m && typeof m === 'object') setExecutionStatuses(m);
       } catch { /* ignore */ }
     };
     window.onWorkflowExecutionUpdate = (json: string) => {
@@ -309,6 +339,11 @@ export function WorkflowProvider({ children, addToast }: { children: React.React
           notify(r.error || tt('workflow.opFailed', '操作失败'), 'error');
         } else if (r.success === true && r.operation === 'run') {
           notify(tt('workflow.runStarted', '工作流已启动'), 'success');
+        } else if (r.success === true && r.operation === 'resume') {
+          notify(tt('workflow.resumed', '已恢复运行'), 'success');
+        } else if (r.success === true && r.operation === 'redispatch') {
+          // Backend carries an info note (e.g. "并发已满，已排队") in `error` even on success.
+          notify(r.error || tt('workflow.redispatch.sent', '已重新下发任务'), r.error ? 'info' : 'success');
         }
         // save/delete success is toasted locally (avoid duplicate toasts).
       } catch { /* ignore */ }
@@ -336,6 +371,7 @@ export function WorkflowProvider({ children, addToast }: { children: React.React
 
     return () => {
       window.onWorkflowDefinitions = prevDefs;
+      window.onWorkflowStatuses = prevStatuses;
       window.onWorkflowExecutionUpdate = prevExec;
       window.onWorkflowEscalation = prevEsc;
       window.onWorkflowOperationResult = prevOp;
@@ -454,6 +490,14 @@ export function WorkflowProvider({ children, addToast }: { children: React.React
     wfSend('workflow_abort', JSON.stringify({}));
   }, [wfSend]);
 
+  const resumeWorkflow = useCallback((id: string) => {
+    wfSend('workflow_resume', JSON.stringify({ id }));
+  }, [wfSend]);
+
+  const redispatchNode = useCallback((name: string, mode: 'auto' | 'restart' = 'auto') => {
+    wfSend('workflow_redispatch_node', JSON.stringify({ nodeName: name, mode }));
+  }, [wfSend]);
+
   // Re-pull the authoritative snapshot from Java. The provider's one-shot mount
   // request can miss the live run (bridge not ready at app start, or the run
   // began in another tab/webview), leaving the page on "Editing" while a
@@ -482,9 +526,10 @@ export function WorkflowProvider({ children, addToast }: { children: React.React
   );
 
   const isRunning = execution?.state === 'RUNNING';
+  const isPaused = execution?.state === 'PAUSED';
   const runningOf = useCallback(
-    (id: string) => isRunning && execution?.workflowId === id,
-    [isRunning, execution],
+    (id: string) => (isRunning || isPaused) && execution?.workflowId === id,
+    [isRunning, isPaused, execution],
   );
 
   // Saved = draft matches a persisted definition; dirty = brand-new or edited.
@@ -496,15 +541,17 @@ export function WorkflowProvider({ children, addToast }: { children: React.React
   const isDirty = !!draft && (!savedDef || !defsEqual(draft, savedDef));
 
   const value = useMemo<WorkflowContextValue>(() => ({
-    definitions, selectedId, draft, execution, agents, escalations, capabilities,
+    definitions, selectedId, draft, execution, executionStatuses, agents, escalations, capabilities,
     selectWorkflow, newWorkflow, updateDraft, upsertNode, removeNode, addNode,
-    saveDraft, deleteWorkflow, runWorkflow, abortWorkflow, refreshState, jumpToNode, openReport,
-    dismissEscalation, agentName, isRunning, runningOf, isSaved, isDirty,
+    saveDraft, deleteWorkflow, runWorkflow, abortWorkflow, resumeWorkflow, redispatchNode,
+    refreshState, jumpToNode, openReport,
+    dismissEscalation, agentName, isRunning, isPaused, runningOf, isSaved, isDirty,
   }), [
-    definitions, selectedId, draft, execution, agents, escalations, capabilities,
+    definitions, selectedId, draft, execution, executionStatuses, agents, escalations, capabilities,
     selectWorkflow, newWorkflow, updateDraft, upsertNode, removeNode, addNode,
-    saveDraft, deleteWorkflow, runWorkflow, abortWorkflow, refreshState, jumpToNode, openReport,
-    dismissEscalation, agentName, isRunning, runningOf, isSaved, isDirty,
+    saveDraft, deleteWorkflow, runWorkflow, abortWorkflow, resumeWorkflow, redispatchNode,
+    refreshState, jumpToNode, openReport,
+    dismissEscalation, agentName, isRunning, isPaused, runningOf, isSaved, isDirty,
   ]);
 
   return <WorkflowContext.Provider value={value}>{children}</WorkflowContext.Provider>;

@@ -485,6 +485,7 @@ interface Window {
   // See docs/workflow/ui-implementation.md §9.2. Backend lands in a later plan;
   // until then the editor runs off localStorage and these are no-ops.
   onWorkflowDefinitions?: (json: string) => void;      // WorkflowDefinition[]
+  onWorkflowStatuses?: (json: string) => void;         // { [wfId]: WorkflowState }
   onWorkflowExecutionUpdate?: (json: string) => void;  // WorkflowExecution (full snapshot)
   onWorkflowEscalation?: (json: string) => void;       // { nodeName, reason }
   onWorkflowOperationResult?: (json: string) => void;  // { success, operation?, error? }

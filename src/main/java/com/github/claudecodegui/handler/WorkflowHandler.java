@@ -10,9 +10,9 @@ import com.intellij.openapi.diagnostic.Logger;
 
 /**
  * Per-tab thin adapter between the workflow webview and the project-scoped
- * {@link SupervisorWorkflowManager} engine (§9). Parses the seven
- * {@code workflow_*} events, forwards them to the engine, and registers this
- * tab as a broadcast sink so engine state updates land back in this webview.
+ * {@link SupervisorWorkflowManager} engine (§9). Parses the {@code workflow_*}
+ * events, forwards them to the engine, and registers this tab as a broadcast
+ * sink so engine state updates land back in this webview.
  *
  * <p>Lifecycle: the sink is unregistered in {@link #dispose()}, which
  * {@code ChatWindowDelegate} calls before {@code MessageDispatcher.clear()} on
@@ -29,7 +29,9 @@ public class WorkflowHandler extends BaseMessageHandler {
             "workflow_run",
             "workflow_abort",
             "workflow_jump_node",
-            "workflow_open_report"
+            "workflow_open_report",
+            "workflow_resume",
+            "workflow_redispatch_node"
     };
 
     private final SupervisorWorkflowManager mgr;
@@ -85,6 +87,12 @@ public class WorkflowHandler extends BaseMessageHandler {
                     return true;
                 case "workflow_open_report":
                     mgr.openReport(stringField(content, "nodeName"));
+                    return true;
+                case "workflow_resume":
+                    mgr.resumeWorkflow(stringField(content, "id"));
+                    return true;
+                case "workflow_redispatch_node":
+                    mgr.redispatchNode(stringField(content, "nodeName"), stringField(content, "mode"));
                     return true;
                 default:
                     return false;

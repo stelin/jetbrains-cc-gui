@@ -72,6 +72,16 @@ public final class DagValidator {
                     return "节点「" + n.name + "」依赖了不存在的节点: " + dep;
                 }
             }
+            // execution timing (D25/D28): relative delay in range; absolute needs a time.
+            if ("relative".equals(n.delayMode)) {
+                if (n.delayMinutes == null || n.delayMinutes < 0
+                        || n.delayMinutes > SupervisorWorkflowManager.MAX_DELAY_MINUTES) {
+                    return "节点「" + n.name + "」延迟需在 0–"
+                            + SupervisorWorkflowManager.MAX_DELAY_MINUTES + " 分钟之间";
+                }
+            } else if ("absolute".equals(n.delayMode) && n.scheduledAt == null) {
+                return "节点「" + n.name + "」未选择定时执行时间";
+            }
         }
 
         // 4. acyclicity via Kahn topological sort.

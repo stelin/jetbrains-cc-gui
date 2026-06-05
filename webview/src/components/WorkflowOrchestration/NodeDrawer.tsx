@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { ConfigProvider, DatePicker, TimePicker, theme as antdTheme } from 'antd';
+import dayjs from 'dayjs';
 import type { SupervisorAgent } from '../../types/supervisorAgent';
 import { ModelSelect, ReasoningSelect } from '../ChatInputBox/selectors';
 import { strip1MContextSuffix, type ReasoningEffort } from '../ChatInputBox/types';
@@ -8,6 +10,28 @@ import { statusMeta } from './NodeCard';
 import styles from './style.module.less';
 
 const DEFAULT_MODEL = 'claude-opus-4-8';
+
+/** epoch ms → human local string, e.g. "2026/6/5 02:00:00". */
+function fmtLocal(ms?: number | null): string {
+  if (!ms) return '';
+  try { return new Date(ms).toLocaleString(); } catch { return ''; }
+}
+
+/** remaining ms → "H:MM:SS" (or "M:SS" under an hour). Empty when not positive. */
+function fmtCountdown(ms: number): string {
+  if (ms <= 0) return '';
+  const total = Math.ceil(ms / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const p = (n: number) => String(n).padStart(2, '0');
+  return h > 0 ? `${h}:${p(m)}:${p(s)}` : `${m}:${p(s)}`;
+}
+
+/** The webview mirrors the IDE theme onto <html data-theme>; default to dark. */
+function isDarkTheme(): boolean {
+  return (document.documentElement.getAttribute('data-theme') || 'dark') !== 'light';
+}
 
 interface NodeDrawerProps {
   node: WorkflowNode;
@@ -19,15 +43,19 @@ interface NodeDrawerProps {
   onClose: () => void;
   onJump: () => void;
   onOpenReport: () => void;
+  /** Re-dispatch this node. 'auto' = adaptive (re-kick live pair / re-launch); 'restart' = force re-launch. */
+  onRedispatch?: (mode: 'auto' | 'restart') => void;
   /** Remove an upstream dependency (edges are drawn on the canvas). */
   onRemoveDep: (dep: string) => void;
   onOpenSupervisorManager?: () => void;
   /** True when another node already uses this name (node name = unique tab name). */
   isNameTaken?: (name: string) => boolean;
+  /** Execution is PAUSED (restored after restart) — re-dispatch needs 「恢复运行」 first (DN10). */
+  isPaused?: boolean;
 }
 
 export default function NodeDrawer({
-  node, agents, runtime, readOnly, onChange, onDelete, onClose, onJump, onOpenReport, onRemoveDep, onOpenSupervisorManager, isNameTaken,
+  node, agents, runtime, readOnly, onChange, onDelete, onClose, onJump, onOpenReport, onRedispatch, onRemoveDep, onOpenSupervisorManager, isNameTaken, isPaused,
 }: NodeDrawerProps) {
   const { t } = useTranslation();
 
@@ -45,6 +73,18 @@ export default function NodeDrawer({
     setPlanMode(node.planPath ? 'file' : 'inline');
     setNameError(null);
   }, [node.name]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Live clock — ticks once a second only while this node is SCHEDULED (waiting
+  // for its start time), so the 执行时机 countdown stays current.
+  const scheduledAtMs = runtime?.status === 'SCHEDULED' ? (runtime?.scheduledStartAt ?? null) : null;
+  const [nowTs, setNowTs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!scheduledAtMs) return undefined;
+    setNowTs(Date.now());
+    const id = window.setInterval(() => setNowTs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [scheduledAtMs]);
+  const remainMs = scheduledAtMs ? scheduledAtMs - nowTs : 0;
 
   const commit = (patch: Partial<WorkflowNode>) => {
     if (readOnly) return;
@@ -102,6 +142,13 @@ export default function NodeDrawer({
   const meta = statusMeta(runtime?.status);
   const supervisorName = agents.find((a) => a.id === node.supervisorId)?.name ?? node.supervisorId ?? '—';
   const effModel = node.model || DEFAULT_MODEL;
+
+  // Re-dispatch is for live (RUNNING) or interrupted/escalated (WAITING_HUMAN) nodes,
+  // and only once the workflow is actually scheduling (not PAUSED — DN10). A node
+  // with a live pairId would be re-kicked by 'auto', so it also gets a force-restart.
+  const canRedispatch = !isPaused
+    && (runtime?.status === 'RUNNING' || runtime?.status === 'WAITING_HUMAN');
+  const hasLivePair = runtime?.status === 'RUNNING' && !!runtime?.pairId;
 
   return (
     <div className={styles.drawer}>
@@ -228,6 +275,84 @@ export default function NodeDrawer({
             </>
           )}
         </div>
+
+        {/* 执行时机 (D25): 立即 / 上游完成后延迟 N 分钟 / 指定具体时间。本地时区。 */}
+        <label className={styles.label}>{t('workflow.node.timing.label', '执行时机')}</label>
+        {readOnly ? (
+          <span className={styles.readonlyVal}>
+            {node.delayMode === 'relative'
+              ? t('workflow.node.timing.relativeRO', '延迟 {{m}} 分钟', { m: node.delayMinutes ?? 0 })
+              : node.delayMode === 'absolute'
+                ? t('workflow.node.timing.absoluteRO', '定时 {{at}}', { at: fmtLocal(node.scheduledAt) })
+                : t('workflow.node.timing.immediate', '立即执行')}
+            {scheduledAtMs && (
+              <span className={styles.countdown}>
+                {' · '}
+                {remainMs > 0
+                  ? t('workflow.node.timing.countdown', '{{left}} 后执行（{{at}}）', { left: fmtCountdown(remainMs), at: fmtLocal(scheduledAtMs) })
+                  : t('workflow.node.timing.startingSoon', '即将开始…')}
+              </span>
+            )}
+          </span>
+        ) : (
+          <>
+            <div className={styles.inlineRow}>
+              <label className={styles.checkInline}>
+                <input type="radio" name="timingmode" checked={(node.delayMode ?? 'none') === 'none'}
+                  onChange={() => commit({ delayMode: 'none', delayMinutes: undefined, scheduledAt: undefined })} />
+                {t('workflow.node.timing.immediate', '立即执行')}
+              </label>
+              <label className={styles.checkInline}>
+                <input type="radio" name="timingmode" checked={node.delayMode === 'relative'}
+                  onChange={() => commit({ delayMode: 'relative', delayMinutes: node.delayMinutes ?? 0, scheduledAt: undefined })} />
+                {t('workflow.node.timing.relative', '延迟执行')}
+              </label>
+              <label className={styles.checkInline}>
+                <input type="radio" name="timingmode" checked={node.delayMode === 'absolute'}
+                  onChange={() => commit({ delayMode: 'absolute', delayMinutes: undefined })} />
+                {t('workflow.node.timing.absolute', '指定时间')}
+              </label>
+            </div>
+            {node.delayMode === 'relative' && (
+              <div className={styles.inlineRow}>
+                <input className={styles.input} type="number" min={0} max={300} value={node.delayMinutes ?? 0}
+                  onChange={(e) => commit({ delayMinutes: Math.max(0, Math.min(300, Number(e.target.value) || 0)) })} />
+                <span className={styles.readonlyVal}>{t('workflow.node.timing.minutes', '分钟（上游完成后，0–300）')}</span>
+              </div>
+            )}
+            {node.delayMode === 'absolute' && (
+              // Date + time as two compact pickers — a single showTime popup is too
+              // wide for the narrow tool-window (its time column renders off-screen).
+              <ConfigProvider theme={{ algorithm: isDarkTheme() ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm }}>
+                <div className={styles.inlineRow}>
+                  <DatePicker
+                    format="YYYY-MM-DD"
+                    style={{ flex: 1 }}
+                    placeholder={t('workflow.node.timing.pickDate', '选择日期')}
+                    value={node.scheduledAt ? dayjs(node.scheduledAt) : null}
+                    onChange={(d) => {
+                      if (!d) { commit({ scheduledAt: undefined }); return; }
+                      const base = node.scheduledAt ? dayjs(node.scheduledAt) : dayjs();
+                      commit({ scheduledAt: d.hour(base.hour()).minute(base.minute()).second(0).millisecond(0).valueOf() });
+                    }}
+                  />
+                  <TimePicker
+                    format="HH:mm"
+                    minuteStep={5}
+                    style={{ width: 116 }}
+                    placeholder={t('workflow.node.timing.pickTime', '选择时间')}
+                    value={node.scheduledAt ? dayjs(node.scheduledAt) : null}
+                    onChange={(tm) => {
+                      if (!tm) return;
+                      const base = node.scheduledAt ? dayjs(node.scheduledAt) : dayjs();
+                      commit({ scheduledAt: base.hour(tm.hour()).minute(tm.minute()).second(0).millisecond(0).valueOf() });
+                    }}
+                  />
+                </div>
+              </ConfigProvider>
+            )}
+          </>
+        )}
       </div>
 
       <div className={styles.drawerFooter}>
@@ -240,6 +365,38 @@ export default function NodeDrawer({
               <button className={styles.secondaryBtn} onClick={onOpenReport}>
                 <span className="codicon codicon-output" /> {t('workflow.viewReport', 'Report')}
               </button>
+            )}
+            {/* Re-dispatch a stuck/interrupted node (D21/DN10). Hidden while PAUSED —
+                resume the workflow first. */}
+            {canRedispatch && onRedispatch && (
+              <button
+                className={styles.secondaryBtn}
+                onClick={() => {
+                  if (window.confirm(t('workflow.redispatch.confirm', '该节点可能已产生部分改动，重新下发会让监督者在当前仓库状态上重跑，且不会回滚。确认继续？'))) {
+                    onRedispatch('auto');
+                  }
+                }}
+                title={t('workflow.redispatch.tip', '重发任务给该节点；卡死时会重建监督者')}
+              >
+                <span className="codicon codicon-refresh" /> {t('workflow.redispatch.label', '重新下发任务')}
+              </button>
+            )}
+            {/* DN12 (optional): a live pair would only be re-kicked by 'auto' — offer a
+                heavier force-restart for a wedged-but-alive supervisor. */}
+            {canRedispatch && hasLivePair && onRedispatch && (
+              <button
+                className={styles.secondaryBtn}
+                onClick={() => {
+                  if (window.confirm(t('workflow.redispatch.confirmRestart', '强制重启会终止当前监督者并重新创建，确认继续？'))) {
+                    onRedispatch('restart');
+                  }
+                }}
+              >
+                <span className="codicon codicon-debug-restart" /> {t('workflow.redispatch.restart', '强制重启节点')}
+              </button>
+            )}
+            {isPaused && (runtime?.status === 'RUNNING' || runtime?.status === 'WAITING_HUMAN') && (
+              <span className={styles.runtimeReason}>{t('workflow.redispatch.needResume', '请先点「恢复运行」')}</span>
             )}
           </>
         ) : (

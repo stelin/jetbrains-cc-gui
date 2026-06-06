@@ -26,6 +26,7 @@ import {
   createNode,
   uid,
 } from './types';
+import { buildExportEnvelope, parseImport, normalizeImported } from './portability';
 
 /**
  * Front-end source of truth for workflow definitions + the (Java-driven) live
@@ -46,6 +47,8 @@ interface WorkflowContextValue {
   execution: WorkflowExecution | null;
   /** Per-workflow latest execution state (id → state), for left-list badges. */
   executionStatuses: Record<string, WorkflowState>;
+  /** Per-node effective last-active instant (nodeName → epoch ms), for silent-time display. */
+  nodeActivity: Record<string, number>;
   agents: SupervisorAgent[];
   escalations: WorkflowEscalation[];
   capabilities: WorkflowCapabilities;
@@ -60,12 +63,22 @@ interface WorkflowContextValue {
   /** Validate + persist the draft. Returns false (and toasts why) when invalid. */
   saveDraft(): boolean;
   deleteWorkflow(id: string): void;
+  /**
+   * Serialize a definition to the portable export-envelope JSON (empty string if
+   * not found). `agents` is passed in by the caller (WorkflowView owns the reliable
+   * supervisor list; the context-level chain can be clobbered on navigation).
+   */
+  exportWorkflowJson(id: string, agents: SupervisorAgent[]): string;
+  /** Import pasted JSON as an UNSAVED draft (user reviews + saves). `agents` for supervisor remap. */
+  importWorkflowDraft(text: string, agents: SupervisorAgent[]): { ok: boolean; warnings: string[]; error?: string };
   runWorkflow(id: string): void;
   abortWorkflow(): void;
   /** Resume a PAUSED (restored-after-restart) execution — opens windows + pumps safe frontier. */
   resumeWorkflow(id: string): void;
   /** Re-dispatch a stuck/interrupted node. 'auto' = adaptive; 'restart' = force full re-launch. */
   redispatchNode(name: string, mode?: 'auto' | 'restart'): void;
+  /** Persist the global node-liveness freeze threshold (minutes; 0 = disabled). */
+  setFreezeThreshold(minutes: number): void;
   /** Re-pull authoritative state from Java (definitions + capabilities + live run). */
   refreshState(): void;
   jumpToNode(name: string): void;
@@ -233,6 +246,7 @@ export function WorkflowProvider({ children, addToast }: { children: React.React
   const [draft, setDraft] = useState<WorkflowDefinition | null>(null);
   const [execution, setExecution] = useState<WorkflowExecution | null>(null);
   const [executionStatuses, setExecutionStatuses] = useState<Record<string, WorkflowState>>({});
+  const [nodeActivity, setNodeActivity] = useState<Record<string, number>>({});
   const [agents, setAgents] = useState<SupervisorAgent[]>([]);
   const [escalations, setEscalations] = useState<WorkflowEscalation[]>([]);
   const [capabilities, setCapabilities] = useState<WorkflowCapabilities>({ mode: 'local', maxConcurrency: 2 });
@@ -288,6 +302,8 @@ export function WorkflowProvider({ children, addToast }: { children: React.React
   useEffect(() => {
     const prevDefs = window.onWorkflowDefinitions;
     const prevStatuses = window.onWorkflowStatuses;
+    const prevActivity = window.onWorkflowNodeActivity;
+    const prevAutoResume = window.onWorkflowAutoResume;
     const prevExec = window.onWorkflowExecutionUpdate;
     const prevEsc = window.onWorkflowEscalation;
     const prevOp = window.onWorkflowOperationResult;
@@ -309,6 +325,23 @@ export function WorkflowProvider({ children, addToast }: { children: React.React
       try {
         const m = JSON.parse(json) as Record<string, WorkflowState>;
         if (m && typeof m === 'object') setExecutionStatuses(m);
+      } catch { /* ignore */ }
+    };
+    window.onWorkflowNodeActivity = (json: string) => {
+      prevActivity?.(json);
+      try {
+        const m = JSON.parse(json) as Record<string, number>;
+        if (m && typeof m === 'object') setNodeActivity(m);
+      } catch { /* ignore */ }
+    };
+    window.onWorkflowAutoResume = (json: string) => {
+      prevAutoResume?.(json);
+      try {
+        const r = JSON.parse(json) as { nodeName?: string; attempt?: number; idleMinutes?: number };
+        const tt = tRef.current;
+        notify(tt('workflow.autoResume', '节点「{{node}}」静默 {{min}} 分钟，已自动在原对话继续（第 {{n}} 次）', {
+          node: r.nodeName ?? '', min: r.idleMinutes ?? 0, n: r.attempt ?? 1,
+        }), 'info');
       } catch { /* ignore */ }
     };
     window.onWorkflowExecutionUpdate = (json: string) => {
@@ -354,7 +387,7 @@ export function WorkflowProvider({ children, addToast }: { children: React.React
       console.info('[wf←java] onWorkflowCapabilities', json);
       try {
         const c = JSON.parse(json) as WorkflowCapabilities;
-        if (c && typeof c.maxConcurrency === 'number') setCapabilities({ mode: c.mode ?? 'local', maxConcurrency: c.maxConcurrency });
+        if (c && typeof c.maxConcurrency === 'number') setCapabilities({ mode: c.mode ?? 'local', maxConcurrency: c.maxConcurrency, freezeThresholdMinutes: c.freezeThresholdMinutes });
       } catch { /* ignore */ }
     };
     window.updateSupervisorAgents = (json: string) => {
@@ -372,6 +405,8 @@ export function WorkflowProvider({ children, addToast }: { children: React.React
     return () => {
       window.onWorkflowDefinitions = prevDefs;
       window.onWorkflowStatuses = prevStatuses;
+      window.onWorkflowNodeActivity = prevActivity;
+      window.onWorkflowAutoResume = prevAutoResume;
       window.onWorkflowExecutionUpdate = prevExec;
       window.onWorkflowEscalation = prevEsc;
       window.onWorkflowOperationResult = prevOp;
@@ -482,6 +517,28 @@ export function WorkflowProvider({ children, addToast }: { children: React.React
     });
   }, [wfSend, notify]);
 
+  // ── import / export (pure-frontend; export reads memory, import = draft) ──
+  // `agents` is supplied by the caller (WorkflowView's reliable local list) so a
+  // clobbered context-level subscription can't silently blank every supervisor.
+  const exportWorkflowJson = useCallback((id: string, agentList: SupervisorAgent[]): string => {
+    const def = definitionsRef.current.find((d) => d.id === id)
+      ?? (draftRef.current?.id === id ? draftRef.current : null);
+    return def ? buildExportEnvelope(def, agentList) : '';
+  }, []);
+
+  const importWorkflowDraft = useCallback((text: string, agentList: SupervisorAgent[]) => {
+    const parsed = parseImport(text);
+    if (!parsed.ok) return { ok: false, warnings: [] as string[], error: parsed.error };
+    const { def, warnings } = normalizeImported(
+      parsed.workflow, agentList, definitionsRef.current.map((d) => d.name),
+    );
+    // Load as an UNSAVED draft: new id not in `definitions` → isDirty/savable, and
+    // any blanked supervisor fails validateWorkflowDef until the user fixes it.
+    setDraft(def);
+    setSelectedId(def.id);
+    return { ok: true, warnings: parsed.versionWarn ? [parsed.versionWarn, ...warnings] : warnings };
+  }, []);
+
   const runWorkflow = useCallback((id: string) => {
     wfSend('workflow_run', JSON.stringify({ id }));
   }, [wfSend]);
@@ -496,6 +553,10 @@ export function WorkflowProvider({ children, addToast }: { children: React.React
 
   const redispatchNode = useCallback((name: string, mode: 'auto' | 'restart' = 'auto') => {
     wfSend('workflow_redispatch_node', JSON.stringify({ nodeName: name, mode }));
+  }, [wfSend]);
+
+  const setFreezeThreshold = useCallback((minutes: number) => {
+    wfSend('workflow_set_freeze_threshold', JSON.stringify({ minutes }));
   }, [wfSend]);
 
   // Re-pull the authoritative snapshot from Java. The provider's one-shot mount
@@ -541,15 +602,15 @@ export function WorkflowProvider({ children, addToast }: { children: React.React
   const isDirty = !!draft && (!savedDef || !defsEqual(draft, savedDef));
 
   const value = useMemo<WorkflowContextValue>(() => ({
-    definitions, selectedId, draft, execution, executionStatuses, agents, escalations, capabilities,
+    definitions, selectedId, draft, execution, executionStatuses, nodeActivity, agents, escalations, capabilities,
     selectWorkflow, newWorkflow, updateDraft, upsertNode, removeNode, addNode,
-    saveDraft, deleteWorkflow, runWorkflow, abortWorkflow, resumeWorkflow, redispatchNode,
+    saveDraft, deleteWorkflow, exportWorkflowJson, importWorkflowDraft, runWorkflow, abortWorkflow, resumeWorkflow, redispatchNode, setFreezeThreshold,
     refreshState, jumpToNode, openReport,
     dismissEscalation, agentName, isRunning, isPaused, runningOf, isSaved, isDirty,
   }), [
-    definitions, selectedId, draft, execution, executionStatuses, agents, escalations, capabilities,
+    definitions, selectedId, draft, execution, executionStatuses, nodeActivity, agents, escalations, capabilities,
     selectWorkflow, newWorkflow, updateDraft, upsertNode, removeNode, addNode,
-    saveDraft, deleteWorkflow, runWorkflow, abortWorkflow, resumeWorkflow, redispatchNode,
+    saveDraft, deleteWorkflow, exportWorkflowJson, importWorkflowDraft, runWorkflow, abortWorkflow, resumeWorkflow, redispatchNode, setFreezeThreshold,
     refreshState, jumpToNode, openReport,
     dismissEscalation, agentName, isRunning, isPaused, runningOf, isSaved, isDirty,
   ]);

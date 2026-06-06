@@ -198,9 +198,30 @@ public class PlanStateMachine {
         notifyListeners(oldState, oldSub, current);
     }
 
-    public synchronized void onHumanResumed() {
-        if (current == null) return;
-        if (current.state != Plan.PlanState.WAITING) return;
+    /**
+     * Resume a plan that was escalated to a human ({@link #onEscalatedToHuman} —
+     * wedged supervisor / DECISION escalation). Fired when the operator handles
+     * the node and feeds the supervisor a fresh message, so the supervisor's
+     * resulting emit_action is routed against an ACTIVE plan instead of being
+     * rejected on a WAITING one.
+     *
+     * <p>2026-06-05: this used to be unreachable dead code — nothing called it,
+     * so after a human handled an escalated node the plan stayed WAITING forever
+     * (and {@code onUserResumed} is a no-op here because the WAITING was not a
+     * user pause). Now wired from {@code EventBus.publishUserInput}. Scoped to
+     * the escalate-to-human case via the {@code escalationReason} marker so it
+     * never collides with {@link #onUserResumed} (user pauses) or
+     * {@link #onRateLimitResumed} (quota waits).
+     *
+     * @return true if a WAITING (escalated) plan was actually flipped to ACTIVE.
+     */
+    public synchronized boolean onHumanResumed() {
+        if (current == null) return false;
+        if (current.state != Plan.PlanState.WAITING) return false;
+        // Only the escalate-to-human WAITING carries escalationReason. User
+        // pauses (pauseReason=user) and rate-limit waits are owned by their
+        // dedicated resume paths — leave those alone.
+        if (!current.metadata.containsKey("escalationReason")) return false;
 
         Plan.PlanState oldState = current.state;
         Plan.ActiveSubState oldSub = current.subState;
@@ -214,6 +235,7 @@ public class PlanStateMachine {
 
         logTransition(PlanTransition.HUMAN_RESUMED, oldState, oldSub, current);
         notifyListeners(oldState, oldSub, current);
+        return true;
     }
 
     /**

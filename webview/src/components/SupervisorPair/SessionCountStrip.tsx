@@ -1,4 +1,7 @@
+import { useEffect, useState } from 'react';
 import { usePairContext } from './PairContext';
+import { useWorkflowContext } from '../WorkflowOrchestration';
+import { formatIdle, idleLevel, ACTIVE_EPS_MS } from '../WorkflowOrchestration/idle';
 import styles from './style.module.less';
 
 /**
@@ -19,8 +22,28 @@ import styles from './style.module.less';
  */
 export default function SessionCountStrip() {
   const { pairStatus, isPairActive } = usePairContext();
+  // Workflow silent-time (D41): if this pair IS a running workflow node, show the
+  // SAME idle/threshold the watchdog uses (effectiveLastActiveAt via nodeActivity).
+  const { execution, nodeActivity, capabilities } = useWorkflowContext();
+  const [nowTs, setNowTs] = useState(() => Date.now());
+
+  const myPairId = pairStatus?.pairId;
+  const wfNode = (execution && myPairId)
+    ? Object.keys(execution.nodes).find((n) => execution.nodes[n].pairId === myPairId)
+    : undefined;
+  const wfRunning = !!wfNode && execution!.nodes[wfNode!].status === 'RUNNING';
+  const wfActivityAt = wfNode ? nodeActivity[wfNode] : undefined;
+
+  useEffect(() => {
+    if (!wfRunning || !wfActivityAt) return undefined;
+    const id = window.setInterval(() => setNowTs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [wfRunning, wfActivityAt]);
 
   if (!isPairActive) return null;
+
+  const wfIdleMs = (wfRunning && wfActivityAt) ? Math.max(0, nowTs - wfActivityAt) : undefined;
+  const wfThresholdMs = (capabilities.freezeThresholdMinutes ?? 0) * 60_000;
 
   // ─── Row 1: rare-event lifetime counters ─────────────────────────
   const supRot = pairStatus?.supervisorRotationCount ?? 0;
@@ -98,6 +121,18 @@ export default function SessionCountStrip() {
           <span className={styles.sessionCountLiveItem} title="距 supervisor 上次完成 turn 的时间">
             {formatAgo(lastActivityMs)} 前活跃
           </span>
+        )}
+        {wfIdleMs != null && (
+          <>
+            <span className={styles.sessionCountDot}>·</span>
+            <span className={styles.sessionCountLiveItem} title="工作流静默时长 / 自动重发阈值；达阈值将自动重新下发">
+              静默{' '}
+              <strong className={styles.wfSilent} data-level={idleLevel(wfIdleMs, wfThresholdMs)}>
+                {wfIdleMs < ACTIVE_EPS_MS ? '0:00' : formatIdle(wfIdleMs)}
+                {wfThresholdMs > 0 ? ` / ${formatIdle(wfThresholdMs)}` : ''}
+              </strong>
+            </span>
+          </>
         )}
       </div>
     </div>

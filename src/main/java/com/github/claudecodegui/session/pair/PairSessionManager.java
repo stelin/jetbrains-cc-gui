@@ -446,6 +446,17 @@ public final class PairSessionManager implements Disposable {
             }
             statusPusher.onCompactBoundary();
 
+            // Post-compaction re-prime (2026-06-05): the SDK summary can freeze a
+            // transient "I dispatched, now I wait for the main AI" mental state
+            // into a standing "remain in wait" instruction. The authoritative
+            // coordination state lives outside the LLM context, so a resumed
+            // supervisor can emit wait() when the MAIN_AI contract is already
+            // closed → wait rejected → it loops until DeadlockGuard escalates it
+            // as wedged. Inject the real-state snapshot as the freshest system
+            // message so the next turn is anchored to reality. No-op unless the
+            // plan is ACTIVE with no open MAIN_AI contract (the danger window).
+            router.reprimeAfterCompaction();
+
             // Phase 5 (2026-05-24): evaluate triggers immediately after the
             // compactCount changes — soft (>=3) and hard (>=5) cross here.
             // Don't refetch ratio (we don't have one fresh); ratio-only triggers

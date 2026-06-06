@@ -59,6 +59,8 @@ export interface WorkflowDefinition {
 export interface WorkflowCapabilities {
   mode: string;          // 'local' | 'remote'
   maxConcurrency: number; // hard ceiling (≤3)
+  /** Node-liveness freeze threshold (minutes) for the silent-time display; 0 = watchdog off. */
+  freezeThresholdMinutes?: number;
 }
 
 export interface NodeRuntime {

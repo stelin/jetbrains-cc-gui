@@ -1,6 +1,8 @@
 package com.github.claudecodegui.session.pair.workflow;
 
 import com.github.claudecodegui.handler.core.HandlerContext;
+import com.github.claudecodegui.session.pair.MainAIMonitor;
+import com.github.claudecodegui.session.pair.SupervisorMonitor;
 import com.github.claudecodegui.session.pair.plan.Plan;
 import com.github.claudecodegui.session.pair.plan.PlanStateMachine;
 import com.github.claudecodegui.settings.CodemossSettingsService;
@@ -140,6 +142,24 @@ public final class SupervisorWorkflowManager implements Disposable {
             });
     private final Map<String, java.util.concurrent.ScheduledFuture<?>> scheduledFutures = new ConcurrentHashMap<>();
 
+    // ─── node-liveness watchdog (D35-D41) ────────────────────────────────
+    /** How often the watchdog checks freeze + pushes per-node activity for display. */
+    static final long WATCHDOG_TICK_MS = 5_000L;
+    /** Backoff hard cap: once reached, auto-redispatch repeats at most hourly. */
+    static final long WATCHDOG_MAX_WINDOW_MS = 60L * 60_000L;
+
+    /** Consecutive auto-redispatch count per node (backoff exponent). Scheduler-thread. */
+    private final Map<String, Integer> redispatchAttempts = new ConcurrentHashMap<>();
+    /** Epoch of each node's last (re)dispatch — floor for "last active" + backoff base. */
+    private final Map<String, Long> lastDispatchAt = new ConcurrentHashMap<>();
+    /** Periodic watchdog; production-only (tests drive {@link #watchdogTick()} directly). */
+    private final java.util.concurrent.ScheduledExecutorService nodeWatchdog =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "wf-node-watchdog");
+                t.setDaemon(true);
+                return t;
+            });
+
     // ─── construction ───────────────────────────────────────────────────
 
     /** Production constructor (invoked by the IntelliJ service container). */
@@ -150,6 +170,12 @@ public final class SupervisorWorkflowManager implements Disposable {
         this.scheduler = newSingleThreadScheduler();
         this.knownSupervisorIdsSupplier = this::loadKnownSupervisorIds;
         this.ceilingSupplier = this::resolveCeiling;
+        // Periodic liveness watchdog + activity-display pusher (production only;
+        // tests invoke watchdogTick() synchronously). Re-marshals onto the
+        // scheduler thread so it reads exec/handles with no locking.
+        nodeWatchdog.scheduleWithFixedDelay(
+                () -> submit(this::watchdogTick),
+                WATCHDOG_TICK_MS, WATCHDOG_TICK_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
     }
 
     /** Test seam: inject all collaborators. {@code project} may be null. */
@@ -285,6 +311,8 @@ public final class SupervisorWorkflowManager implements Disposable {
             exec = newExecution(def, n);
             slots = new Semaphore(n);
             slotHolders.clear();
+            redispatchAttempts.clear();
+            lastDispatchAt.clear();
             readyQueue.clear();
             pairToNode.clear();
             handles.clear();
@@ -333,6 +361,8 @@ public final class SupervisorWorkflowManager implements Disposable {
             }
             exec.state = WorkflowState.ABORTED;
             slotHolders.clear();
+            redispatchAttempts.clear();
+            lastDispatchAt.clear();
             LOG.info("[Workflow] ABORTED wf=" + exec.workflowId);
             persist();
             broadcastExec();   // tabs retained (D13)
@@ -371,6 +401,8 @@ public final class SupervisorWorkflowManager implements Disposable {
                     rt.completionReportPath = h.pairDir.resolve("COMPLETION_REPORT.md").toString();
                 }
                 if (slotHolders.remove(name) && slots != null) slots.release();   // D23: only release a permit we hold
+                redispatchAttempts.remove(name);   // watchdog: node done, drop its backoff state
+                lastDispatchAt.remove(name);
                 launcher.setNodeStatus(name, NodeStatus.DONE);   // cockpit: green ✓ (window kept)
                 LOG.info("[Workflow] node " + name + " DONE report=" + rt.completionReportPath);
                 enqueueReady();
@@ -521,6 +553,169 @@ public final class SupervisorWorkflowManager implements Disposable {
         }
     }
 
+    // ─── node-liveness watchdog (D35-D41) ────────────────────────────────
+
+    /**
+     * Per-tick on the {@code wf-scheduler} thread (re-marshaled from
+     * {@link #nodeWatchdog}): for every RUNNING node it (1) records the node's
+     * effective last-active instant for the silent-time display, and (2) if the
+     * node has been silent past its backoff window, auto-redispatches it
+     * (假死/死锁 self-heal). Reads {@code exec}/{@code handles} on the same thread
+     * that mutates them, so no locking is needed.
+     */
+    void watchdogTick() {
+        WorkflowExecution e = exec;
+        if (e == null || e.state != WorkflowState.RUNNING) return;
+        long now = System.currentTimeMillis();
+        long thresholdMs = freezeThresholdMs();   // ≤0 → watchdog disabled (display still pushed)
+        JsonObject activity = new JsonObject();
+        List<String> frozen = new ArrayList<>();
+
+        for (Map.Entry<String, NodeRuntime> en : e.nodes.entrySet()) {
+            String name = en.getKey();
+            if (en.getValue().status != NodeStatus.RUNNING) continue;
+            NodeHandle h = handles.get(name);
+            if (h == null || h.pair == null || h.pair.isDisposed()) continue;
+
+            long lastActive = effectiveLastActiveAt(name, thresholdMs);
+            activity.addProperty(name, lastActive);   // display (always)
+
+            if (thresholdMs <= 0) continue;           // watchdog off
+            // Tick-in-progress is no longer a blanket skip — effectiveLastActiveAt
+            // counts a live (under-ceiling) think as active, while a wedged tick
+            // past the ceiling is allowed to climb so we can recover it.
+            if (isRateLimitWaiting(h)) continue;      // legitimate quota wait
+
+            int attempts = redispatchAttempts.getOrDefault(name, 0);
+            // Recovery reset: a node that ran healthily for ≥ threshold since its
+            // last (re)dispatch is a fresh start — clear the backoff exponent.
+            if (attempts > 0
+                    && now - lastDispatchAt.getOrDefault(name, 0L) > thresholdMs
+                    && now - lastActive < thresholdMs) {
+                redispatchAttempts.put(name, 0);
+                attempts = 0;
+            }
+            if (shouldRedispatch(now, lastActive, attempts, thresholdMs)) frozen.add(name);
+        }
+
+        if (!activity.entrySet().isEmpty()) {
+            broadcast("window.onWorkflowNodeActivity", gson.toJson(activity));
+        }
+        for (String name : frozen) autoRedispatch(name, now);   // already on scheduler thread
+    }
+
+    /** Backoff window for the n-th auto-redispatch: {@code min(threshold·2^n, 1h)}. */
+    static long backoffWindowMs(int attempts, long thresholdMs) {
+        long mult = 1L << Math.min(Math.max(attempts, 0), 12);
+        return Math.min(thresholdMs * mult, WATCHDOG_MAX_WINDOW_MS);
+    }
+
+    /** Pure decision: has the node been idle past its current backoff window? */
+    static boolean shouldRedispatch(long now, long lastActiveAt, int attempts, long thresholdMs) {
+        if (thresholdMs <= 0) return false;
+        return now - lastActiveAt > backoffWindowMs(attempts, thresholdMs);
+    }
+
+    /** Re-dispatch a frozen node (scheduler thread); bumps the backoff exponent. */
+    private void autoRedispatch(String name, long now) {
+        NodeRuntime rt = exec == null ? null : exec.nodes.get(name);
+        if (rt == null || rt.status != NodeStatus.RUNNING) return;
+        long thresholdMs = freezeThresholdMs();
+        int attempts = redispatchAttempts.getOrDefault(name, 0);
+        // Re-confirm still idle: it may have produced output between detect and act.
+        if (!shouldRedispatch(now, effectiveLastActiveAt(name, thresholdMs), attempts, thresholdMs)) return;
+        int next = attempts + 1;
+        redispatchAttempts.put(name, next);
+        long idleMin = Math.max(0, (now - effectiveLastActiveAt(name, thresholdMs)) / 60_000L);
+        // A tick still "in progress" at this point is wedged (an under-ceiling think
+        // wouldn't be idle) → re-launch to recover (a resume input would just queue
+        // behind the stuck turn). Otherwise the supervisor is idle-waiting → resume
+        // IN PLACE on the existing window (preserve history, no new window).
+        NodeHandle h = handles.get(name);
+        boolean wedged = h != null && isTickInProgress(h);
+        LOG.warn("[Workflow] node " + name + " frozen (idle " + idleMin + "min, wedged=" + wedged
+                + ") → auto " + (wedged ? "re-launch" : "resume") + " #" + next);
+        broadcastAutoResume(name, next, idleMin);   // soft info toast, NOT a "needs you" alarm
+        redispatchNodeInternal(name, wedged ? "restart" : "auto", false);
+    }
+
+    /** Soft, non-blocking notice that the watchdog self-healed a node (no user action needed). */
+    private void broadcastAutoResume(String nodeName, int attempt, long idleMinutes) {
+        JsonObject o = new JsonObject();
+        o.addProperty("nodeName", nodeName);
+        o.addProperty("attempt", attempt);
+        o.addProperty("idleMinutes", idleMinutes);
+        broadcast("window.onWorkflowAutoResume", gson.toJson(o));
+    }
+
+    /**
+     * Node's effective last-active instant (epoch): the latest of its main-AI
+     * stream activity, supervisor tick, and last (re)dispatch (the dispatch floor
+     * keeps a freshly-(re)started node from reading as idle before its first
+     * output). Single source for both the watchdog and the silent-time display.
+     */
+    long effectiveLastActiveAt(String name, long thresholdMs) {
+        long t = lastDispatchAt.getOrDefault(name, 0L);
+        NodeHandle h = handles.get(name);
+        if (h == null || h.pair == null || h.pair.isDisposed()) return t;
+        try {
+            MainAIMonitor m = h.pair.getMainAIMonitor();
+            if (m != null) t = Math.max(t, m.getLastActivityAt());
+            SupervisorMonitor s = h.pair.getSupervisorMonitor();
+            if (s != null) {
+                t = Math.max(t, Math.max(s.getLastTickStartMs(), s.getLastTickEndMs()));
+                // A supervisor turn currently IN PROGRESS (thinking / tool calls) is
+                // active — there's no per-chunk timestamp, so without this a long
+                // think reads as idle. Excludes a wedged tick past the ceiling, so a
+                // genuinely-stuck turn can still climb and be recovered.
+                if (s.isTickInProgress() && !isWedgedTick(s, thresholdMs)) {
+                    t = Math.max(t, System.currentTimeMillis());
+                }
+            }
+        } catch (Exception ignored) { /* best-effort */ }
+        return t;
+    }
+
+    /**
+     * A supervisor turn that has been "in progress" longer than the wedge ceiling
+     * ({@code max(30min, 3×threshold)}). Used so a normal long think counts as
+     * active while a genuinely-stuck turn is allowed to trip the watchdog.
+     */
+    private static boolean isWedgedTick(SupervisorMonitor s, long thresholdMs) {
+        if (s == null || !s.isTickInProgress()) return false;
+        long start = s.getLastTickStartMs();
+        if (start <= 0) return false;
+        long ceiling = Math.max(30L * 60_000L, 3L * Math.max(thresholdMs, 0L));
+        return System.currentTimeMillis() - start > ceiling;
+    }
+
+    private static boolean isRateLimitWaiting(NodeHandle h) {
+        try {
+            return h.pair != null && h.pair.getRateLimitWatcher() != null
+                    && h.pair.getRateLimitWatcher().isWaitingForReset();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static boolean isTickInProgress(NodeHandle h) {
+        try {
+            SupervisorMonitor s = h.pair == null ? null : h.pair.getSupervisorMonitor();
+            return s != null && s.isTickInProgress();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Configured freeze threshold in ms; ≤0 disables the watchdog. Defensive (headless tests). */
+    long freezeThresholdMs() {
+        try {
+            return new CodemossSettingsService().getWorkflowFreezeThresholdMinutes() * 60_000L;
+        } catch (Exception e) {
+            return com.github.claudecodegui.settings.SupervisorAgentManager.DEFAULT_WORKFLOW_FREEZE_THRESHOLD_MINUTES * 60_000L;
+        }
+    }
+
     private boolean allDepsDone(String name) {
         WorkflowNode n = nameToNode.get(name);
         if (n == null) return false;
@@ -551,6 +746,8 @@ public final class SupervisorWorkflowManager implements Disposable {
         if (node == null) return;
         final NodeRuntime rt = exec.nodes.get(node.name);
         if (rt == null) return;
+
+        lastDispatchAt.put(node.name, System.currentTimeMillis());   // watchdog: dispatch floor
 
         Path planPath;
         try {
@@ -648,6 +845,50 @@ public final class SupervisorWorkflowManager implements Disposable {
         } catch (Exception e) {
             LOG.warn("[Workflow] node " + nodeName + " kickoff failed: " + e.getMessage());
         }
+    }
+
+    /**
+     * Re-dispatch IN PLACE on the node's existing pair/window (breakpoint-resume):
+     * best-effort interrupt any wedged in-flight turn, then publish a "check what's
+     * already done and continue the remaining work" instruction into the SAME
+     * conversation — so the prior history is preserved and the supervisor resumes
+     * from where it stopped instead of redoing everything. Used by the manual
+     * re-dispatch (adaptive) and the liveness watchdog when a live pair exists.
+     */
+    private void sendResumeKickoff(String nodeName, NodeHandle h) {
+        if (h == null || h.pair == null) return;
+        try {
+            // NO interrupt() here: an interrupt reads to the supervisor as a user
+            // abort → it goes to await-user and the resume input is swallowed. The
+            // resume path only runs when the supervisor is idle-waiting (a wedged
+            // in-progress turn is re-launched instead), so a plain publishUserInput
+            // wakes it with the continue-instruction — same as the initial kickoff.
+            com.github.claudecodegui.session.pair.EventBus bus = h.pair.getEventBus();
+            if (bus == null) {
+                LOG.warn("[Workflow] node " + nodeName + " resume skipped: no event bus");
+                return;
+            }
+            String resume = buildResumeMessage(nodeName, h.pair.getPlanContent());
+            bus.publishUserInput(resume);
+            LOG.info("[Workflow] node " + nodeName + " resume-kick sent pair=" + h.pair.getPairId()
+                    + " (" + resume.length() + " chars)");
+        } catch (Exception e) {
+            LOG.warn("[Workflow] node " + nodeName + " resume-kick failed: " + e.getMessage());
+        }
+    }
+
+    /** Breakpoint-resume instruction (continue, don't restart) injected on re-dispatch. */
+    private static String buildResumeMessage(String nodeName, String plan) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("【继续未完成的任务】\n");
+        sb.append("先检查任务「").append(nodeName)
+                .append("」当前已经执行到哪一步、已经产出了哪些结果（查看已有的对话历史与改动），");
+        sb.append("然后在已有进度的基础上**继续把剩余未完成的部分做完**，不要从头重做、避免重复已完成的工作。");
+        sb.append("全部完成后照常调用 emit_action(complete_workflow_node, …)。\n");
+        if (plan != null && !plan.isBlank()) {
+            sb.append("\n— 原始任务 —\n").append(plan);
+        }
+        return sb.toString();
     }
 
     /**
@@ -885,6 +1126,17 @@ public final class SupervisorWorkflowManager implements Disposable {
                 if (pairId != null) onNodeReport(pairId, NodeStatus.DONE, null, null);
                 return;
             }
+            // Reverse of the WAITING_HUMAN funnel (2026-06-05): when the plan
+            // recovers from WAITING back to ACTIVE — the operator handled the node
+            // and fed the supervisor a message (EventBus.publishUserInput →
+            // onHumanResumed), or it self-healed — flip a WAITING_HUMAN node back
+            // to RUNNING. Without this the overview kept showing "待人工" forever
+            // after the human had already handled it (the funnel was one-way).
+            if (oldState == Plan.PlanState.WAITING && now != null
+                    && now.state == Plan.PlanState.ACTIVE) {
+                submit(() -> recoverNodeFromWaitingHuman(nodeName));
+                return;
+            }
             if (!isWatchdogStall(now)) return;
             // Don't escalate while a rate-limit auto-resume is pending: the node
             // is legitimately waiting for the quota reset, not stalled — it stays
@@ -925,6 +1177,31 @@ public final class SupervisorWorkflowManager implements Disposable {
         rt.escalationReason = reason;
         LOG.info("[Workflow] node " + nodeName + " WAITING_HUMAN reason=" + reason + " (watchdog backstop)");
         escalate(nodeName, reason);
+        persist();
+        broadcastExec();
+    }
+
+    /**
+     * Reverse of {@link #funnelWatchdogStall} (2026-06-05): the plan that had
+     * been escalated to a human recovered to ACTIVE (the operator handled the
+     * node — fed the supervisor a corrective message, which now flips the plan
+     * back via {@code PlanStateMachine.onHumanResumed} — or it self-healed). Move
+     * the node from {@code WAITING_HUMAN} back to {@code RUNNING} so the overview
+     * reflects reality. Scheduler thread; idempotent (only acts on WAITING_HUMAN).
+     *
+     * <p>No slot (re)acquire: a node funneled to WAITING_HUMAN from RUNNING kept
+     * its concurrency permit (D11 — the funnel never frees the slot), and this
+     * listener only fires for a live started pair, so the permit is still held.
+     */
+    private void recoverNodeFromWaitingHuman(String nodeName) {
+        if (exec == null || exec.state != WorkflowState.RUNNING) return;
+        NodeRuntime rt = exec.nodes.get(nodeName);
+        if (rt == null || rt.status != NodeStatus.WAITING_HUMAN) return;   // idempotent
+        rt.status = NodeStatus.RUNNING;
+        rt.escalationReason = null;
+        lastDispatchAt.put(nodeName, System.currentTimeMillis());   // silent timer restarts at 0
+        launcher.setNodeStatus(nodeName, NodeStatus.RUNNING);
+        LOG.info("[Workflow] node " + nodeName + " WAITING_HUMAN → RUNNING (plan recovered WAITING→ACTIVE)");
         persist();
         broadcastExec();
     }
@@ -1041,6 +1318,8 @@ public final class SupervisorWorkflowManager implements Disposable {
             exec = chosen;
             slots = new Semaphore(n);
             slotHolders.clear();
+            redispatchAttempts.clear();
+            lastDispatchAt.clear();
             cancelAllTimers();
             readyQueue.clear();
             pairToNode.clear();
@@ -1092,6 +1371,8 @@ public final class SupervisorWorkflowManager implements Disposable {
             exec.state = WorkflowState.RUNNING;
             slots = new Semaphore(exec.concurrency);
             slotHolders.clear();
+            redispatchAttempts.clear();
+            lastDispatchAt.clear();
             readyQueue.clear();
             enqueueReady();                            // safe frontier (PENDING deps-done)
             rearmScheduledTimers();                    // restored SCHEDULED nodes (DN14)
@@ -1118,74 +1399,89 @@ public final class SupervisorWorkflowManager implements Disposable {
      * when a slot frees. No rollback (D4) — the front-end confirms first.
      */
     public void redispatchNode(@Nullable String name, @Nullable String mode) {
-        submit(() -> {
-            if (exec == null || exec.state != WorkflowState.RUNNING) {
-                broadcastOpResult("redispatch", false, "请先恢复运行工作流");
-                return;
-            }
-            WorkflowNode node = name == null ? null : nameToNode.get(name);
-            NodeRuntime rt = name == null ? null : exec.nodes.get(name);
-            if (node == null || rt == null) {
-                broadcastOpResult("redispatch", false, "节点不存在");
-                return;
-            }
-            if (rt.status == NodeStatus.DONE) {
-                broadcastOpResult("redispatch", false, "节点已完成，无需重新下发");
-                return;
-            }
+        submit(() -> redispatchNodeInternal(name, mode, true));   // manual: reset backoff
+    }
 
-            // D27: re-dispatch means "run now" — drop any pending start timer/delay.
-            cancelTimer(name);
-            rt.scheduledStartAt = null;
+    /**
+     * Core re-dispatch (scheduler thread). {@code manual=true} (user button) resets
+     * the watchdog backoff exponent; {@code manual=false} (auto self-heal) keeps the
+     * already-bumped exponent. Always refreshes {@link #lastDispatchAt} so the silent
+     * timer / watchdog idle restart from 0.
+     */
+    private void redispatchNodeInternal(@Nullable String name, @Nullable String mode, boolean manual) {
+        if (exec == null || exec.state != WorkflowState.RUNNING) {
+            broadcastOpResult("redispatch", false, "请先恢复运行工作流");
+            return;
+        }
+        WorkflowNode node = name == null ? null : nameToNode.get(name);
+        NodeRuntime rt = name == null ? null : exec.nodes.get(name);
+        if (node == null || rt == null) {
+            broadcastOpResult("redispatch", false, "节点不存在");
+            return;
+        }
+        if (rt.status == NodeStatus.DONE) {
+            broadcastOpResult("redispatch", false, "节点已完成，无需重新下发");
+            return;
+        }
 
-            NodeHandle h = handles.get(name);
-            boolean livePair = h != null && h.pair != null;
-            boolean forceRestart = "restart".equals(mode);
+        if (manual) redispatchAttempts.put(name, 0);            // manual = fresh backoff
+        lastDispatchAt.put(name, System.currentTimeMillis());   // silent timer restarts at 0
 
-            // Ensure this node holds exactly one permit (D22/D23).
-            if (!slotHolders.contains(name)) {
-                if (slots == null || !slots.tryAcquire()) {
-                    // Concurrency full → queue; pump() starts it when a slot frees.
-                    rt.status = NodeStatus.READY;
-                    rt.escalationReason = null;
-                    if (!readyQueue.contains(name)) readyQueue.add(name);
-                    launcher.setNodeStatus(name, NodeStatus.READY);
-                    persist();
-                    broadcastExec();
-                    broadcastOpResult("redispatch", true, "并发已满，已排队");
-                    pump();
-                    return;
-                }
-                slotHolders.add(name);
-            }
+        // D27: re-dispatch means "run now" — drop any pending start timer/delay.
+        cancelTimer(name);
+        rt.scheduledStartAt = null;
 
-            rt.escalationReason = null;
+        NodeHandle h = handles.get(name);
+        boolean livePair = h != null && h.pair != null;
+        boolean forceRestart = "restart".equals(mode);
 
-            if (livePair && !forceRestart) {
-                // (a) lightweight re-kick — reuse the live pair, re-send its plan.
-                rt.status = NodeStatus.RUNNING;
-                launcher.setNodeStatus(name, NodeStatus.RUNNING);
-                sendKickoff(name, h, true);
-                scheduleKickoffRetry(name, h);
-                LOG.info("[Workflow] redispatch(re-kick) node=" + name
-                        + " pair=" + (h.pair != null ? h.pair.getPairId() : "?"));
-            } else {
-                // (b) heavyweight re-launch — kill old pair, drop handle/mapping,
-                // re-run startNode (it does NOT acquire a slot; we already hold one).
-                if (h != null && h.windowId != null) launcher.stop(h.windowId);
-                handles.remove(name);
-                if (rt.pairId != null) pairToNode.remove(rt.pairId);
-                rt.pairId = null;
-                rt.windowId = null;
-                rt.status = NodeStatus.READY;          // pairStarted flips READY→RUNNING
+        // Ensure this node holds exactly one permit (D22/D23).
+        if (!slotHolders.contains(name)) {
+            if (slots == null || !slots.tryAcquire()) {
+                // Concurrency full → queue; pump() starts it when a slot frees.
+                rt.status = NodeStatus.READY;
+                rt.escalationReason = null;
+                if (!readyQueue.contains(name)) readyQueue.add(name);
                 launcher.setNodeStatus(name, NodeStatus.READY);
-                startNode(node);
-                LOG.info("[Workflow] redispatch(re-launch) node=" + name + " forceRestart=" + forceRestart);
+                persist();
+                broadcastExec();
+                broadcastOpResult("redispatch", true, "并发已满，已排队");
+                pump();
+                return;
             }
-            persist();
-            broadcastExec();
-            broadcastOpResult("redispatch", true, null);
-        });
+            slotHolders.add(name);
+        }
+
+        rt.escalationReason = null;
+
+        if (livePair && !forceRestart) {
+            // (a) resume IN PLACE — reuse the existing pair/window, inject a
+            // breakpoint-resume instruction (continue, don't restart). History
+            // is preserved; no new window is opened.
+            rt.status = NodeStatus.RUNNING;
+            launcher.setNodeStatus(name, NodeStatus.RUNNING);
+            launcher.focus(h);   // bring the existing node window to front
+            sendResumeKickoff(name, h);
+            LOG.info("[Workflow] redispatch(resume-in-place) node=" + name
+                    + " pair=" + (h.pair != null ? h.pair.getPairId() : "?"));
+        } else {
+            // (b) heavyweight re-launch — kill old pair, drop handle/mapping,
+            // re-run startNode (it does NOT acquire a slot; we already hold one).
+            if (h != null && h.windowId != null) launcher.stop(h.windowId);
+            handles.remove(name);
+            if (rt.pairId != null) pairToNode.remove(rt.pairId);
+            rt.pairId = null;
+            rt.windowId = null;
+            rt.status = NodeStatus.READY;          // pairStarted flips READY→RUNNING
+            launcher.setNodeStatus(name, NodeStatus.READY);
+            startNode(node);
+            LOG.info("[Workflow] redispatch(re-launch) node=" + name + " forceRestart=" + forceRestart);
+        }
+        persist();
+        broadcastExec();
+        // Manual re-dispatch shows the generic success toast; the auto (watchdog)
+        // path stays quiet here and emits its own soft onWorkflowAutoResume notice.
+        if (manual) broadcastOpResult("redispatch", true, null);
     }
 
     /** Resolve a node name by pairId (preferred) or owning windowId. Scheduler thread. */
@@ -1278,7 +1574,27 @@ public final class SupervisorWorkflowManager implements Disposable {
         JsonObject o = new JsonObject();
         o.addProperty("mode", mode());
         o.addProperty("maxConcurrency", ceiling());
+        o.addProperty("freezeThresholdMinutes", freezeThresholdMs() / 60_000L);   // D40: silent-time display threshold
         return gson.toJson(o);
+    }
+
+    private void broadcastCapabilities() {
+        broadcast("window.onWorkflowCapabilities", capabilitiesJson());
+    }
+
+    /**
+     * Persist the global node-liveness freeze threshold (minutes; 0 = disabled),
+     * then re-broadcast capabilities so every webview's silent-time display + the
+     * watchdog pick up the new value. Handler thread.
+     */
+    public void setFreezeThresholdMinutes(int minutes) {
+        try {
+            new CodemossSettingsService().setWorkflowFreezeThresholdMinutes(minutes);
+            LOG.info("[Workflow] freeze threshold set to " + minutes + "min");
+        } catch (Exception e) {
+            LOG.warn("[Workflow] setFreezeThresholdMinutes failed: " + e.getMessage());
+        }
+        broadcastCapabilities();
     }
 
     private void broadcast(String fn, String json) {
@@ -1410,6 +1726,11 @@ public final class SupervisorWorkflowManager implements Disposable {
         }
         try {
             nodeTimers.shutdownNow();
+        } catch (Exception ignored) {
+            /* best-effort */
+        }
+        try {
+            nodeWatchdog.shutdownNow();
         } catch (Exception ignored) {
             /* best-effort */
         }

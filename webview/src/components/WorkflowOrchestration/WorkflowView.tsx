@@ -7,6 +7,8 @@ import { forbiddenDeps } from './layout';
 import WorkflowList from './WorkflowList';
 import DagCanvas from './DagCanvas';
 import NodeDrawer from './NodeDrawer';
+import WorkflowPortabilityDialog, { type PortabilityMode } from './WorkflowPortabilityDialog';
+import { buildRulesText } from './portability';
 import styles from './style.module.less';
 
 interface WorkflowViewProps {
@@ -22,15 +24,22 @@ interface WorkflowViewProps {
 export default function WorkflowView({ onClose, onOpenSupervisorManager }: WorkflowViewProps) {
   const { t } = useTranslation();
   const {
-    definitions, selectedId, draft, execution, executionStatuses, isRunning, isPaused, runningOf, capabilities,
+    definitions, selectedId, draft, execution, executionStatuses, nodeActivity, isRunning, isPaused, runningOf, capabilities,
     isSaved, isDirty,
     selectWorkflow, newWorkflow, updateDraft, upsertNode, removeNode, addNode,
-    saveDraft, deleteWorkflow, runWorkflow, abortWorkflow, resumeWorkflow, redispatchNode,
+    saveDraft, deleteWorkflow, exportWorkflowJson, importWorkflowDraft, runWorkflow, abortWorkflow, resumeWorkflow, redispatchNode, setFreezeThreshold,
     refreshState, jumpToNode, openReport,
   } = useWorkflowContext();
 
+  // Optimistic value for the global freeze-threshold select (echoed back via capabilities).
+  const [freezeOverride, setFreezeOverride] = useState<number | null>(null);
+  const freezeMin = freezeOverride ?? capabilities.freezeThresholdMinutes ?? 10;
+
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   useEffect(() => { setSelectedNode(null); }, [draft?.id]);
+
+  // Import / export / rules dialog (D30) — text-only, pure frontend.
+  const [ioDialog, setIoDialog] = useState<PortabilityMode | null>(null);
 
   // Re-pull the authoritative run state every time the workflow page opens. The
   // provider's one-shot mount fetch can miss the live execution (bridge not
@@ -138,6 +147,20 @@ export default function WorkflowView({ onClose, onOpenSupervisorManager }: Workf
           )}
         </div>
         <div className={styles.headerActions}>
+          <label
+            className={styles.concurrency}
+            title={t('workflow.freezeThreshold.tip', '节点静默超过该时长（分钟）将自动重新下发；0 表示关闭')}
+          >
+            {t('workflow.freezeThreshold.label', '静默阈值(分)')}
+            <select
+              value={freezeMin}
+              onChange={(e) => { const m = Number(e.target.value); setFreezeOverride(m); setFreezeThreshold(m); }}
+            >
+              {[1, 5, 10, 20, 30, 40, 60].map((m) => (
+                <option key={m} value={m}>{m}</option>
+              ))}
+            </select>
+          </label>
           <label className={styles.concurrency}>
             {t('workflow.concurrency.label', 'Concurrency')}
             {running ? (
@@ -214,6 +237,9 @@ export default function WorkflowView({ onClose, onOpenSupervisorManager }: Workf
           onSelect={selectWorkflow}
           onNew={newWorkflow}
           onDelete={deleteWorkflow}
+          onImport={() => setIoDialog('import')}
+          onExport={() => { if (selectedId) setIoDialog('export'); }}
+          onShowRules={() => setIoDialog('rules')}
         />
 
         {draft ? (
@@ -223,6 +249,8 @@ export default function WorkflowView({ onClose, onOpenSupervisorManager }: Workf
             showStatus={running}
             selectedNode={selectedNode}
             agentName={agentNameLocal}
+            nodeActivity={nodeActivity}
+            freezeThresholdMs={(capabilities.freezeThresholdMinutes ?? 0) * 60_000}
             onSelectNode={setSelectedNode}
             onJumpNode={jumpToNode}
             onAddNode={handleAddNode}
@@ -264,6 +292,20 @@ export default function WorkflowView({ onClose, onOpenSupervisorManager }: Workf
           )}
         </div>
       </div>
+
+      {ioDialog && (
+        <WorkflowPortabilityDialog
+          mode={ioDialog}
+          open={!!ioDialog}
+          onClose={() => setIoDialog(null)}
+          text={ioDialog === 'export'
+            ? (selectedId ? exportWorkflowJson(selectedId, agents) : '')
+            : ioDialog === 'rules'
+              ? buildRulesText(agents)
+              : undefined}
+          onImport={ioDialog === 'import' ? (text) => importWorkflowDraft(text, agents) : undefined}
+        />
+      )}
     </div>
   );
 }

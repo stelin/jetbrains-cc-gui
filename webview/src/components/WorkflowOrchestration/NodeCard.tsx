@@ -1,6 +1,7 @@
 import { useTranslation } from 'react-i18next';
 import type { NodeStatus } from './types';
 import { CARD_W, CARD_H } from './layout';
+import { formatIdle, idleLevel, ACTIVE_EPS_MS } from './idle';
 import styles from './style.module.less';
 
 interface StatusMeta {
@@ -38,6 +39,10 @@ interface NodeCardProps {
   x: number;
   y: number;
   showStatus: boolean;
+  /** Silent time (ms since last activity) for a RUNNING node; undefined hides it. */
+  idleMs?: number;
+  /** Auto-redispatch threshold (ms); 0 = watchdog off (shown without "/threshold"). */
+  thresholdMs?: number;
   draggable?: boolean;
   dragging?: boolean;
   showPorts?: boolean;
@@ -48,7 +53,7 @@ interface NodeCardProps {
 }
 
 export default function NodeCard({
-  name, supervisorName, status, selected, x, y, showStatus,
+  name, supervisorName, status, selected, x, y, showStatus, idleMs, thresholdMs,
   draggable, dragging, showPorts, onClick, onDoubleClick, onPointerDown, onOutPointerDown,
 }: NodeCardProps) {
   const { t } = useTranslation();
@@ -79,6 +84,16 @@ export default function NodeCard({
         <div className={styles.nodeBadge}>
           <span className={`codicon ${meta.icon} ${status === 'RUNNING' ? styles.spin : ''}`} />
           <span>{t(meta.i18nKey, meta.fallback)}</span>
+          {status === 'RUNNING' && idleMs != null && (
+            <span
+              className={styles.nodeSilent}
+              data-level={idleLevel(idleMs, thresholdMs ?? 0)}
+              title={t('workflow.node.silentTip', '距上次活跃；达阈值将自动重新下发')}
+            >
+              {idleMs < ACTIVE_EPS_MS ? '0:00' : formatIdle(idleMs)}
+              {thresholdMs && thresholdMs > 0 ? ` / ${formatIdle(thresholdMs)}` : ''}
+            </span>
+          )}
         </div>
       )}
 

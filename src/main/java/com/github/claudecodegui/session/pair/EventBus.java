@@ -270,8 +270,16 @@ public class EventBus {
         // the plan back to ACTIVE BEFORE forwarding, so the supervisor's
         // resulting emit_action is routed against an ACTIVE plan rather than a
         // WAITING one. No-op when the plan wasn't user-paused.
+        //
+        // 2026-06-05: ALSO resume an escalate-to-human WAITING (wedged supervisor
+        // — onEscalatedToHuman). Previously the human's corrective message left
+        // the plan WAITING (onUserResumed only un-pauses user pauses, and
+        // onHumanResumed had no callers), so the supervisor's emit_action kept
+        // getting rejected and the workflow node stayed "待人工" forever even
+        // after the operator handled it. onHumanResumed is scoped to the
+        // escalation case, so the two checks are mutually exclusive.
         com.github.claudecodegui.session.pair.plan.PlanStateMachine sm = pair.getPlanStateMachine();
-        if (sm != null && sm.onUserResumed()) {
+        if (sm != null && (sm.onUserResumed() || sm.onHumanResumed())) {
             // Resume actually flipped WAITING→ACTIVE — push a fresh snapshot so
             // the webview re-enables the Stop button without waiting for the
             // 30s periodic push.

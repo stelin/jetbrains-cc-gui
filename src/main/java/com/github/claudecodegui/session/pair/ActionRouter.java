@@ -715,6 +715,87 @@ public class ActionRouter {
     }
 
     /**
+     * Post-compaction re-prime (2026-06-05). After the supervisor's context is
+     * SDK-auto-compacted, the generated summary tends to freeze a transient
+     * "I just dispatched, now I wait for the main AI's report" mental state into
+     * a standing "remain in wait" instruction, and the SDK continuation prompt
+     * ("resume as if the break never happened") reinforces it. But the
+     * authoritative coordination state (open contracts / plan sub-state) lives
+     * OUTSIDE the LLM context, so a resumed supervisor can emit {@code wait}
+     * when the MAIN_AI contract is in fact already closed and it owes a decision.
+     * That wait is rejected by {@link #handleWaitGuard}; the supervisor — anchored
+     * to the stale summary — keeps re-waiting until {@link
+     * com.github.claudecodegui.session.pair.guard.DeadlockGuard} escalates it as
+     * "wedged" → plan WAITING → human. From the user's seat the supervisor just
+     * spins forever.
+     *
+     * <p>Fix A: inject the real-state snapshot as the freshest {@code system}
+     * message right at the compaction boundary, so the resumed/next turn is
+     * anchored to reality instead of the summary. Only fires in the exact danger
+     * window — plan ACTIVE with no open MAIN_AI contract ("you owe a decision,
+     * nothing to wait for"). In any other state a post-compaction wait is
+     * legitimate, so we stay silent. Called from the compact-boundary handler in
+     * {@code PairSessionManager}.
+     */
+    public void reprimeAfterCompaction() {
+        try {
+            PlanStateMachine sm = pair.getPlanStateMachine();
+            if (sm == null) return;
+            Plan current = sm.getCurrent();
+            if (current == null || current.state != Plan.PlanState.ACTIVE) return;
+
+            ContractRegistry registry = pair.getContractRegistry();
+            if (registry != null) {
+                for (Contract c : registry.getOpenContracts()) {
+                    // An open MAIN_AI contract means waiting IS legitimate — the
+                    // supervisor really is waiting for an in-flight task. Leave it be.
+                    if (c.assignedTo == ContractAssignee.MAIN_AI) return;
+                }
+            }
+
+            com.github.claudecodegui.bridge.SupervisorBridge bridge = pair.getSupervisorBridge();
+            if (bridge == null) return;
+
+            String snapshot = buildWaitRejectionStateSnapshot(current, registry);
+            JsonObject event = new JsonObject();
+            event.addProperty("type", "post_compaction_reprime");
+            event.addProperty("reason",
+                    "你的上下文刚被自动压缩。压缩摘要可能把你'派单后正在等待主 AI 报告'的旧心智固化成了"
+                    + "'remain in wait / 继续等待'—— 那是过期状态,不要再相信摘要里的'继续等'。"
+                    + "以下面这份实时状态为准:\n" + snapshot);
+            event.addProperty("suggestion",
+                    "当前没有任何 OPEN 的 MAIN_AI 合同 → 没有任何回执可等。本轮必须三选一,禁止 emit wait: "
+                    + "(a) emit_action(inject_prompt, {inlinePrompt:'<给主 AI 的下一步具体指令>', objective:'...'}) 派单; "
+                    + "(b) emit_action(complete_plan, {summary:'...'}) 收尾; "
+                    + "(c) emit_action(escalate_to_human, ...) 升级。");
+            event.addProperty("ts", System.currentTimeMillis());
+            bridge.postEvent(event, "system");
+
+            // Fresh, anchored start: the loop that drove consecutiveWaitRejections
+            // up was the stale-summary one we just corrected. Reset so the next
+            // (now-informed) wait, if any, is judged on its own — the DeadlockGuard
+            // PENDING_DECISION liveness path still backstops to a human if the
+            // re-prime doesn't take.
+            consecutiveWaitRejections = 0;
+
+            LOG.warn("[ActionRouter] " + pair.getPairId()
+                    + " post-compaction reprime injected (plan ACTIVE, no open MAIN_AI contract)");
+
+            PairStatusPusher pusher = pair.getStatusPusher();
+            if (pusher != null) {
+                pusher.recordCoordinatorEvent(
+                        PairStatusSnapshot.CoordinatorEvent.Source.GUARD,
+                        "post_compaction_reprime",
+                        "压缩后已重注入真实协调状态,防止 supervisor 照旧 wait",
+                        null);
+            }
+        } catch (Exception e) {
+            LOG.warn("[ActionRouter] reprimeAfterCompaction failed: "
+                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getName()));
+        }
+    }
+
+    /**
      * Plan A (2026-05-26 v3.2): build a "what is actually true right now"
      * snapshot the supervisor must see to break out of its stale mental model
      * ("I dispatched ping #N, contract still OPEN" when in fact no contract

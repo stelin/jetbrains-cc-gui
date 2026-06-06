@@ -63,9 +63,12 @@
 }
 
 .dialog {
-  background: var(--vscode-editor-background);
-  color: var(--vscode-foreground);
-  border: 1px solid var(--vscode-panel-border);
+  // Use the app's own (always-defined, theme-aware) surface var first — the raw
+  // --vscode-editor-background is not set in every webview context, which left the
+  // modal transparent so the page bled through. Hex fallback guarantees opacity.
+  background: var(--bg-elevated, var(--vscode-editor-background, #2d2d2d));
+  color: var(--text-primary, var(--vscode-foreground, #cccccc));
+  border: 1px solid var(--border-primary, var(--vscode-panel-border, #3e3e42));
   border-radius: 6px;
   width: 480px;
   max-width: 92vw;

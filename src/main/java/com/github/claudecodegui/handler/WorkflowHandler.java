@@ -31,7 +31,8 @@ public class WorkflowHandler extends BaseMessageHandler {
             "workflow_jump_node",
             "workflow_open_report",
             "workflow_resume",
-            "workflow_redispatch_node"
+            "workflow_redispatch_node",
+            "workflow_set_freeze_threshold"
     };
 
     private final SupervisorWorkflowManager mgr;
@@ -94,6 +95,9 @@ public class WorkflowHandler extends BaseMessageHandler {
                 case "workflow_redispatch_node":
                     mgr.redispatchNode(stringField(content, "nodeName"), stringField(content, "mode"));
                     return true;
+                case "workflow_set_freeze_threshold":
+                    mgr.setFreezeThresholdMinutes(intField(content, "minutes", 10));
+                    return true;
                 default:
                     return false;
             }
@@ -122,5 +126,16 @@ public class WorkflowHandler extends BaseMessageHandler {
         JsonObject o = gson.fromJson(content, JsonObject.class);
         if (o == null || !o.has(field) || o.get(field).isJsonNull()) return null;
         return o.get(field).getAsString();
+    }
+
+    private int intField(String content, String field, int fallback) {
+        try {
+            if (content == null || content.isEmpty()) return fallback;
+            JsonObject o = gson.fromJson(content, JsonObject.class);
+            if (o == null || !o.has(field) || o.get(field).isJsonNull()) return fallback;
+            return o.get(field).getAsInt();
+        } catch (Exception e) {
+            return fallback;
+        }
     }
 }

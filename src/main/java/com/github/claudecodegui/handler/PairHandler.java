@@ -488,6 +488,35 @@ public class PairHandler extends BaseMessageHandler {
         result.addProperty("agentId", session.getAgentId());
         result.addProperty("agentName", session.getAgentName());
         result.addProperty("mainSessionId", session.getMainSessionId() == null ? "" : session.getMainSessionId());
+        // 2026-06-05 (cockpit supervisor-pane race fix): carry enough to let the
+        // webview build a complete `selected` entry directly off onPairStarted.
+        // A workflow node's floating window realizes its webview the moment the
+        // frame is shown — i.e. BEFORE this pair finishes starting — so its
+        // frontend_ready (→ replayActivePairs) usually fires while no pair is
+        // active yet and replays nothing. Without these fields onPairStarted set
+        // only pairId, so the node window's right pane (gated on selected.length
+        // > 0) never appeared. The composer path already has selected set, so the
+        // webview only uses these when selected is still empty.
+        String model = session.getModel();
+        if (model != null && !model.isEmpty()) {
+            result.addProperty("model", model);
+        }
+        try {
+            JsonObject agentConfig = new CodemossSettingsService()
+                    .getSupervisorAgentManager().getAgent(session.getAgentId());
+            if (agentConfig != null) {
+                if (agentConfig.has("defaultLongContext")
+                        && !agentConfig.get("defaultLongContext").isJsonNull()) {
+                    result.addProperty("defaultLongContext",
+                            agentConfig.get("defaultLongContext").getAsBoolean());
+                }
+                if (agentConfig.has("defaultReasoning")
+                        && !agentConfig.get("defaultReasoning").isJsonNull()) {
+                    result.addProperty("defaultReasoning",
+                            agentConfig.get("defaultReasoning").getAsString());
+                }
+            }
+        } catch (Exception ignored) { /* best-effort: pane still shows without defaults */ }
         pushToWebview("window.onPairStarted", gson.toJson(result));
 
         // Seed the TokenIndicator with a 0-tokens snapshot so the right-pane

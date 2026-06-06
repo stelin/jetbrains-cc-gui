@@ -1063,6 +1063,14 @@
   font-weight: 600;
 }
 
+// Workflow node silent-time (D41) — colour ramps with idle/threshold.
+.wfSilent {
+  font-variant-numeric: tabular-nums;
+  &[data-level="ok"]     { color: #4caf50; }
+  &[data-level="warn"]   { color: #ff9800; }
+  &[data-level="danger"] { color: #f44336; }
+}
+
 .sessionCountSpacer {
   flex: 1;
 }

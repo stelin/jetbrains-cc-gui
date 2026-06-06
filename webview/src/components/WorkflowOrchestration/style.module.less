@@ -157,6 +157,42 @@
   &:hover { background: var(--bg-hover, #35373c); border-color: var(--accent-primary, #007fd4); }
 }
 
+// ── import/export/rules toolbar (top of the left list) ──
+.ioToolbar {
+  display: flex; gap: 6px; padding: 8px 8px 0;
+}
+.ioToolBtn {
+  display: inline-flex; align-items: center; gap: 4px;
+  flex: 1; justify-content: center;
+  padding: 5px 6px; font-size: 11px; cursor: pointer;
+  border: 1px solid var(--border-secondary, #3e3e42); border-radius: 5px;
+  background: transparent; color: var(--text-secondary, #e0e0e0);
+  &:hover:not(:disabled) { background: var(--bg-hover, #35373c); border-color: var(--accent-primary, #007fd4); }
+  &:disabled { opacity: 0.45; cursor: not-allowed; }
+}
+
+// ── portability dialog body ──
+.ioBody { display: flex; flex-direction: column; gap: 10px; }
+.ioTextarea {
+  width: 100%; min-height: 320px; resize: vertical; box-sizing: border-box;
+  padding: 8px 10px; border-radius: 5px;
+  font-family: var(--vscode-editor-font-family, monospace); font-size: 12px; line-height: 1.5;
+  color: var(--text-primary, #cccccc);
+  background: var(--vscode-input-background, #1e1e1e);
+  border: 1px solid var(--border-secondary, #3e3e42);
+  &:focus { outline: none; border-color: var(--accent-primary, #007fd4); }
+}
+.ioActions { display: flex; justify-content: flex-end; gap: 8px; }
+.ioSuccess { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--color-success, #4caf50); }
+.ioError { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--color-error, #f44336); }
+.ioWarnList {
+  margin: 0; padding: 8px 10px 8px 26px; max-height: 180px; overflow-y: auto;
+  border-radius: 5px; background: var(--bg-secondary, #252526);
+  font-size: 12px; color: var(--text-secondary, #e0e0e0);
+  li { margin: 2px 0; list-style: none; text-indent: -18px; }
+  .codicon { color: var(--color-warning, #ff9800); margin-right: 4px; }
+}
+
 // ═══════════ Canvas ═══════════
 .canvasWrap { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 .canvasToolbar {
@@ -247,6 +283,16 @@
   .codicon { font-size: 11px; }
 }
 .spin { display: inline-block; animation: wfspin 1.1s linear infinite; }
+
+// Silent-time (node liveness) counter on a RUNNING card / supervisor strip.
+.nodeSilent {
+  margin-left: 2px; padding: 0 5px; border-radius: 7px;
+  font-size: 9px; font-variant-numeric: tabular-nums;
+  background: var(--bg-secondary, #252526);
+  &[data-level="ok"]     { color: var(--color-success, #4caf50); }
+  &[data-level="warn"]   { color: var(--color-warning, #ff9800); }
+  &[data-level="danger"] { color: var(--color-error, #f44336); }
+}
 
 // status → accent custom property (read by border/accent-bar/badge)
 // Live countdown next to a SCHEDULED node's timing (drawer). Tabular digits keep

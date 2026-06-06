@@ -848,6 +848,20 @@ public class CodemossSettingsService {
         }
     }
 
+    /** Node-liveness watchdog freeze threshold in minutes (0 = disabled). */
+    public int getWorkflowFreezeThresholdMinutes() {
+        try {
+            return supervisorAgentManager.getWorkflowFreezeThresholdMinutes();
+        } catch (Exception e) {
+            return SupervisorAgentManager.DEFAULT_WORKFLOW_FREEZE_THRESHOLD_MINUTES;
+        }
+    }
+
+    /** Persist the node-liveness freeze threshold (minutes; clamped). */
+    public void setWorkflowFreezeThresholdMinutes(int minutes) throws java.io.IOException {
+        supervisorAgentManager.setWorkflowFreezeThresholdMinutes(minutes);
+    }
+
     // ==================== Prompts Management ====================
 
     /**

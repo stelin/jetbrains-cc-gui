@@ -10,6 +10,10 @@ interface WorkflowListProps {
   onSelect: (id: string) => void;
   onNew: () => void;
   onDelete: (id: string) => void;
+  /** Import/export/rules entries (D30). Export acts on the selected workflow. */
+  onImport: () => void;
+  onExport: () => void;
+  onShowRules: () => void;
 }
 
 /** Status → badge (icon + class + i18n). Editing/undefined renders no badge. */
@@ -24,11 +28,22 @@ function statusBadge(st: WorkflowState | undefined): { cls: string; icon: string
 }
 
 export default function WorkflowList({
-  definitions, selectedId, statuses, onSelect, onNew, onDelete,
+  definitions, selectedId, statuses, onSelect, onNew, onDelete, onImport, onExport, onShowRules,
 }: WorkflowListProps) {
   const { t } = useTranslation();
   return (
     <div className={styles.list}>
+      <div className={styles.ioToolbar}>
+        <button className={styles.ioToolBtn} onClick={onImport} title={t('workflow.io.importTitle', '导入工作流')}>
+          <span className="codicon codicon-cloud-download" /> {t('workflow.io.import', '导入')}
+        </button>
+        <button className={styles.ioToolBtn} onClick={onExport} disabled={!selectedId} title={t('workflow.io.exportTitle', '导出工作流')}>
+          <span className="codicon codicon-cloud-upload" /> {t('workflow.io.export', '导出')}
+        </button>
+        <button className={styles.ioToolBtn} onClick={onShowRules} title={t('workflow.io.rulesTitle', '工作流定义规则')}>
+          <span className="codicon codicon-book" /> {t('workflow.io.rules', '规则')}
+        </button>
+      </div>
       <div className={styles.listScroll}>
         {definitions.length === 0 && (
           <div className={styles.listEmpty}>{t('workflow.noWorkflows', 'No workflows yet')}</div>

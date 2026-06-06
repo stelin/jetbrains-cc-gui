@@ -59,6 +59,15 @@ public class SupervisorAgentManager {
     public static final int MIN_WORKFLOW_MAX_CONCURRENCY = 1;
     public static final int MAX_WORKFLOW_MAX_CONCURRENCY = 3;
 
+    /**
+     * Idle minutes a workflow node may sit with zero supervisor/main-AI activity
+     * before the liveness watchdog auto-redispatches it (D40). {@code 0} disables
+     * the watchdog.
+     */
+    public static final int DEFAULT_WORKFLOW_FREEZE_THRESHOLD_MINUTES = 10;
+    public static final int MIN_WORKFLOW_FREEZE_THRESHOLD_MINUTES = 0;   // 0 = disabled
+    public static final int MAX_WORKFLOW_FREEZE_THRESHOLD_MINUTES = 120;
+
     private final Gson gson;
     private final ConfigPathManager pathManager;
 
@@ -315,6 +324,34 @@ public class SupervisorAgentManager {
         config.addProperty("workflowMaxConcurrency", value);
         writeConfig(config);
         LOG.info("[SupervisorAgentManager] Set workflowMaxConcurrency=" + value);
+    }
+
+    /**
+     * Read the node-liveness freeze threshold in minutes (D40). Clamped to
+     * {@code [MIN, MAX]}; {@code 0} disables the watchdog. Returns
+     * {@link #DEFAULT_WORKFLOW_FREEZE_THRESHOLD_MINUTES} when unset/invalid.
+     */
+    public int getWorkflowFreezeThresholdMinutes() throws IOException {
+        JsonObject config = readConfig();
+        if (config.has("workflowFreezeThresholdMinutes")
+                && !config.get("workflowFreezeThresholdMinutes").isJsonNull()) {
+            try {
+                int v = config.get("workflowFreezeThresholdMinutes").getAsInt();
+                return Math.max(MIN_WORKFLOW_FREEZE_THRESHOLD_MINUTES,
+                        Math.min(v, MAX_WORKFLOW_FREEZE_THRESHOLD_MINUTES));
+            } catch (Exception ignored) { /* fall through to default */ }
+        }
+        return DEFAULT_WORKFLOW_FREEZE_THRESHOLD_MINUTES;
+    }
+
+    /** Persist the node-liveness freeze threshold (minutes). Out-of-range is clamped. */
+    public void setWorkflowFreezeThresholdMinutes(int value) throws IOException {
+        int v = Math.max(MIN_WORKFLOW_FREEZE_THRESHOLD_MINUTES,
+                Math.min(value, MAX_WORKFLOW_FREEZE_THRESHOLD_MINUTES));
+        JsonObject config = readConfig();
+        config.addProperty("workflowFreezeThresholdMinutes", v);
+        writeConfig(config);
+        LOG.info("[SupervisorAgentManager] Set workflowFreezeThresholdMinutes=" + v);
     }
 
     /**

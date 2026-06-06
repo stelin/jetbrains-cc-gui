@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { WorkflowDefinition, WorkflowExecution } from './types';
 import { layout, type Placed, CARD_W, CARD_H, PAD } from './layout';
@@ -12,6 +12,10 @@ interface DagCanvasProps {
   showStatus: boolean;
   selectedNode: string | null;
   agentName: (id: string) => string;
+  /** Per-node effective last-active instant (epoch ms), for the silent-time display. */
+  nodeActivity: Record<string, number>;
+  /** Freeze threshold (ms) shown as the denominator; 0 = watchdog off. */
+  freezeThresholdMs: number;
   onSelectNode: (name: string) => void;
   onJumpNode: (name: string) => void;
   onAddNode: () => void;
@@ -22,12 +26,20 @@ interface DagCanvasProps {
 }
 
 export default function DagCanvas({
-  draft, execution, showStatus, selectedNode, agentName,
+  draft, execution, showStatus, selectedNode, agentName, nodeActivity, freezeThresholdMs,
   onSelectNode, onJumpNode, onAddNode, onMoveNode, onConnect, onDeleteEdge,
 }: DagCanvasProps) {
   const { t } = useTranslation();
   const auto = useMemo(() => layout(draft.nodes), [draft.nodes]);
   const editable = !showStatus; // arrange + connect only while editing
+
+  // One 1s ticker for all running cards' silent-time counters (only while showing status).
+  const [nowTs, setNowTs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!showStatus) return undefined;
+    const id = window.setInterval(() => setNowTs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [showStatus]);
 
   const canvasRef = useRef<HTMLDivElement>(null);
 
@@ -154,13 +166,19 @@ export default function DagCanvas({
               onDeleteEdge={onDeleteEdge}
               connectLine={connect}
             />
-            {placed.map((p) => (
+            {placed.map((p) => {
+              const st = showStatus ? execution?.nodes[p.name]?.status : undefined;
+              const act = nodeActivity[p.name];
+              const idleMs = (showStatus && st === 'RUNNING' && act) ? Math.max(0, nowTs - act) : undefined;
+              return (
               <NodeCard
                 key={p.name}
                 name={p.name}
                 supervisorName={agentName(draft.nodes.find((n) => n.name === p.name)?.supervisorId ?? '')}
-                status={showStatus ? execution?.nodes[p.name]?.status : undefined}
+                status={st}
                 showStatus={showStatus}
+                idleMs={idleMs}
+                thresholdMs={freezeThresholdMs}
                 selected={selectedNode === p.name}
                 draggable={editable}
                 dragging={dragPos?.name === p.name}
@@ -172,7 +190,8 @@ export default function DagCanvas({
                 onPointerDown={(e) => onCardPointerDown(e, p.name)}
                 onOutPointerDown={(e) => onPortPointerDown(e, p.name)}
               />
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

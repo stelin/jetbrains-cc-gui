@@ -139,6 +139,42 @@ export default function NodeDrawer({
     insertPaths(paths);
   };
 
+  // ── OSR (off-screen) drop path ────────────────────────────────────────────
+  // In OSR mode (Linux / JCEF off-screen rendering) an OS file drop is captured
+  // by Java's AWT DropTarget and delivered via window.handleFilePathFromJava — it
+  // never reaches the page as a DOM drop, so onPlanDrop above never fires. The
+  // main/supervisor inputs cover this through chatInputDropRouter, but both that
+  // router AND the handleFilePathFromJava registration (useGlobalCallbacks) live
+  // on the chat view's ChatInputBox, which is UNMOUNTED while the workflow editor
+  // view is active — so in OSR mode the drop was silently lost here. Install our
+  // own handler while this drawer is open so the OSR path reaches the task
+  // textarea too; the DOM onPlanDrop still covers non-OSR (macOS/Windows). A ref
+  // keeps the closure pointed at the latest insertPaths without re-installing.
+  const insertPathsRef = useRef(insertPaths);
+  insertPathsRef.current = insertPaths;
+  useEffect(() => {
+    if (readOnly) return;
+    const prev = window.handleFilePathFromJava;
+    window.handleFilePathFromJava = (input: string | string[]) => {
+      let paths: string[];
+      if (Array.isArray(input)) {
+        paths = input;
+      } else if (typeof input === 'string') {
+        // Java passes a JS array directly, but tolerate a JSON-encoded string.
+        try {
+          const parsed: unknown = JSON.parse(input);
+          paths = Array.isArray(parsed) ? (parsed as string[]) : [input];
+        } catch {
+          paths = [input];
+        }
+      } else {
+        return;
+      }
+      insertPathsRef.current(paths.filter((p) => typeof p === 'string' && !!p.trim()));
+    };
+    return () => { window.handleFilePathFromJava = prev; };
+  }, [readOnly]);
+
   const meta = statusMeta(runtime?.status);
   const supervisorName = agents.find((a) => a.id === node.supervisorId)?.name ?? node.supervisorId ?? '—';
   const effModel = node.model || DEFAULT_MODEL;
@@ -372,13 +408,13 @@ export default function NodeDrawer({
               <button
                 className={styles.secondaryBtn}
                 onClick={() => {
-                  if (window.confirm(t('workflow.redispatch.confirm', '该节点可能已产生部分改动，重新下发会让监督者在当前仓库状态上重跑，且不会回滚。确认继续？'))) {
+                  if (window.confirm(t('workflow.redispatch.confirm', '将在该节点原有对话中继续未完成的任务（保留历史、断点续跑，不会重开窗口）。确认继续？'))) {
                     onRedispatch('auto');
                   }
                 }}
-                title={t('workflow.redispatch.tip', '重发任务给该节点；卡死时会重建监督者')}
+                title={t('workflow.redispatch.tip', '在原对话窗口里继续未完成的任务（保留历史）；窗口已关闭时才新开')}
               >
-                <span className="codicon codicon-refresh" /> {t('workflow.redispatch.label', '重新下发任务')}
+                <span className="codicon codicon-refresh" /> {t('workflow.redispatch.label', '继续/重新下发')}
               </button>
             )}
             {/* DN12 (optional): a live pair would only be re-kicked by 'auto' — offer a

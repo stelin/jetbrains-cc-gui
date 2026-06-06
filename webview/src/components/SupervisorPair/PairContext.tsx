@@ -891,8 +891,42 @@ export function PairProvider({ children }: PairProviderProps) {
 
     window.onPairStarted = (json: string) => {
       try {
-        const o = JSON.parse(json) as { pairId?: string };
+        const o = JSON.parse(json) as {
+          pairId?: string;
+          agentId?: string;
+          agentName?: string;
+          model?: string;
+          defaultLongContext?: boolean;
+          defaultReasoning?: string;
+        };
         if (o.pairId) setPairId(o.pairId);
+        // 2026-06-05 (cockpit supervisor-pane race fix): a workflow node's
+        // floating window realizes its webview immediately (before its pair
+        // finishes starting), so its frontend_ready → replayActivePairs usually
+        // fires while no pair is active yet and never replays onPairResume — the
+        // only path that populates `selected` for a node window. Without
+        // `selected`, the right pane (gated on selected.length > 0) never shows,
+        // leaving only the main-AI pane. onPairStarted is pushed exactly when the
+        // pair goes active to the (already-mounted) node webview, so use it to
+        // seed `selected` here. Only when empty: the composer path has already
+        // called setSelected with the user's richer per-agent config, and the
+        // "pair active before webview mounts" case is still covered by
+        // onPairResume.
+        if (o.agentId) {
+          const agentId = o.agentId;
+          setSelectedState((prev) =>
+            prev.length > 0
+              ? prev
+              : [{
+                  agentId,
+                  name: o.agentName ?? agentId,
+                  role: 'coordinator',
+                  model: o.model,
+                  defaultLongContext: o.defaultLongContext,
+                  defaultReasoning: o.defaultReasoning,
+                }]
+          );
+        }
       } catch { /* ignore */ }
     };
 

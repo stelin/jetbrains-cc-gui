@@ -548,6 +548,11 @@ public class ClaudeMessageHandler implements MessageCallback {
             if (newSessionId.equals(boundSid)) return; // already bound (started with sid)
             PairSessionManager.getInstance(project)
                     .bindMainSessionIdToPair(pair.getPairId(), newSessionId);
+            // Session resume (SR7): persist the node's main-AI session id so a
+            // restart can resume its transcript. No-op for non-workflow pairs.
+            com.github.claudecodegui.session.pair.workflow.SupervisorWorkflowManager
+                    .getInstance(project)
+                    .onMainSessionCaptured(pair.getPairId(), newSessionId);
         } catch (Throwable ignored) { /* never propagate */ }
     }
 

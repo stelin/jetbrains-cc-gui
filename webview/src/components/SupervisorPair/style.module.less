@@ -1009,6 +1009,25 @@
   font-family: var(--font-mono, monospace);
 }
 
+// 2026-06-06: supervisor 开始/结束/耗时 strip (under SessionCountStrip, before DecisionTimeline)
+.supervisorTimeStrip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--border-secondary);
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  font-family: var(--font-mono, monospace);
+  font-variant-numeric: tabular-nums;
+}
+.supTimeItem { display: inline-flex; align-items: center; gap: 5px; }
+.supTimeLabel { font-weight: 600; color: var(--text-primary); }
+.supTimeVal { color: var(--text-muted); }
+.supTimeDot { color: var(--text-muted); opacity: 0.5; }
+
 .sessionCountRow {
   display: flex;
   align-items: center;

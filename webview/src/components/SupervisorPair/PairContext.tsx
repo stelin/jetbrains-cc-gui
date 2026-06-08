@@ -104,6 +104,10 @@ export interface PairStatusSnapshot {
   planState?: 'INIT' | 'ACTIVE' | 'WAITING' | 'DONE' | 'ABORTED';
   /** 2026-05-28: active sub-state when planState === 'ACTIVE'. */
   planSubState?: 'EXECUTING' | 'PENDING_DISCHARGE' | 'PENDING_DECISION';
+  /** 2026-06-06: epoch ms the supervisor session started (pair start). */
+  supervisorStartedAt?: number;
+  /** 2026-06-06: epoch ms the supervisor session finished (owning node DONE); absent while running. */
+  supervisorFinishedAt?: number;
 }
 
 /**
@@ -845,6 +849,7 @@ export function PairProvider({ children }: PairProviderProps) {
     const prevThinking = window.onPairThinking;
     const prevSupervisorMessage = window.onSupervisorMessage;
     const prevSupervisorMessageBatch = window.onSupervisorMessageBatch;
+    const prevSupervisorHistoryLoad = window.onSupervisorHistoryLoad;
     const prevSupervisorLiveUsage = window.onSupervisorLiveUsage;
     const prevPairStatus = window.onPairStatusUpdate;
     const prevPairResume = window.onPairResume;
@@ -1064,6 +1069,13 @@ export function PairProvider({ children }: PairProviderProps) {
 
       const turnId = hashTurnId(turnStr || `sm_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`);
 
+      // Replayed history frames carry a `hist_*` turnId (PairHandler.replaySupervisorHistory).
+      // They are a static snapshot of a past session, not a live turn — render them
+      // as settled (no streaming spinner) and don't flip the agent's streaming flag,
+      // which would otherwise leave the restored pane spinning forever (no turn-end
+      // event follows a pure replay).
+      const isHistory = typeof turnStr === 'string' && turnStr.startsWith('hist_');
+
       if (msg.type === 'assistant' && Array.isArray(msg.message?.content)) {
         const blocks: ClaudeContentOrResultBlock[] = [];
         for (const block of msg.message.content) {
@@ -1076,10 +1088,12 @@ export function PairProvider({ children }: PairProviderProps) {
           blocks.push(block as ClaudeContentOrResultBlock);
         }
         if (blocks.length > 0) {
-          appendAssistantBlocks(agentId, turnId, blocks, { ensureStreaming: true });
-          setStreamingByAgentId((prev) =>
-            prev[agentId] ? prev : { ...prev, [agentId]: true }
-          );
+          appendAssistantBlocks(agentId, turnId, blocks, { ensureStreaming: !isHistory });
+          if (!isHistory) {
+            setStreamingByAgentId((prev) =>
+              prev[agentId] ? prev : { ...prev, [agentId]: true }
+            );
+          }
         }
       } else if (msg.type === 'user' && Array.isArray(msg.message?.content)) {
         const toolResults: ToolResultBlock[] = [];
@@ -1139,6 +1153,135 @@ export function PairProvider({ children }: PairProviderProps) {
         const arr = JSON.parse(json);
         if (!Array.isArray(arr)) return;
         for (const evt of arr) processSupervisorEnvelope(evt);
+      } catch { /* ignore malformed */ }
+    };
+
+    /**
+     * Build a complete, settled ClaudeMessage[] from raw supervisor transcript
+     * frames (the supervisor analogue of parsing the main-AI .jsonl). Mirrors
+     * processSupervisorEnvelope's rendering rules but accumulates into a fresh
+     * array instead of mutating state incrementally, and — unlike the live path —
+     * RENDERS the emit_action tool_use as a decision card (the live path skips it
+     * because onPairActionEvent re-emits a normalised copy, which does NOT exist
+     * for replayed history). All messages are non-streaming.
+     */
+    const framesToSupervisorMessages = (frames: unknown[]): ClaudeMessage[] => {
+      const list: ClaudeMessage[] = [];
+      const turnToIdx = new Map<number, number>();
+      for (const f of frames) {
+        if (!f || typeof f !== 'object') continue;
+        const env = f as { turnId?: string; message?: {
+          type?: string; subtype?: string; timestamp?: string;
+          message?: { content?: unknown }; parent_tool_use_id?: string | null;
+          compact_metadata?: { trigger?: string; pre_tokens?: number };
+        } };
+        const msg = env.message;
+        if (!msg || typeof msg !== 'object' || msg.parent_tool_use_id) continue;
+        const turnStr = typeof env.turnId === 'string' ? env.turnId : `hist_${list.length}`;
+        const turnId = hashTurnId(turnStr);
+        const ts = typeof msg.timestamp === 'string' ? msg.timestamp : new Date().toISOString();
+
+        if (msg.type === 'assistant' && Array.isArray(msg.message?.content)) {
+          const blocks: ClaudeContentOrResultBlock[] = [];
+          for (const block of msg.message.content) {
+            if (!block || typeof block !== 'object') continue;
+            const b = block as { type?: string; name?: string; id?: string; input?: unknown };
+            if (b.type === 'tool_use' && typeof b.name === 'string' && b.name.includes('emit_action')) {
+              // Normalise the raw emit_action into the {action,reason,payload}
+              // shape SupervisorActionBlock renders (same as onPairActionEvent).
+              const input = (b.input && typeof b.input === 'object') ? b.input as Record<string, unknown> : {};
+              const action = typeof input.action === 'string' ? input.action : 'action';
+              const reason = typeof input.reason === 'string' ? input.reason : '';
+              const payload: Record<string, unknown> = {};
+              for (const k of Object.keys(input)) {
+                if (k !== 'action' && k !== 'reason') payload[k] = input[k];
+              }
+              blocks.push({ type: 'tool_use', id: b.id ?? `act_${turnStr}`,
+                name: 'mcp__supervisor__emit_action', input: { action, reason, payload } } as ClaudeContentOrResultBlock);
+              continue;
+            }
+            blocks.push(block as ClaudeContentOrResultBlock);
+          }
+          if (blocks.length > 0) {
+            const idx = turnToIdx.get(turnId);
+            if (idx != null) {
+              const target = list[idx];
+              const rawBase = (typeof target.raw === 'object' && target.raw ? target.raw : {}) as Record<string, unknown>;
+              const existing = (rawBase.content as ClaudeContentOrResultBlock[] | undefined) ?? [];
+              list[idx] = { ...target, raw: { ...rawBase, content: [...existing, ...blocks] } };
+            } else {
+              turnToIdx.set(turnId, list.length);
+              list.push({ type: 'assistant', raw: { content: blocks }, isStreaming: false,
+                __turnId: turnId, timestamp: ts });
+            }
+          }
+        } else if (msg.type === 'user' && Array.isArray(msg.message?.content)) {
+          const userBlocks: ClaudeContentOrResultBlock[] = [];
+          for (const block of msg.message.content) {
+            if (!block || typeof block !== 'object') continue;
+            const b = block as { type?: string };
+            if (b.type === 'tool_result') {
+              // Attach to the assistant turn that issued the matching tool_use.
+              const r = block as ToolResultBlock;
+              for (let i = list.length - 1; i >= 0; i -= 1) {
+                const target = list[i];
+                if (target.type !== 'assistant') continue;
+                const rawObj = typeof target.raw === 'object' && target.raw ? target.raw : null;
+                const content = (rawObj?.content as ClaudeContentOrResultBlock[] | undefined);
+                if (!Array.isArray(content)) continue;
+                if (content.some((bb) => bb && (bb as { type?: string }).type === 'tool_use'
+                    && (bb as { id?: string }).id === r.tool_use_id)) {
+                  list[i] = { ...target, raw: { ...rawObj, content: [...content, r] } };
+                  break;
+                }
+              }
+            } else if (isRenderableUserBlock(block)) {
+              userBlocks.push(block as ClaudeContentOrResultBlock);
+            }
+          }
+          if (userBlocks.length > 0) {
+            list.push({ type: 'user', raw: { content: userBlocks }, __turnId: turnId, timestamp: ts });
+          }
+        } else if (msg.type === 'system' && msg.subtype === 'compact_boundary') {
+          list.push({ type: 'assistant', isStreaming: false, __turnId: turnId, timestamp: ts,
+            raw: { content: [{ type: 'tool_use', id: `compact_${turnStr}`,
+              name: 'mcp__supervisor__compact_boundary',
+              input: { trigger: msg.compact_metadata?.trigger ?? 'auto',
+                preTokens: msg.compact_metadata?.pre_tokens ?? null } }] } });
+        }
+      }
+      return list;
+    };
+
+    /**
+     * Authoritative, idempotent history load — the supervisor analogue of the
+     * main AI's loadHistorySession→updateMessages. Rebuilds the full prior
+     * conversation and merges it AHEAD of any live (post-resume) messages, so a
+     * reopened/reloaded pane shows its history regardless of event ordering, and
+     * re-loading (a second webview mount) just re-establishes the same prefix
+     * instead of duplicating or being wiped by a racing clear.
+     */
+    window.onSupervisorHistoryLoad = (json: string) => {
+      try {
+        const o = JSON.parse(json) as { supervisorId?: string; frames?: unknown };
+        const agentId = o?.supervisorId;
+        if (!agentId || !Array.isArray(o.frames) || o.frames.length === 0) {
+          console.info('[PairHistory] onSupervisorHistoryLoad ignored (no agentId/frames)');
+          return;
+        }
+        const history = framesToSupervisorMessages(o.frames);
+        console.info('[PairHistory] onSupervisorHistoryLoad', {
+          agentId, frames: o.frames.length, builtMessages: history.length,
+        });
+        if (history.length === 0) return;
+        const histTurns = new Set(history.map((m) => m.__turnId));
+        setMessagesByAgentId((prev) => {
+          const existing = prev[agentId] ?? [];
+          // Drop any existing copies of these history turns (idempotent re-load)
+          // and keep live messages that aren't part of history.
+          const live = existing.filter((m) => !histTurns.has(m.__turnId));
+          return { ...prev, [agentId]: trimHistory([...history, ...live]) };
+        });
       } catch { /* ignore malformed */ }
     };
 
@@ -1329,6 +1472,7 @@ export function PairProvider({ children }: PairProviderProps) {
     return () => {
       window.onSupervisorMessage = prevSupervisorMessage;
       window.onSupervisorMessageBatch = prevSupervisorMessageBatch;
+      window.onSupervisorHistoryLoad = prevSupervisorHistoryLoad;
       window.onPairStarted = prevStarted;
       window.onPairStopped = prevStopped;
       window.onPairActionEvent = prevAction;

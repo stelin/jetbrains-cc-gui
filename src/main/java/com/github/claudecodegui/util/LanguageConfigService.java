@@ -24,7 +24,7 @@ public class LanguageConfigService {
      */
     private static String mapIdeaLocaleToI18n(Locale ideaLocale) {
         if (ideaLocale == null) {
-            return "en";  // default to English
+            return "zh";  // project default: Simplified Chinese
         }
 
         String language = ideaLocale.getLanguage();
@@ -38,10 +38,8 @@ public class LanguageConfigService {
             return "zh";  // Simplified Chinese
         }
 
-        // Direct mapping for other languages
+        // Honour an explicitly-set, supported non-Chinese IDE locale.
         switch (language) {
-            case "en":
-                return "en";
             case "hi":
                 return "hi";
             case "es":
@@ -53,9 +51,10 @@ public class LanguageConfigService {
             case "ru":
                 return "ru";
             default:
-                // Unsupported language, fall back to English
-                LOG.info("[LanguageConfig] Unsupported language '" + language + "', falling back to English");
-                return "en";
+                // Project default is Simplified Chinese — an English / unset /
+                // unsupported IDE locale uses the Chinese default, not English.
+                LOG.info("[LanguageConfig] Locale '" + language + "' → project default 'zh'");
+                return "zh";
         }
     }
 
@@ -81,10 +80,10 @@ public class LanguageConfigService {
                     + ", i18nLanguage=" + i18nLanguage);
 
         } catch (Exception e) {
-            // Fall back to English on exception
-            config.addProperty("language", "en");
-            config.addProperty("ideaLocale", "en");
-            LOG.error("[LanguageConfig] Failed to get language config, using default (en): " + e.getMessage(), e);
+            // Fall back to the project default (Simplified Chinese) on exception
+            config.addProperty("language", "zh");
+            config.addProperty("ideaLocale", "zh");
+            LOG.error("[LanguageConfig] Failed to get language config, using default (zh): " + e.getMessage(), e);
         }
 
         return config;
@@ -110,7 +109,7 @@ public class LanguageConfigService {
             return mapIdeaLocaleToI18n(currentLocale);
         } catch (Exception e) {
             LOG.error("[LanguageConfig] Failed to get current language: " + e.getMessage());
-            return "en";
+            return "zh";
         }
     }
 }

@@ -35,6 +35,12 @@ public final class L2Schema {
     /** Bounded ring cap for {@link L2State#compactionHistory}. */
     public static final int COMPACTION_HISTORY_MAX = 50;
 
+    /** Bounded ring cap for {@link L2State#recentCoordinatorEvents}. Persisted so
+     *  the CoordinatorEventStrip survives a webview reload / IDE-restart resume;
+     *  the strip itself only renders the latest ~15, so 30 keeps a little
+     *  scroll-back without bloating state.json. */
+    public static final int RECENT_COORDINATOR_EVENTS_MAX = 30;
+
     /** Bounded ring cap for {@link L2State.MainAIState#recentUserMessages}. */
     public static final int MAIN_AI_RECENT_USER_MAX = 10;
 

@@ -58,6 +58,16 @@ public class L2State {
     /** Ring; oldest evicted at {@link L2Schema#COMPACTION_HISTORY_MAX}. */
     public List<CompactionEntry> compactionHistory = new ArrayList<>();
 
+    /**
+     * Coordinator-event strip history (plan transitions / contract issue /
+     * discharge / retry / resume notices). Persisted — written through by
+     * {@code PairStatusPusher.recordCoordinatorEvent} — so the strip re-renders
+     * after a webview reload, and is carried into a resumed pair's strip on
+     * IDE-restart recovery. Ring; oldest evicted at
+     * {@link L2Schema#RECENT_COORDINATOR_EVENTS_MAX}.
+     */
+    public List<PersistedCoordinatorEvent> recentCoordinatorEvents = new ArrayList<>();
+
     public int rotationCount = 0;
 
     public Metrics metrics = new Metrics();
@@ -114,6 +124,9 @@ public class L2State {
         recentDecisions.removeIf(d -> d.ts > 0 && (now - d.ts) > L2Schema.RECENT_DECISIONS_MAX_WINDOW_MS);
         while (compactionHistory.size() > L2Schema.COMPACTION_HISTORY_MAX) {
             compactionHistory.remove(0);
+        }
+        while (recentCoordinatorEvents.size() > L2Schema.RECENT_COORDINATOR_EVENTS_MAX) {
+            recentCoordinatorEvents.remove(0);
         }
         if (mainAI != null && mainAI.recentUserMessages != null) {
             while (mainAI.recentUserMessages.size() > L2Schema.MAIN_AI_RECENT_USER_MAX) {
@@ -211,6 +224,29 @@ public class L2State {
         public long at;
         public String trigger; // "sdk_auto" | "manual" | "rotation"
         public Double ratioBefore;
+    }
+
+    /**
+     * Persisted shape of {@code PairStatusSnapshot.CoordinatorEvent} for the
+     * CoordinatorEventStrip. {@code source} is the enum name (PLAN|CONTRACT|
+     * GUARD|DISPATCHER) kept as a String so unknown values from a newer build
+     * deserialize cleanly.
+     */
+    public static class PersistedCoordinatorEvent {
+        public long ts;
+        public String source;
+        public String type;
+        public String message;
+        public String detail;
+
+        public PersistedCoordinatorEvent() { /* gson */ }
+        public PersistedCoordinatorEvent(long ts, String source, String type, String message, String detail) {
+            this.ts = ts;
+            this.source = source;
+            this.type = type;
+            this.message = message;
+            this.detail = detail;
+        }
     }
 
     public static class RotationInfo {

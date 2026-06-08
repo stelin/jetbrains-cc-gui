@@ -9,7 +9,10 @@ import styles from './style.module.less';
 interface DagCanvasProps {
   draft: WorkflowDefinition;
   execution: WorkflowExecution | null;
+  /** Render per-node status badges + timings (live run or the last finished run). */
   showStatus: boolean;
+  /** Allow arranging/connecting nodes. False only while a run is actively in progress. */
+  editable: boolean;
   selectedNode: string | null;
   agentName: (id: string) => string;
   /** Per-node effective last-active instant (epoch ms), for the silent-time display. */
@@ -26,20 +29,22 @@ interface DagCanvasProps {
 }
 
 export default function DagCanvas({
-  draft, execution, showStatus, selectedNode, agentName, nodeActivity, freezeThresholdMs,
+  draft, execution, showStatus, editable, selectedNode, agentName, nodeActivity, freezeThresholdMs,
   onSelectNode, onJumpNode, onAddNode, onMoveNode, onConnect, onDeleteEdge,
 }: DagCanvasProps) {
   const { t } = useTranslation();
   const auto = useMemo(() => layout(draft.nodes), [draft.nodes]);
-  const editable = !showStatus; // arrange + connect only while editing
 
-  // One 1s ticker for all running cards' silent-time counters (only while showing status).
+  // One 1s ticker for all running cards' silent-time counters — only while a run
+  // is actively in progress (a finished run still shows status, but its idle
+  // counters are frozen, so the ticker would just re-render for nothing).
+  const live = showStatus && execution?.state === 'RUNNING';
   const [nowTs, setNowTs] = useState(() => Date.now());
   useEffect(() => {
-    if (!showStatus) return undefined;
+    if (!live) return undefined;
     const id = window.setInterval(() => setNowTs(Date.now()), 1000);
     return () => window.clearInterval(id);
-  }, [showStatus]);
+  }, [live]);
 
   const canvasRef = useRef<HTMLDivElement>(null);
 
@@ -167,7 +172,8 @@ export default function DagCanvas({
               connectLine={connect}
             />
             {placed.map((p) => {
-              const st = showStatus ? execution?.nodes[p.name]?.status : undefined;
+              const rt = showStatus ? execution?.nodes[p.name] : undefined;
+              const st = rt?.status;
               const act = nodeActivity[p.name];
               const idleMs = (showStatus && st === 'RUNNING' && act) ? Math.max(0, nowTs - act) : undefined;
               return (
@@ -179,6 +185,8 @@ export default function DagCanvas({
                 showStatus={showStatus}
                 idleMs={idleMs}
                 thresholdMs={freezeThresholdMs}
+                startedAt={rt?.startedAt ?? undefined}
+                finishedAt={rt?.finishedAt ?? undefined}
                 selected={selectedNode === p.name}
                 draggable={editable}
                 dragging={dragPos?.name === p.name}

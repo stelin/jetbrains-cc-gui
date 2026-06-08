@@ -55,7 +55,7 @@ public class BridgeDirectoryResolver {
      * This guards against half-overwritten extractions (e.g. file locked by a
      * lingering node process on Windows during plugin upgrade).
      */
-    static final String EXPECTED_DAEMON_VERSION = "1.0.0-supervisor";
+    static final String EXPECTED_DAEMON_VERSION = "1.1.0-session-resume";
 
     /** Sibling-directory suffixes used by the atomic-swap extraction flow. */
     private static final String EXTRACTION_NEW_SUFFIX_PREFIX = SDK_DIR_NAME + ".new.";

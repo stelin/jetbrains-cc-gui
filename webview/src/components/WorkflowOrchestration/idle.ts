@@ -16,6 +16,20 @@ export function formatIdle(ms: number): string {
   return h > 0 ? `${h}:${p(m)}:${p(s)}` : `${m}:${p(s)}`;
 }
 
+/** epoch ms → "YYYY-MM-DD HH:MM:SS" (local time). Empty for null/0. */
+export function formatYmdHms(ms?: number | null): string {
+  if (!ms || ms <= 0) return '';
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
+    + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+/** Elapsed duration in minutes (1 decimal), e.g. "1.5 分". <1min still shows decimals. */
+export function formatElapsedMin(ms: number): string {
+  return `${(Math.max(0, ms) / 60_000).toFixed(1)} 分`;
+}
+
 export type IdleLevel = 'ok' | 'warn' | 'danger';
 
 /** Colour bucket by idle/threshold ratio (active → ok). thresholdMs<=0 → ratio-free. */

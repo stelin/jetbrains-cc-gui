@@ -32,11 +32,44 @@ public class NodeRuntime {
      */
     public Long scheduledStartAt;
 
+    /**
+     * Epoch ms when this node entered RUNNING (the genuine run start, re-stamped on
+     * each fresh (re)dispatch). Null until the node first runs. Persisted + pushed
+     * to the webview so the node card can show 开始时间 / 耗时.
+     */
+    public Long startedAt;
+
+    /**
+     * Epoch ms when this node reached DONE. Null while running / not yet done.
+     * With {@link #startedAt} the card computes elapsed (单位:分).
+     */
+    public Long finishedAt;
+
     /** Files this node created/modified (from the report tool); feeds下游. */
     public List<String> changedFiles;
 
     /** Completion/blocked说明 (from the report tool); feeds下游. */
     public String summary;
+
+    /**
+     * Session resume (SR7, session-resume-plan.md): the main-AI and supervisor SDK
+     * session ids captured while this node ran, persisted to {@code execution.json}
+     * so a restart can resume both transcripts instead of starting fresh. Null on
+     * old executions / nodes that never started. {@link #supervisorGeneration}
+     * records the supervisor rotation generation the id belongs to (so resume
+     * targets the right one). The front-end ignores these unknown fields.
+     */
+    public String mainSessionId;
+    public String supervisorSessionId;
+    public Integer supervisorGeneration;
+
+    /**
+     * Session resume display: the pairId this node's supervisor last ran under,
+     * persisted so a restart-resume can locate the prior pair's L2 and carry its
+     * coordinator-event strip into the resumed pair (the new pair has a different
+     * pairId / fresh L2). Null on old executions / nodes that never started.
+     */
+    public String supervisorPairId;
 
     public NodeRuntime() {
         /* gson */

@@ -141,6 +141,45 @@ public final class PairSessionManager implements Disposable {
          */
         @Nullable public final String ownerWindowId;
 
+        /**
+         * Session resume (SR4, session-resume-plan.md): when non-null, ask the
+         * daemon to resume this supervisor's prior transcript by session_id
+         * instead of starting fresh. Threaded to {@code SupervisorBridge
+         * .startWithHandoff(..., resumeSessionId)}. Null on every non-resume path
+         * (composer start, rotation, tests).
+         */
+        @Nullable public final String resumeSupervisorSessionId;
+
+        /**
+         * Session resume display: the prior pair's pairId, whose persisted L2
+         * coordinator-event strip should be carried into this resumed pair so the
+         * CoordinatorEventStrip shows history after IDE-restart recovery. Mutable
+         * + set post-construction by {@code IdeNodeLauncher} (keeps the existing
+         * constructors untouched). Null on every non-resume path.
+         */
+        @Nullable public String priorPairId;
+
+        public StartPairParams(
+                String mainSessionId,
+                String agentId,
+                @Nullable String planPath,
+                @Nullable String modelOverride,
+                @Nullable Boolean longContextOverride,
+                @Nullable String reasoningOverride,
+                @Nullable String ownerWindowId,
+                @Nullable String resumeSupervisorSessionId
+        ) {
+            this.mainSessionId = mainSessionId;
+            this.agentId = agentId;
+            this.planPath = planPath;
+            this.modelOverride = modelOverride;
+            this.longContextOverride = longContextOverride;
+            this.reasoningOverride = reasoningOverride;
+            this.ownerWindowId = ownerWindowId;
+            this.resumeSupervisorSessionId = resumeSupervisorSessionId;
+        }
+
+        /** Back-compat: no session-resume (the common path). */
         public StartPairParams(
                 String mainSessionId,
                 String agentId,
@@ -150,13 +189,8 @@ public final class PairSessionManager implements Disposable {
                 @Nullable String reasoningOverride,
                 @Nullable String ownerWindowId
         ) {
-            this.mainSessionId = mainSessionId;
-            this.agentId = agentId;
-            this.planPath = planPath;
-            this.modelOverride = modelOverride;
-            this.longContextOverride = longContextOverride;
-            this.reasoningOverride = reasoningOverride;
-            this.ownerWindowId = ownerWindowId;
+            this(mainSessionId, agentId, planPath, modelOverride, longContextOverride,
+                    reasoningOverride, ownerWindowId, null);
         }
 
         /** Back-compat: composer overrides without windowId. */
@@ -367,7 +401,10 @@ public final class PairSessionManager implements Disposable {
                     params.agentId, // generation-0 supervisorId == agentId
                     bootstrapAppend,
                     0,
-                    mcpAccess
+                    mcpAccess,
+                    // Session resume (SR4): non-null only on the workflow-node
+                    // resume path; null = fresh start (composer / normal node).
+                    params.resumeSupervisorSessionId
             ).get(START_SUPERVISOR_DAEMON_TIMEOUT_SEC, TimeUnit.SECONDS);
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
@@ -412,6 +449,47 @@ public final class PairSessionManager implements Disposable {
         // current rotation generation (instead of always reporting 0).
         PairStatusPusher statusPusher = new PairStatusPusher(session, router, l2Store);
         session.setStatusPusher(statusPusher);
+
+        // Session resume display: carry the prior pair's persisted coordinator-event
+        // strip into this resumed pair so the CoordinatorEventStrip shows history
+        // (the new pairId has a fresh L2; the old events live under the prior pairId).
+        if (params.priorPairId != null && !params.priorPairId.isEmpty()
+                && !params.priorPairId.equals(pairId)) {
+            try {
+                L2State prior = l2Store.read(params.priorPairId);
+                if (prior != null && prior.recentCoordinatorEvents != null
+                        && !prior.recentCoordinatorEvents.isEmpty()) {
+                    final java.util.List<L2State.PersistedCoordinatorEvent> carried =
+                            prior.recentCoordinatorEvents;
+                    // Merge the prior strip into THIS pair's L2 (prepended, deduped,
+                    // trimmed) so buildSnapshot renders it AND it persists for a
+                    // second restart-resume.
+                    l2Store.update(pairId, s -> {
+                        java.util.Set<String> seen = new java.util.HashSet<>();
+                        for (L2State.PersistedCoordinatorEvent e : s.recentCoordinatorEvents) {
+                            if (e != null) seen.add(e.ts + " " + e.type + " " + e.message);
+                        }
+                        java.util.List<L2State.PersistedCoordinatorEvent> merged = new java.util.ArrayList<>();
+                        for (L2State.PersistedCoordinatorEvent e : carried) {
+                            if (e == null || !seen.add(e.ts + " " + e.type + " " + e.message)) continue;
+                            merged.add(e);
+                        }
+                        merged.addAll(s.recentCoordinatorEvents);
+                        while (merged.size()
+                                > com.github.claudecodegui.session.pair.l2.L2Schema.RECENT_COORDINATOR_EVENTS_MAX) {
+                            merged.remove(0);
+                        }
+                        s.recentCoordinatorEvents = merged;
+                        return s;
+                    });
+                    LOG.info("[PairSessionManager] carried " + carried.size()
+                            + " coordinator events from prior pair " + params.priorPairId
+                            + " into " + pairId);
+                }
+            } catch (Exception e) {
+                LOG.debug("[PairSessionManager] prior coordinator-event carry-forward failed: " + e.getMessage());
+            }
+        }
 
         // Stage C (2026-05-25): independent watchers split off from SupervisorMonitor.
         // HealthWatcher owns supervisor health-state transitions; SupervisorMonitor

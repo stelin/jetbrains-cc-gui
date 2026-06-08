@@ -72,6 +72,10 @@ export interface NodeRuntime {
   escalationReason?: string | null;
   /** Filled when status === 'SCHEDULED': absolute instant (epoch ms) this node is due to start. */
   scheduledStartAt?: number | null;
+  /** Epoch ms this node entered RUNNING (re-stamped each dispatch); null until first run. */
+  startedAt?: number | null;
+  /** Epoch ms this node reached DONE; null while running. */
+  finishedAt?: number | null;
   /** Optional live output-token counter while RUNNING. */
   liveOutputTokens?: number;
 }

@@ -104,6 +104,11 @@ public final class PairStatusSnapshot {
     /** 2026-05-28: active sub-state (EXECUTING/PENDING_DISCHARGE/PENDING_DECISION) or null. */
     public final String planSubState;
 
+    /** 2026-06-06: epoch ms the supervisor session started (pair start). 0 if unset. */
+    public final long supervisorStartedAt;
+    /** 2026-06-06: epoch ms the supervisor session finished (owning node DONE), or null while running. */
+    public final Long supervisorFinishedAt;
+
     private PairStatusSnapshot(Builder b) {
         this.pairId = b.pairId;
         this.generation = b.generation;
@@ -139,6 +144,8 @@ public final class PairStatusSnapshot {
         this.totalEscalatedContracts = b.totalEscalatedContracts;
         this.planState = b.planState;
         this.planSubState = b.planSubState;
+        this.supervisorStartedAt = b.supervisorStartedAt;
+        this.supervisorFinishedAt = b.supervisorFinishedAt;
     }
 
     public JsonObject toJson() {
@@ -194,6 +201,8 @@ public final class PairStatusSnapshot {
         o.addProperty("totalEscalatedContracts", totalEscalatedContracts);
         if (planState != null) o.addProperty("planState", planState);
         if (planSubState != null) o.addProperty("planSubState", planSubState);
+        if (supervisorStartedAt > 0) o.addProperty("supervisorStartedAt", supervisorStartedAt);
+        if (supervisorFinishedAt != null) o.addProperty("supervisorFinishedAt", supervisorFinishedAt);
         return o;
     }
 
@@ -311,6 +320,8 @@ public final class PairStatusSnapshot {
         private long totalEscalatedContracts;
         private String planState;
         private String planSubState;
+        private long supervisorStartedAt;
+        private Long supervisorFinishedAt;
 
         private Builder(String pairId) { this.pairId = pairId; }
 
@@ -347,6 +358,8 @@ public final class PairStatusSnapshot {
         public Builder totalEscalatedContracts(long v) { this.totalEscalatedContracts = v; return this; }
         public Builder planState(String v) { this.planState = v; return this; }
         public Builder planSubState(String v) { this.planSubState = v; return this; }
+        public Builder supervisorStartedAt(long v) { this.supervisorStartedAt = v; return this; }
+        public Builder supervisorFinishedAt(Long v) { this.supervisorFinishedAt = v; return this; }
 
         public PairStatusSnapshot build() {
             return new PairStatusSnapshot(this);

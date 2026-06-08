@@ -5,7 +5,7 @@
 import type { WorkflowNode } from './types';
 
 export const CARD_W = 156;
-export const CARD_H = 80;   // raised ~1/3 from 60 (D29)
+export const CARD_H = 140;  // tall enough for a 2-line node name + status badge + start/finish/elapsed rows
 export const COL_GAP = 72;
 export const ROW_GAP = 24;
 export const PAD = 16;

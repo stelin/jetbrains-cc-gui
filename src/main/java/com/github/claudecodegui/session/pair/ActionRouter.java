@@ -796,6 +796,75 @@ public class ActionRouter {
     }
 
     /**
+     * Post-resume re-prime (SR2/SR5, session-resume-plan.md). The seam between
+     * "the supervisor's transcript was resumed from history" and "the Java
+     * coordination layer (contracts / plan state machine) was rebuilt fresh on
+     * restart". The resumed LLM remembers "I dispatched contract C and I'm
+     * waiting", but the fresh ContractRegistry has no such contract — so without
+     * this it would emit a stale {@code wait}, get rejected, and loop into the
+     * wedged-supervisor escalation (same failure class as post-compaction).
+     *
+     * <p>Injects an authoritative-state snapshot as the freshest {@code system}
+     * message right after a resume, telling the supervisor: your coordination
+     * state is fresh, do NOT trust your recalled "I'm waiting", VERIFY the real
+     * repo/contract state, then decide. Same shape as {@link #reprimeAfterCompaction}
+     * (reuses {@link #buildWaitRejectionStateSnapshot}); only fires in the danger
+     * window (plan ACTIVE, no open MAIN_AI contract). Called by
+     * {@code SupervisorWorkflowManager} right after a resume-mode node launch,
+     * before the re-dispatch kickoff.
+     */
+    public void reprimeAfterResume() {
+        try {
+            PlanStateMachine sm = pair.getPlanStateMachine();
+            if (sm == null) return;
+            Plan current = sm.getCurrent();
+            if (current == null || current.state != Plan.PlanState.ACTIVE) return;
+
+            ContractRegistry registry = pair.getContractRegistry();
+            if (registry != null) {
+                for (Contract c : registry.getOpenContracts()) {
+                    if (c.assignedTo == ContractAssignee.MAIN_AI) return;   // legit wait window
+                }
+            }
+
+            com.github.claudecodegui.bridge.SupervisorBridge bridge = pair.getSupervisorBridge();
+            if (bridge == null) return;
+
+            String snapshot = buildWaitRejectionStateSnapshot(current, registry);
+            JsonObject event = new JsonObject();
+            event.addProperty("type", "post_resume_reprime");
+            event.addProperty("reason",
+                    "你的会话刚从历史 resume(你能看到之前的对话/决策)——但 Java 协调状态(合同/plan)"
+                    + "是重启后全新重建的,不是你记忆里的那个。不要相信记忆里『我在等合同 C / 已派单』,"
+                    + "那些在新的协调状态里并不存在。以下面这份真实状态为准:\n" + snapshot);
+            event.addProperty("suggestion",
+                    "本轮先核对真实情况再决策(禁止 emit wait): 用 Read/Grep 看改动文件、看主 AI 最近一段输出,"
+                    + "判断哪些已完成、从哪继续。然后三选一: "
+                    + "(a) emit_action(inject_prompt, {inlinePrompt:'<给主 AI 的下一步具体指令>', objective:'...'}) 派单; "
+                    + "(b) emit_action(complete_plan, {summary:'...'}) 收尾; "
+                    + "(c) emit_action(escalate_to_human, ...) 升级。");
+            event.addProperty("ts", System.currentTimeMillis());
+            bridge.postEvent(event, "system");
+            consecutiveWaitRejections = 0;
+
+            LOG.warn("[ActionRouter] " + pair.getPairId()
+                    + " post-resume reprime injected (plan ACTIVE, no open MAIN_AI contract)");
+
+            PairStatusPusher pusher = pair.getStatusPusher();
+            if (pusher != null) {
+                pusher.recordCoordinatorEvent(
+                        PairStatusSnapshot.CoordinatorEvent.Source.GUARD,
+                        "post_resume_reprime",
+                        "会话已从历史恢复,已重注入真实协调状态(防止 supervisor 凭旧记忆 wait)",
+                        null);
+            }
+        } catch (Exception e) {
+            LOG.warn("[ActionRouter] reprimeAfterResume failed: "
+                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getName()));
+        }
+    }
+
+    /**
      * Plan A (2026-05-26 v3.2): build a "what is actually true right now"
      * snapshot the supervisor must see to break out of its stale mental model
      * ("I dispatched ping #N, contract still OPEN" when in fact no contract
@@ -1326,6 +1395,11 @@ public class ActionRouter {
      * Idempotent — subsequent calls drain the buffer (covers webview reload
      * where state was cleared but the Java pair is still alive).
      */
+    /** Whether {@code pair_webview_ready} has fired for this pair's webview. */
+    public boolean isWebviewReady() {
+        return webviewReady;
+    }
+
     public void markWebviewReady() {
         webviewReady = true;
         if (pendingInjectsBeforeReady.isEmpty()) {

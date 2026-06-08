@@ -33,7 +33,7 @@ export default function WorkflowView({ onClose, onOpenSupervisorManager }: Workf
 
   // Optimistic value for the global freeze-threshold select (echoed back via capabilities).
   const [freezeOverride, setFreezeOverride] = useState<number | null>(null);
-  const freezeMin = freezeOverride ?? capabilities.freezeThresholdMinutes ?? 10;
+  const freezeMin = freezeOverride ?? capabilities.freezeThresholdMinutes ?? 15;
 
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   useEffect(() => { setSelectedNode(null); }, [draft?.id]);
@@ -66,6 +66,12 @@ export default function WorkflowView({ onClose, onOpenSupervisorManager }: Workf
   const agentNameLocal = useCallback((id: string) => agents.find((a) => a.id === id)?.name ?? id ?? '', [agents]);
 
   const running = !!draft && runningOf(draft.id);
+  // Keep the per-node status + timings on the canvas even after the run finishes
+  // (COMPLETED/ABORTED) — it's the record of the last run. It only clears when the
+  // next Run pushes a fresh execution snapshot. Shown only for the workflow that
+  // actually ran (execution is a single global for the whole engine).
+  const showRunStatus = !!draft && !!execution && execution.workflowId === draft.id
+    && execution.state !== 'EDITING';
   // A RUNNING or PAUSED (restored) execution holds the single-workflow lock, so
   // another workflow can't be started until it's resumed/aborted.
   const lockedByOther = (isRunning || isPaused) && !!draft && execution?.workflowId !== draft.id;
@@ -156,7 +162,7 @@ export default function WorkflowView({ onClose, onOpenSupervisorManager }: Workf
               value={freezeMin}
               onChange={(e) => { const m = Number(e.target.value); setFreezeOverride(m); setFreezeThreshold(m); }}
             >
-              {[1, 5, 10, 20, 30, 40, 60].map((m) => (
+              {[1, 15, 30, 60].map((m) => (
                 <option key={m} value={m}>{m}</option>
               ))}
             </select>
@@ -246,7 +252,8 @@ export default function WorkflowView({ onClose, onOpenSupervisorManager }: Workf
           <DagCanvas
             draft={draft}
             execution={execution}
-            showStatus={running}
+            showStatus={showRunStatus}
+            editable={!running}
             selectedNode={selectedNode}
             agentName={agentNameLocal}
             nodeActivity={nodeActivity}

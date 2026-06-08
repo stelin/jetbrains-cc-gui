@@ -85,6 +85,22 @@ public class SupervisorBridge {
     public static final String PRE_COMPACT_PREFIX = "[PRE_COMPACT]";
 
     /**
+     * Session resume (SR3, session-resume-plan.md): emitted on the first turn
+     * once the SDK assigns a session_id. Java persists it (into NodeRuntime) so a
+     * restart can resume this supervisor's transcript. Envelope:
+     * {@code { pairId, supervisorId, sessionId }}.
+     */
+    public static final String SESSION_LINE_PREFIX = "[SUPERVISOR_SESSION]";
+
+    /**
+     * Session resume (SR5): emitted when a requested {@code resumeSessionId} was
+     * NOT honoured (the SDK started a different session — resume not supported for
+     * this session shape). Java falls back to "fresh + handoff" (SR6). Envelope:
+     * {@code { pairId, supervisorId, requested, actual }}.
+     */
+    public static final String RESUME_MISS_PREFIX = "[SUPERVISOR_RESUME_MISS]";
+
+    /**
      * Phase 4 (2026-05-24): response payload for {@link #produceHandoff}. The
      * daemon turns the LLM's prose JSON output into an envelope of the form
      * {@code { "json": "...", "raw": "..." }} so Java can both validate the
@@ -171,6 +187,16 @@ public class SupervisorBridge {
      */
     private volatile Consumer<JsonObject> preCompactHandler;
 
+    /**
+     * Session resume (SR3): consumer of {@code [SUPERVISOR_SESSION]} lines.
+     * PairHandler wires this to {@code PairSession.setSupervisorSessionId} +
+     * the workflow manager so the captured id is persisted into NodeRuntime.
+     */
+    private volatile Consumer<JsonObject> sessionHandler;
+
+    /** Session resume (SR5): consumer of {@code [SUPERVISOR_RESUME_MISS]} lines. */
+    private volatile Consumer<JsonObject> resumeMissHandler;
+
     public SupervisorBridge(ClaudeSDKBridge sdkBridge, String pairId, String supervisorId) {
         this.sdkBridge = sdkBridge;
         this.pairId = pairId;
@@ -255,6 +281,16 @@ public class SupervisorBridge {
     /** Phase 3: register a callback for {@code [PRE_COMPACT]} lines. See field doc. */
     public void setPreCompactHandler(Consumer<JsonObject> handler) {
         this.preCompactHandler = handler;
+    }
+
+    /** Session resume (SR3): register a callback for {@code [SUPERVISOR_SESSION]} lines. */
+    public void setSessionHandler(Consumer<JsonObject> handler) {
+        this.sessionHandler = handler;
+    }
+
+    /** Session resume (SR5): register a callback for {@code [SUPERVISOR_RESUME_MISS]} lines. */
+    public void setResumeMissHandler(Consumer<JsonObject> handler) {
+        this.resumeMissHandler = handler;
     }
 
     /**
@@ -359,6 +395,34 @@ public class SupervisorBridge {
             int generation,
             boolean mcpAccess
     ) {
+        // Default: fresh start (no transcript resume). Rotation / first-ever start
+        // use this; only the session-resume node path passes a resumeSessionId.
+        return startWithHandoff(agentName, description, planContent, specContent, model,
+                autoCompactThreshold, reasoningEffort, explicitSupervisorId,
+                successorPromptAppend, generation, mcpAccess, null);
+    }
+
+    /**
+     * Session resume (SR4, session-resume-plan.md): start variant that can resume
+     * a prior supervisor transcript by session_id. {@code resumeSessionId == null}
+     * ⇒ identical to the fresh-start overload. The daemon self-checks whether the
+     * SDK honoured the resume and emits {@code [SUPERVISOR_RESUME_MISS]} if not
+     * (→ Java SR6 fallback).
+     */
+    public CompletableFuture<Boolean> startWithHandoff(
+            String agentName,
+            String description,
+            String planContent,
+            String specContent,
+            String model,
+            Integer autoCompactThreshold,
+            String reasoningEffort,
+            String explicitSupervisorId,
+            String successorPromptAppend,
+            int generation,
+            boolean mcpAccess,
+            String resumeSessionId
+    ) {
         if (explicitSupervisorId == null || explicitSupervisorId.isEmpty()) {
             throw new IllegalArgumentException("explicitSupervisorId is required for handoff start");
         }
@@ -385,6 +449,9 @@ public class SupervisorBridge {
             params.addProperty("successorPromptAppend", successorPromptAppend);
         }
         params.addProperty("generation", generation);
+        if (resumeSessionId != null && !resumeSessionId.isEmpty()) {
+            params.addProperty("resumeSessionId", resumeSessionId);
+        }
         return sdkBridge.sendDaemonCommand("supervisor.start", params, sinkCallback("startWithHandoff"));
     }
 
@@ -504,6 +571,46 @@ public class SupervisorBridge {
                                 }
                             } catch (Exception e) {
                                 LOG.warn("[SupervisorBridge] Failed to parse PRE_COMPACT line: "
+                                        + e.getMessage() + " | line=" + trimmed);
+                            }
+                            return;
+                        }
+
+                        // Session resume (SR3/SR5): capture the SDK session_id /
+                        // resume-miss side channels. Peek-first like the others so a
+                        // line interleaved with stream messages is never swallowed.
+                        int sessionIdx = trimmed.indexOf(SESSION_LINE_PREFIX);
+                        if (sessionIdx >= 0) {
+                            String jsonText = trimmed.substring(sessionIdx + SESSION_LINE_PREFIX.length()).trim();
+                            try {
+                                JsonObject parsed = JsonParser.parseString(jsonText).getAsJsonObject();
+                                Consumer<JsonObject> h = sessionHandler;
+                                if (h != null) {
+                                    try { h.accept(parsed); }
+                                    catch (Exception e) {
+                                        LOG.warn("[SupervisorBridge] session handler failed: " + e.getMessage());
+                                    }
+                                }
+                            } catch (Exception e) {
+                                LOG.warn("[SupervisorBridge] Failed to parse SUPERVISOR_SESSION line: "
+                                        + e.getMessage() + " | line=" + trimmed);
+                            }
+                            return;
+                        }
+                        int resumeMissIdx = trimmed.indexOf(RESUME_MISS_PREFIX);
+                        if (resumeMissIdx >= 0) {
+                            String jsonText = trimmed.substring(resumeMissIdx + RESUME_MISS_PREFIX.length()).trim();
+                            try {
+                                JsonObject parsed = JsonParser.parseString(jsonText).getAsJsonObject();
+                                Consumer<JsonObject> h = resumeMissHandler;
+                                if (h != null) {
+                                    try { h.accept(parsed); }
+                                    catch (Exception e) {
+                                        LOG.warn("[SupervisorBridge] resume-miss handler failed: " + e.getMessage());
+                                    }
+                                }
+                            } catch (Exception e) {
+                                LOG.warn("[SupervisorBridge] Failed to parse SUPERVISOR_RESUME_MISS line: "
                                         + e.getMessage() + " | line=" + trimmed);
                             }
                             return;

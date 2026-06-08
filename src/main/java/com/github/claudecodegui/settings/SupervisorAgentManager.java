@@ -64,7 +64,7 @@ public class SupervisorAgentManager {
      * before the liveness watchdog auto-redispatches it (D40). {@code 0} disables
      * the watchdog.
      */
-    public static final int DEFAULT_WORKFLOW_FREEZE_THRESHOLD_MINUTES = 10;
+    public static final int DEFAULT_WORKFLOW_FREEZE_THRESHOLD_MINUTES = 15;
     public static final int MIN_WORKFLOW_FREEZE_THRESHOLD_MINUTES = 0;   // 0 = disabled
     public static final int MAX_WORKFLOW_FREEZE_THRESHOLD_MINUTES = 120;
 

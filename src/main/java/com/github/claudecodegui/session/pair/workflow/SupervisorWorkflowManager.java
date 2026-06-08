@@ -147,11 +147,26 @@ public final class SupervisorWorkflowManager implements Disposable {
     static final long WATCHDOG_TICK_MS = 5_000L;
     /** Backoff hard cap: once reached, auto-redispatch repeats at most hourly. */
     static final long WATCHDOG_MAX_WINDOW_MS = 60L * 60_000L;
+    /**
+     * Fixed auto-redispatch backoff ladder (15→20→30→40→60 min). Indexed by the
+     * per-node attempt count; once past the last step it repeats hourly. Independent
+     * of the configured idle threshold (that only gates on/off + the display).
+     */
+    static final long[] WATCHDOG_BACKOFF_LADDER_MS = {
+            15L * 60_000L, 20L * 60_000L, 30L * 60_000L, 40L * 60_000L, WATCHDOG_MAX_WINDOW_MS
+    };
 
     /** Consecutive auto-redispatch count per node (backoff exponent). Scheduler-thread. */
     private final Map<String, Integer> redispatchAttempts = new ConcurrentHashMap<>();
     /** Epoch of each node's last (re)dispatch — floor for "last active" + backoff base. */
     private final Map<String, Long> lastDispatchAt = new ConcurrentHashMap<>();
+    /**
+     * Session resume (SR9): nodes whose NEXT pair start resumed prior transcripts,
+     * so {@link #kickoffAndReveal} injects the post-resume reprime (anchor the
+     * resumed LLM to the fresh coordination state) before the task kickoff.
+     * Consumed-and-cleared there. Scheduler-thread.
+     */
+    private final java.util.Set<String> resumedNodes = java.util.concurrent.ConcurrentHashMap.newKeySet();
     /** Periodic watchdog; production-only (tests drive {@link #watchdogTick()} directly). */
     private final java.util.concurrent.ScheduledExecutorService nodeWatchdog =
             java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
@@ -396,10 +411,14 @@ public final class SupervisorWorkflowManager implements Disposable {
                 rt.status = NodeStatus.DONE;
                 rt.summary = summary;
                 rt.changedFiles = changed;
+                rt.finishedAt = System.currentTimeMillis();   // node done → freeze elapsed
                 NodeHandle h = handles.get(name);
                 if (h != null && h.pairDir != null) {
                     rt.completionReportPath = h.pairDir.resolve("COMPLETION_REPORT.md").toString();
                 }
+                // Mark the supervisor session finished too, so its time strip stops the
+                // live elapsed and shows 结束时间 (the supervisor's job ends with the node).
+                if (h != null && h.pair != null) h.pair.setFinishedAt(rt.finishedAt);
                 if (slotHolders.remove(name) && slots != null) slots.release();   // D23: only release a permit we hold
                 redispatchAttempts.remove(name);   // watchdog: node done, drop its backoff state
                 lastDispatchAt.remove(name);
@@ -604,10 +623,14 @@ public final class SupervisorWorkflowManager implements Disposable {
         for (String name : frozen) autoRedispatch(name, now);   // already on scheduler thread
     }
 
-    /** Backoff window for the n-th auto-redispatch: {@code min(threshold·2^n, 1h)}. */
+    /**
+     * Backoff window for the n-th auto-redispatch: the fixed ladder
+     * {@link #WATCHDOG_BACKOFF_LADDER_MS} (15→20→30→40→60 min, hourly thereafter).
+     * The {@code thresholdMs} argument only gates on/off in {@link #shouldRedispatch}.
+     */
     static long backoffWindowMs(int attempts, long thresholdMs) {
-        long mult = 1L << Math.min(Math.max(attempts, 0), 12);
-        return Math.min(thresholdMs * mult, WATCHDOG_MAX_WINDOW_MS);
+        int idx = Math.min(Math.max(attempts, 0), WATCHDOG_BACKOFF_LADDER_MS.length - 1);
+        return WATCHDOG_BACKOFF_LADDER_MS[idx];
     }
 
     /** Pure decision: has the node been idle past its current backoff window? */
@@ -664,6 +687,14 @@ public final class SupervisorWorkflowManager implements Disposable {
             SupervisorMonitor s = h.pair.getSupervisorMonitor();
             if (s != null) {
                 t = Math.max(t, Math.max(s.getLastTickStartMs(), s.getLastTickEndMs()));
+                // Live supervisor stream activity (any SDK message / usage tick during
+                // a turn). The supervisor's LLM turn is async on the daemon — it is
+                // NOT a monitor "tick" (status reads "Tick 0 / IDLE" mid-turn), so
+                // without this an actively thinking / dispatching supervisor reads as
+                // idle and the watchdog counts up against it. This is real per-chunk
+                // proof of liveness (unlike isTickInProgress), so no wedge ceiling is
+                // needed: a genuinely hung turn stops streaming and can still recover.
+                t = Math.max(t, s.getLastStreamActivityMs());
                 // A supervisor turn currently IN PROGRESS (thinking / tool calls) is
                 // active — there's no per-chunk timestamp, so without this a long
                 // think reads as idle. Excludes a wedged tick past the ceiling, so a
@@ -777,7 +808,11 @@ public final class SupervisorWorkflowManager implements Disposable {
                     rt.pairId = pairId;
                     pairToNode.put(pairId, nodeName);
                     // Only the READY→RUNNING edge; never resurrect a terminal node.
-                    if (rt.status == NodeStatus.READY) rt.status = NodeStatus.RUNNING;
+                    if (rt.status == NodeStatus.READY) {
+                        rt.status = NodeStatus.RUNNING;
+                        rt.startedAt = System.currentTimeMillis();   // run start (re-stamped each dispatch)
+                        rt.finishedAt = null;                        // clear any prior finish on re-run
+                    }
                     LOG.info("[Workflow] node " + nodeName + " RUNNING pair=" + pairId
                             + " window=" + rt.windowId);
                     if (DN2_BACKSTOP && h != null && h.pair != null) {
@@ -818,7 +853,14 @@ public final class SupervisorWorkflowManager implements Disposable {
      * {@code launcher.focus} marshals to the EDT internally.
      */
     private void kickoffAndReveal(String nodeName, NodeHandle h) {
-        sendKickoff(nodeName, h, false);
+        // Session resume (SR2/SR9): a resumed node's supervisor already has the
+        // task + its prior work in its (resumed) transcript. The kickoff carries a
+        // reorientation header so the very FIRST resumed turn is anchored to the
+        // FRESH coordination state — otherwise it acts on stale memory ("I'm
+        // waiting for contract C") and loops into the wedged escalation. Folding
+        // it into the (single) kickoff turn avoids a separate dormant reprime turn.
+        boolean resumed = resumedNodes.remove(nodeName);
+        sendKickoff(nodeName, h, false, resumed);
         // Realize the node's webview so the supervisor→main-AI inject buffer
         // drains. Cockpit windows are already visible (no-op); only the legacy
         // tab path actually focuses/selects the tab here.
@@ -830,14 +872,26 @@ public final class SupervisorWorkflowManager implements Disposable {
 
     /** Send the node's effective plan to the supervisor as its first user_input. */
     private void sendKickoff(String nodeName, NodeHandle h, boolean retry) {
+        sendKickoff(nodeName, h, retry, false);
+    }
+
+    /**
+     * Send the node's effective plan as the supervisor's kickoff user_input. When
+     * {@code resumed} the plan is prefixed with a restart-reorientation header
+     * (SR2/SR9) so the resumed supervisor verifies real state instead of trusting
+     * recalled coordination it no longer has.
+     */
+    private void sendKickoff(String nodeName, NodeHandle h, boolean retry, boolean resumed) {
         if (h == null || h.pair == null) return;
         try {
             com.github.claudecodegui.session.pair.EventBus bus = h.pair.getEventBus();
             String planText = h.pair.getPlanContent();
             if (bus != null && planText != null && !planText.isBlank()) {
-                bus.publishUserInput(planText);
+                String text = resumed ? (RESUME_REORIENT_HEADER + "\n\n" + planText) : planText;
+                bus.publishUserInput(text);
                 LOG.info("[Workflow] node " + nodeName + " kickoff" + (retry ? " (retry)" : "")
-                        + " sent pair=" + h.pair.getPairId() + " (" + planText.length() + " chars)");
+                        + (resumed ? " (resumed)" : "")
+                        + " sent pair=" + h.pair.getPairId() + " (" + text.length() + " chars)");
             } else {
                 LOG.warn("[Workflow] node " + nodeName + " kickoff skipped: "
                         + (bus == null ? "no event bus" : "empty plan"));
@@ -846,6 +900,24 @@ public final class SupervisorWorkflowManager implements Disposable {
             LOG.warn("[Workflow] node " + nodeName + " kickoff failed: " + e.getMessage());
         }
     }
+
+    /**
+     * Session resume (SR2): reorientation header prepended to a resumed node's
+     * kickoff. Tells the supervisor its transcript was resumed but the Java
+     * coordination state is fresh, so it must verify real state rather than trust
+     * recalled "I dispatched / I'm waiting" beliefs.
+     */
+    private static final String RESUME_REORIENT_HEADER =
+            "【会话已恢复 / 重启续接】你的对话历史已从之前的会话 resume(理论上你能往上看到之前做过的工作)。\n"
+            + "⚠️ 请先做一件事,务必照做:用一两句话**复述你在之前这个会话里已经做过的关键步骤/决策**"
+            + "(例如『我之前已派单让主 AI 读取并分析了 X,产出了 Y』)。如果你**完全看不到任何之前的历史**,"
+            + "请明确写出『⚠️ 未能恢复历史会话,我没有之前的上下文』——这能让我们立刻确认会话恢复是否成功。\n\n"
+            + "另外注意:本进程是 IDE/daemon 重启后重新拉起的,Java 侧的协调状态(合同/plan/进度计数)是全新重建的,"
+            + "不是你记忆里的那个。不要相信记忆里『我已派单 / 我在等某个合同回执』——那些在新状态里并不存在。\n"
+            + "复述完历史后,核对真实情况再决定下一步:用 Read/Grep 看相关改动文件、看主 AI 最近一段产出/仓库 git 状态,"
+            + "判断下面这个任务里哪些已经完成、哪些还没做、应从哪里继续;然后正常 emit_action 推进"
+            + "(派单 inject_prompt / 收尾 complete_plan / 升级 escalate_to_human),不要 emit wait。\n"
+            + "————(以下是本节点要交付的任务,你之前可能已做了一部分)————";
 
     /**
      * Re-dispatch IN PLACE on the node's existing pair/window (breakpoint-resume):
@@ -1225,6 +1297,79 @@ public final class SupervisorWorkflowManager implements Disposable {
     }
 
     /**
+     * Session resume (SR3/SR7, session-resume-plan.md): record the supervisor's
+     * captured SDK session_id into the node's persisted runtime so a future
+     * restart can resume its transcript. Called from {@code PairHandler}'s session
+     * handler when the daemon emits {@code [SUPERVISOR_SESSION]}. No-op for pairs
+     * that aren't workflow nodes. Scheduler thread; idempotent.
+     */
+    public void onSupervisorSessionCaptured(String pairId, String sessionId) {
+        if (pairId == null || sessionId == null || sessionId.isEmpty()) return;
+        submit(() -> {
+            if (exec == null) return;
+            String name = pairToNode.get(pairId);
+            if (name == null) {
+                // The pair→node mapping is normally set at pairStarted, before the
+                // first supervisor turn. If the [SUPERVISOR_SESSION] line wins that
+                // race, fall back to matching the live handle by pairId so the id is
+                // still persisted — otherwise it is silently dropped and a later
+                // restart cannot resume/replay the supervisor (the exact gap that
+                // leaves the supervisor pane blank while the main AI restores).
+                for (java.util.Map.Entry<String, NodeHandle> e : handles.entrySet()) {
+                    NodeHandle nh = e.getValue();
+                    if (nh != null && nh.pair != null && pairId.equals(nh.pair.getPairId())) {
+                        name = e.getKey();
+                        pairToNode.put(pairId, name);   // heal the mapping
+                        break;
+                    }
+                }
+            }
+            if (name == null) return;   // not a workflow node
+            NodeRuntime rt = exec.nodes.get(name);
+            if (rt == null) return;
+            // Remember the pairId this supervisor ran under so a restart-resume can
+            // locate its prior L2 and carry the coordinator-event strip forward.
+            boolean pairIdChanged = !pairId.equals(rt.supervisorPairId);
+            rt.supervisorPairId = pairId;
+            if (sessionId.equals(rt.supervisorSessionId)) {
+                if (pairIdChanged) persist();   // id unchanged, but pairId moved
+                return;
+            }
+            rt.supervisorSessionId = sessionId;
+            // Best-effort: also snapshot the main-AI session id if it's already
+            // bound (it usually binds later, on the first main-AI turn — see
+            // onMainSessionCaptured for that path).
+            NodeHandle h = handles.get(name);
+            if (h != null && h.pair != null && rt.mainSessionId == null) {
+                String msid = h.pair.getMainSessionId();
+                if (msid != null && !msid.isEmpty()) rt.mainSessionId = msid;
+            }
+            LOG.info("[Workflow] node " + name + " captured supervisorSessionId=" + sessionId);
+            persist();
+        });
+    }
+
+    /**
+     * Session resume (SR7): record the node's main-AI SDK session_id (bound when
+     * the main AI takes its first turn — {@code PairSessionManager.bindMainSessionIdToPair}).
+     * Wired from {@code ClaudeMessageHandler} alongside the L2 binding. No-op for
+     * non-workflow pairs. Scheduler thread; idempotent.
+     */
+    public void onMainSessionCaptured(String pairId, String mainSessionId) {
+        if (pairId == null || mainSessionId == null || mainSessionId.isEmpty()) return;
+        submit(() -> {
+            if (exec == null) return;
+            String name = pairToNode.get(pairId);
+            if (name == null) return;
+            NodeRuntime rt = exec.nodes.get(name);
+            if (rt == null || mainSessionId.equals(rt.mainSessionId)) return;
+            rt.mainSessionId = mainSessionId;
+            LOG.info("[Workflow] node " + name + " captured mainSessionId=" + mainSessionId);
+            persist();
+        });
+    }
+
+    /**
      * P5 (§17 / R4) — a node's tab was closed by the user while RUNNING. Funnel
      * the node to WAITING_HUMAN ("tab 被关闭") so the overview reflects that it
      * can no longer make progress. Only self-created workflow nodes are affected;
@@ -1434,6 +1579,17 @@ public final class SupervisorWorkflowManager implements Disposable {
         NodeHandle h = handles.get(name);
         boolean livePair = h != null && h.pair != null;
         boolean forceRestart = "restart".equals(mode);
+        // Session resume (SR8/SR9): when re-dispatching a node that has NO live pair
+        // (the common restart-recovery case: the node was interrupted, its pair is
+        // gone) AND we captured a session id last time AND the caller didn't force a
+        // fresh restart → resume the prior transcripts (supervisor + main AI) on a
+        // fresh pair, so the LLMs see their history and decide where to continue.
+        // A LIVE node uses resume-in-place below (don't transcript-resume a session
+        // that's still running); explicit "restart" always starts fresh (SR6 too:
+        // no captured ids ⇒ resumeMode false ⇒ plain re-launch). No webview change
+        // needed — the existing re-dispatch button gets history-resume for free.
+        boolean resumeMode = !forceRestart && !livePair
+                && (rt.supervisorSessionId != null || rt.mainSessionId != null);
 
         // Ensure this node holds exactly one permit (D22/D23).
         if (!slotHolders.contains(name)) {
@@ -1454,7 +1610,7 @@ public final class SupervisorWorkflowManager implements Disposable {
 
         rt.escalationReason = null;
 
-        if (livePair && !forceRestart) {
+        if (livePair && !forceRestart && !resumeMode) {
             // (a) resume IN PLACE — reuse the existing pair/window, inject a
             // breakpoint-resume instruction (continue, don't restart). History
             // is preserved; no new window is opened.
@@ -1467,6 +1623,16 @@ public final class SupervisorWorkflowManager implements Disposable {
         } else {
             // (b) heavyweight re-launch — kill old pair, drop handle/mapping,
             // re-run startNode (it does NOT acquire a slot; we already hold one).
+            // Session resume (SR9): stage the captured ids so the new pair starts
+            // on the historical transcript, and mark the node so kickoffAndReveal
+            // injects the post-resume reprime before the task kickoff.
+            if (resumeMode) {
+                launcher.setPendingResume(name, rt.supervisorSessionId, rt.mainSessionId, rt.supervisorPairId);
+                resumedNodes.add(name);
+                LOG.info("[Workflow] redispatch(resume) node=" + name
+                        + " supervisorSid=" + rt.supervisorSessionId + " mainSid=" + rt.mainSessionId
+                        + " priorPairId=" + rt.supervisorPairId);
+            }
             if (h != null && h.windowId != null) launcher.stop(h.windowId);
             handles.remove(name);
             if (rt.pairId != null) pairToNode.remove(rt.pairId);
@@ -1475,7 +1641,8 @@ public final class SupervisorWorkflowManager implements Disposable {
             rt.status = NodeStatus.READY;          // pairStarted flips READY→RUNNING
             launcher.setNodeStatus(name, NodeStatus.READY);
             startNode(node);
-            LOG.info("[Workflow] redispatch(re-launch) node=" + name + " forceRestart=" + forceRestart);
+            LOG.info("[Workflow] redispatch(re-launch) node=" + name
+                    + " forceRestart=" + forceRestart + " resume=" + resumeMode);
         }
         persist();
         broadcastExec();

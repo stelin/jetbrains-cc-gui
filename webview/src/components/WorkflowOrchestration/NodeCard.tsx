@@ -1,7 +1,7 @@
 import { useTranslation } from 'react-i18next';
 import type { NodeStatus } from './types';
 import { CARD_W, CARD_H } from './layout';
-import { formatIdle, idleLevel, ACTIVE_EPS_MS } from './idle';
+import { formatIdle, idleLevel, ACTIVE_EPS_MS, formatYmdHms, formatElapsedMin } from './idle';
 import styles from './style.module.less';
 
 interface StatusMeta {
@@ -43,6 +43,10 @@ interface NodeCardProps {
   idleMs?: number;
   /** Auto-redispatch threshold (ms); 0 = watchdog off (shown without "/threshold"). */
   thresholdMs?: number;
+  /** Epoch ms the node entered RUNNING (shown for running/done nodes). */
+  startedAt?: number;
+  /** Epoch ms the node reached DONE (shown with elapsed for done nodes). */
+  finishedAt?: number;
   draggable?: boolean;
   dragging?: boolean;
   showPorts?: boolean;
@@ -54,10 +58,14 @@ interface NodeCardProps {
 
 export default function NodeCard({
   name, supervisorName, status, selected, x, y, showStatus, idleMs, thresholdMs,
+  startedAt, finishedAt,
   draggable, dragging, showPorts, onClick, onDoubleClick, onPointerDown, onOutPointerDown,
 }: NodeCardProps) {
   const { t } = useTranslation();
   const meta = statusMeta(status);
+  // Time rows for running/completed nodes: 开始时间 always; 结束时间 + 耗时(分) when done.
+  const showTimes = showStatus && (status === 'RUNNING' || status === 'DONE') && !!startedAt;
+  const elapsedMs = (startedAt && finishedAt) ? Math.max(0, finishedAt - startedAt) : undefined;
   return (
     <div
       className={[
@@ -93,6 +101,29 @@ export default function NodeCard({
               {idleMs < ACTIVE_EPS_MS ? '0:00' : formatIdle(idleMs)}
               {thresholdMs && thresholdMs > 0 ? ` / ${formatIdle(thresholdMs)}` : ''}
             </span>
+          )}
+        </div>
+      )}
+
+      {showTimes && (
+        <div className={styles.nodeTimes}>
+          <div className={styles.nodeTimeRow} title={t('workflow.node.startedAt', '开始时间')}>
+            <span className={`codicon codicon-debug-start ${styles.nodeTimeIcon}`} />
+            <span className={styles.nodeTimeVal}>{formatYmdHms(startedAt)}</span>
+          </div>
+          {status === 'DONE' && finishedAt && (
+            <>
+              <div className={styles.nodeTimeRow} title={t('workflow.node.finishedAt', '结束时间')}>
+                <span className={`codicon codicon-debug-stop ${styles.nodeTimeIcon}`} />
+                <span className={styles.nodeTimeVal}>{formatYmdHms(finishedAt)}</span>
+              </div>
+              {elapsedMs != null && (
+                <div className={styles.nodeTimeRow} title={t('workflow.node.elapsed', '耗时')}>
+                  <span className={`codicon codicon-watch ${styles.nodeTimeIcon}`} />
+                  <span className={styles.nodeTimeVal}>{formatElapsedMin(elapsedMs)}</span>
+                </div>
+              )}
+            </>
           )}
         </div>
       )}

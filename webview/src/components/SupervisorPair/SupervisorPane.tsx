@@ -16,6 +16,7 @@ import PeriodicNoticeStrip from './PeriodicNoticeStrip';
 // AutonomyToggle and PeriodicNoticeStrip.
 import CoordinatorEventStrip from './CoordinatorEventStrip';
 import SessionCountStrip from './SessionCountStrip';
+import SupervisorTimeStrip from './SupervisorTimeStrip';
 // Q3 (2026-05-24): tabbed status panel mirroring main-AI StatusPanel (任务 / 子代理).
 import SupervisorStatusPanel from './SupervisorStatusPanel';
 // 2026-05-25 (FUNDAMENTAL FIX): manual interrupt button replaces wall-clock auto-cancel.
@@ -140,6 +141,7 @@ export default function SupervisorPane({
       </div>
       <CoordinatorEventStrip />
       <SessionCountStrip />
+      <SupervisorTimeStrip />
       <PeriodicNoticeStrip />
       <DecisionTimeline />
 

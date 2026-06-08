@@ -19,6 +19,8 @@ import com.intellij.util.concurrency.AppExecutorUtil;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Production {@link NodeLauncher}: builds a node's host (a tiled floating
@@ -41,8 +43,27 @@ public final class IdeNodeLauncher implements NodeLauncher {
     /** Non-null while a cockpit-mode run is active. */
     private volatile WorkflowCockpit cockpit;
 
+    /**
+     * Session resume (SR4/SR10): nodeName → {supervisorSessionId, mainSessionId,
+     * priorPairId} staged by {@link #setPendingResume} before a resume-mode
+     * re-launch, consumed and cleared by the next {@link #startNodePair}. Any
+     * entry may be null.
+     */
+    private final Map<String, String[]> pendingResume = new ConcurrentHashMap<>();
+
     public IdeNodeLauncher(Project project) {
         this.project = project;
+    }
+
+    @Override
+    public void setPendingResume(String nodeName, String supervisorSessionId,
+                                 String mainSessionId, String priorPairId) {
+        if (nodeName == null) return;
+        if (supervisorSessionId == null && mainSessionId == null && priorPairId == null) {
+            pendingResume.remove(nodeName);
+            return;
+        }
+        pendingResume.put(nodeName, new String[]{ supervisorSessionId, mainSessionId, priorPairId });
     }
 
     @Override
@@ -125,13 +146,34 @@ public final class IdeNodeLauncher implements NodeLauncher {
     private void startNodePair(WorkflowNode node, Path planPath, ClaudeChatWindow win,
                                NodeHandle handle, Sink sink) {
         try {
+            // Session resume (SR4/SR10): consume any staged resume ids for this node.
+            String[] resume = pendingResume.remove(node.name);
+            String resumeSupervisorSid = resume != null ? resume[0] : null;
+            String resumeMainSid = resume != null ? resume[1] : null;
+            String priorPairId = resume != null && resume.length > 2 ? resume[2] : null;
+
             PairSessionManager.StartPairParams params = new PairSessionManager.StartPairParams(
                     null, node.supervisorId, planPath == null ? null : planPath.toString(),
-                    node.model, node.longContext, node.reasoning, win.getWindowId());
+                    node.model, node.longContext, node.reasoning, win.getWindowId(),
+                    resumeSupervisorSid);
+            // Carry the prior pair's persisted coordinator-event strip forward.
+            params.priorPairId = priorPairId;
             if (win.getChatWindowDelegate() == null
                     || win.getChatWindowDelegate().getPairHandler() == null) {
                 sink.failed("节点窗口未就绪，无法启动监督者");
                 return;
+            }
+            // SR10: seed the node window's main-AI session to resume its transcript
+            // on its first turn (triggered by the supervisor's first inject_prompt).
+            // Best-effort: only if the window exposes a resume hook. Logged so the
+            // E2E test (§9.3) can confirm the main-AI resume fired.
+            if (resumeMainSid != null && !resumeMainSid.isEmpty()) {
+                try {
+                    win.resumeMainSession(resumeMainSid);
+                    LOG.info("[Workflow] node " + node.name + " main-AI resume seeded sessionId=" + resumeMainSid);
+                } catch (Throwable t) {
+                    LOG.warn("[Workflow] node " + node.name + " main-AI resume seed failed (will start fresh): " + t.getMessage());
+                }
             }
             PairSession pair = win.getChatWindowDelegate().getPairHandler().startPairWired(
                     params, new com.github.claudecodegui.session.pair.protocol.PairBudget());

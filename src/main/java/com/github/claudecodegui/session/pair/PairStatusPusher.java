@@ -334,6 +334,21 @@ public class PairStatusPusher {
                         int from = Math.max(0, s.recentDecisions.size() - 20);
                         recentDecisions = new ArrayList<>(s.recentDecisions.subList(from, s.recentDecisions.size()));
                     }
+                    // Coordinator-event strip is L2-authoritative (like recentDecisions)
+                    // so it survives a webview reload AND multiple restart-resumes.
+                    // The in-memory ring stays a write-buffer / no-L2 fallback only.
+                    if (s.recentCoordinatorEvents != null && !s.recentCoordinatorEvents.isEmpty()) {
+                        List<PairStatusSnapshot.CoordinatorEvent> fromL2 = new ArrayList<>();
+                        for (L2State.PersistedCoordinatorEvent pe : s.recentCoordinatorEvents) {
+                            if (pe == null) continue;
+                            PairStatusSnapshot.CoordinatorEvent.Source src;
+                            try { src = PairStatusSnapshot.CoordinatorEvent.Source.valueOf(pe.source); }
+                            catch (Exception ignore) { src = PairStatusSnapshot.CoordinatorEvent.Source.DISPATCHER; }
+                            fromL2.add(new PairStatusSnapshot.CoordinatorEvent(
+                                    pe.ts, src, pe.type, pe.message, pe.detail));
+                        }
+                        if (!fromL2.isEmpty()) coordEvents = fromL2;
+                    }
                 }
             } catch (Exception e) {
                 LOG.debug("[PairStatusPusher] L2 read for generation/decisions failed: " + e.getMessage());
@@ -384,6 +399,8 @@ public class PairStatusPusher {
                         ? pair.getContractRegistry().getTotalEscalated() : 0L)
                 .planState(plan != null && plan.state != null ? plan.state.name() : null)
                 .planSubState(plan != null && plan.subState != null ? plan.subState.name() : null)
+                .supervisorStartedAt(pair.getStartedAt())
+                .supervisorFinishedAt(pair.getFinishedAt())
                 .build();
     }
 
@@ -413,8 +430,38 @@ public class PairStatusPusher {
             }
             coordinatorEventRing.offerLast(e);
         }
+        // Persist into L2 (state.json) so the strip survives a webview reload and
+        // can be carried into a resumed pair after IDE restart. Best-effort; the
+        // in-memory ring stays the live source for buildSnapshot.
+        if (l2Store != null) {
+            try {
+                l2Store.update(pair.getPairId(), s -> {
+                    s.recentCoordinatorEvents.add(new L2State.PersistedCoordinatorEvent(
+                            e.ts, e.source.name(), e.type, e.message, e.detail));
+                    while (s.recentCoordinatorEvents.size()
+                            > com.github.claudecodegui.session.pair.l2.L2Schema.RECENT_COORDINATOR_EVENTS_MAX) {
+                        s.recentCoordinatorEvents.remove(0);
+                    }
+                    return s;
+                });
+            } catch (Exception ex) {
+                LOG.debug("[PairStatusPusher] coord-event L2 persist failed: " + ex.getMessage());
+            }
+        }
         try { pushHard(); }
         catch (Exception ex) { LOG.debug("[PairStatusPusher] coord-event push failed: " + ex.getMessage()); }
+    }
+
+    /**
+     * Force the next snapshot through even if its JSON is identical to the last
+     * push. Used when the webview (re)mounts (reload / node recovery): the Java
+     * ring + L2 are intact but React state was wiped, so the dedup in
+     * {@link #doPush} would otherwise suppress the re-delivery and leave the
+     * status panel (incl. the coordinator strip) blank until the next change.
+     */
+    public void pushForce() {
+        lastPushedJson.set("");
+        pushHard();
     }
 
     /** Diagnostic getter. */

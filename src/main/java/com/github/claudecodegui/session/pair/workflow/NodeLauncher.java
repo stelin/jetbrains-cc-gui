@@ -29,6 +29,19 @@ public interface NodeLauncher {
     /** Abort: stop the Pair + resources owned by {@code windowId}. No-op if unknown/null. */
     void stop(String windowId);
 
+    /**
+     * Session resume (SR4/SR10, session-resume-plan.md): stage the session ids to
+     * resume on the NEXT {@link #launch} of {@code nodeName} — the supervisor's
+     * prior transcript ({@code supervisorSessionId}), the main AI's
+     * ({@code mainSessionId}), and the prior {@code pairId} whose persisted L2
+     * coordinator-event strip should be carried into the resumed pair. Consumed-
+     * and-cleared by that launch. Any arg may be null (resume only what's
+     * available). Default no-op so test fakes and the legacy single-tab path
+     * compile unchanged; only {@code IdeNodeLauncher} honours it.
+     */
+    default void setPendingResume(String nodeName, String supervisorSessionId,
+                                  String mainSessionId, String priorPairId) { }
+
     /** Jump: focus the node's tab (EDT). No-op when the handle has no live tab. */
     void focus(NodeHandle handle);
 

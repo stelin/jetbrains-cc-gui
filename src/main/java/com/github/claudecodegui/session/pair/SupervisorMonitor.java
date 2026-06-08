@@ -95,6 +95,15 @@ public class SupervisorMonitor {
     private final AtomicLong lastTickStartMs = new AtomicLong(0);
     private final AtomicLong lastTickEndMs = new AtomicLong(0);
     /**
+     * Wall-clock ms of the supervisor's most recent LIVE stream activity (any SDK
+     * message / live-usage tick during a turn). A supervisor LLM turn is driven
+     * async by the daemon and is NOT a monitor "tick", so without this a supervisor
+     * that is actively thinking / calling tools / dispatching reads as idle and the
+     * workflow-node liveness watchdog counts up against it (mirrors
+     * {@code MainAIMonitor.noteActivity} for the main AI side).
+     */
+    private final AtomicLong lastStreamActivityMs = new AtomicLong(0);
+    /**
      * Set by {@link #onUrgent} when an urgent event arrives WHILE a tick is
      * already running. The running tick's finally block reads + clears this
      * to decide whether the next tick should run on the urgent delay (1s)
@@ -188,6 +197,11 @@ public class SupervisorMonitor {
     public boolean isTickInProgress() { return tickInProgress.get(); }
     public long getLastTickStartMs() { return lastTickStartMs.get(); }
     public long getLastTickEndMs() { return lastTickEndMs.get(); }
+
+    /** Record live supervisor stream activity (called per SDK message / usage tick). */
+    public void noteStreamActivity() { lastStreamActivityMs.set(System.currentTimeMillis()); }
+    /** Wall-clock ms of the supervisor's most recent live stream activity (0 if none). */
+    public long getLastStreamActivityMs() { return lastStreamActivityMs.get(); }
 
     /**
      * Contract State Machine v3 (2026-05-25): bring the next tick forward to

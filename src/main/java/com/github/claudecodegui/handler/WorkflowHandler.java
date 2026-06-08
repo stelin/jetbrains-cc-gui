@@ -96,7 +96,7 @@ public class WorkflowHandler extends BaseMessageHandler {
                     mgr.redispatchNode(stringField(content, "nodeName"), stringField(content, "mode"));
                     return true;
                 case "workflow_set_freeze_threshold":
-                    mgr.setFreezeThresholdMinutes(intField(content, "minutes", 10));
+                    mgr.setFreezeThresholdMinutes(intField(content, "minutes", 15));
                     return true;
                 default:
                     return false;

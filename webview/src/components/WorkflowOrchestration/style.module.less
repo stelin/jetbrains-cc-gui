@@ -273,7 +273,11 @@
   background: var(--wf-accent, var(--text-tertiary, #858585));
   opacity: 0.9;
 }
-.nodeName { font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nodeName {
+  font-size: 12px; font-weight: 600; line-height: 1.3;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden; word-break: break-word;
+}
 .nodeMeta { display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--text-tertiary, #858585); }
 .nodeMetaIcon { font-size: 11px; }
 .nodeSup { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -283,6 +287,16 @@
   .codicon { font-size: 11px; }
 }
 .spin { display: inline-block; animation: wfspin 1.1s linear infinite; }
+
+// Start / finish / elapsed time rows on a running/done node card.
+.nodeTimes {
+  display: flex; flex-direction: column; gap: 1px; margin-top: 2px;
+  font-size: 9px; color: var(--text-tertiary, #858585);
+  font-variant-numeric: tabular-nums;
+}
+.nodeTimeRow { display: flex; align-items: center; gap: 4px; line-height: 1.4; }
+.nodeTimeIcon { font-size: 10px; opacity: 0.8; }
+.nodeTimeVal { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 // Silent-time (node liveness) counter on a RUNNING card / supervisor strip.
 .nodeSilent {

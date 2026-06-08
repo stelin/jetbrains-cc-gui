@@ -549,6 +549,18 @@ interface Window {
   onSupervisorMessageBatch?: (json: string) => void;
 
   /**
+   * Session-resume history load (the supervisor analogue of {@code updateMessages}
+   * for the main AI). Payload: {@code { supervisorId, sessionId, frames: [...] }}
+   * where {@code frames} are raw transcript envelopes read from the supervisor's
+   * SDK {@code .jsonl}. Unlike the live {@link onSupervisorMessageBatch} append
+   * path, this is AUTHORITATIVE and idempotent: the handler rebuilds the full
+   * historical message list and merges it ahead of any live (post-resume)
+   * messages, so a reopened/reloaded supervisor pane re-renders its prior
+   * conversation exactly the way the main-AI pane restores from its transcript.
+   */
+  onSupervisorHistoryLoad?: (json: string) => void;
+
+  /**
    * 2026-05-28: live per-turn output-token estimate for a supervisor, driving
    * the supervisor pane's WaitingIndicator "↓ N tokens" counter while it thinks.
    * Payload: {@code { pairId, supervisorId, turnId, outputTokens }}.

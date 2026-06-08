@@ -139,6 +139,17 @@ public class PairHandler extends BaseMessageHandler {
             String pairId = data != null && data.has("pairId") && !data.get("pairId").isJsonNull()
                     ? data.get("pairId").getAsString() : "";
             PairSession session = resolvePair(pairId);
+            if (session == null && pairId != null && !pairId.isEmpty()) {
+                // The webview tracked a pairId that no longer resolves (stale after a
+                // restart/rotation). Fall back to this window's most-recent active
+                // pair — the same ownership-scoped fallback handleSupervisorInterrupt
+                // uses — so a recovered node still gets its supervisor-history load.
+                session = resolvePair("");
+                if (session != null) {
+                    LOG.info("[PairHandler] pair_webview_ready: id=" + pairId
+                            + " did not resolve; using window-owned active pair " + session.getPairId());
+                }
+            }
             if (session == null) {
                 // Webview can post ready before the pair_start round-trip
                 // finished — that's normal on first mount, not an error. The
@@ -151,10 +162,256 @@ public class PairHandler extends BaseMessageHandler {
             if (router != null) {
                 router.markWebviewReady();
             }
+            // Session resume display: replay the prior supervisor transcript into the
+            // pane now that the webview is (re)mounted. The id staged at resume-start
+            // is consumed once by the normal path. If nothing is staged — a plain
+            // webview reload (WebviewWatchdog/manual) that wiped React state while the
+            // live pair + its captured session_id survive, OR a non-resume pair that
+            // has since captured its id — re-arm from the live session so the wiped
+            // pane refills. Without this, a mid-run reload left the supervisor pane
+            // permanently blank while the main-AI pane restored from its own .jsonl.
+            if (session.peekPendingHistoryReplaySessionId() == null) {
+                String liveSid = session.getSupervisorSessionId();
+                if (liveSid != null && !liveSid.isEmpty()) {
+                    session.setPendingHistoryReplaySessionId(liveSid);
+                }
+            }
+            maybeReplaySupervisorHistory(session);
+            // Re-push the full status snapshot (health / generation / decision
+            // timeline / coordinator-event strip) to the freshly (re)mounted webview.
+            // doPush() dedups by JSON, so without forcing it a reloaded pane would
+            // stay blank until the next changing field; pushForce() busts that.
+            try {
+                PairStatusPusher sp = session.getStatusPusher();
+                if (sp != null) sp.pushForce();
+            } catch (Exception ignored) { /* best-effort */ }
         } catch (Exception e) {
             LOG.warn("[PairHandler] pair_webview_ready failed: "
                     + (e.getMessage() != null ? e.getMessage() : e.getClass().getName()));
         }
+    }
+
+    /**
+     * Session resume display (session-resume-plan.md): read the supervisor's prior
+     * transcript (~/.claude/projects/&lt;dir&gt;/&lt;sessionId&gt;.jsonl) and replay it into
+     * the supervisor pane via {@code window.onSupervisorMessageBatch}, so the
+     * operator can SEE the supervisor's history (the SDK {@code resume} loads it
+     * into the model's context but does not re-render the pane). The session_id is
+     * a globally-unique UUID, so we locate the .jsonl by scanning the project dirs
+     * rather than re-deriving Claude's directory-name encoding. Best-effort + bounded.
+     * Runs on a pooled thread.
+     */
+    /**
+     * Consume-once trigger for the supervisor history replay. Called from BOTH
+     * {@code handleWebviewReady} AND the end of {@code startPairWired}, because the
+     * two race: {@code pair_webview_ready} (webview mounted) often fires BEFORE
+     * {@code startPairWired} (the ~handshake) has set the pending replay id, so a
+     * single trigger misses it. Whichever side observes "pending id set AND webview
+     * ready" wins; {@link PairSession#consumePendingHistoryReplaySessionId} makes it
+     * fire exactly once. Runs the (I/O + push) work off-thread.
+     */
+    private void maybeReplaySupervisorHistory(PairSession session) {
+        if (session == null) return;
+        com.github.claudecodegui.session.pair.ActionRouter r = session.getActionRouter();
+        if (r == null || !r.isWebviewReady()) {
+            LOG.info("[PairHandler] supervisor history replay deferred — webview not ready (pair="
+                    + session.getPairId() + ")");
+            return;     // webview not mounted yet; a later pair_webview_ready retries
+        }
+        // Prefer the staged (consume-once) id; fall back to the live session id so a
+        // resumed pair whose pending id was already consumed — or never staged —
+        // still loads. The webview merges history by turnId (idempotent), so a
+        // second fire re-establishes the same prefix rather than duplicating.
+        String sid = session.consumePendingHistoryReplaySessionId();
+        if (sid == null || sid.isEmpty()) sid = session.getSupervisorSessionId();
+        if (sid == null || sid.isEmpty()) {
+            LOG.info("[PairHandler] supervisor history replay skipped — no supervisor session id yet (pair="
+                    + session.getPairId() + ")");
+            return;
+        }
+        final PairSession sref = session;
+        final String fsid = sid;
+        LOG.info("[PairHandler] supervisor history replay firing (pair=" + session.getPairId()
+                + ", sessionId=" + fsid + ")");
+        com.intellij.openapi.application.ApplicationManager.getApplication()
+                .executeOnPooledThread(() -> replaySupervisorHistory(sref, fsid));
+    }
+
+    private void replaySupervisorHistory(PairSession session, String sessionId) {
+        try {
+            if (sessionId == null || !sessionId.matches("[A-Za-z0-9_-]+")) return;
+            // Source the transcript from the SAME place main AI does: the remote
+            // ai-bridge-server (/history/session) in remote mode, or local disk
+            // otherwise. In remote mode the SDK runs on the server, so the .jsonl
+            // is on the SERVER's disk and is NOT reachable via any local path.
+            java.util.List<String> lines = readSupervisorTranscriptLines(sessionId);
+            if (lines == null || lines.isEmpty()) return;   // cause already logged inside
+            // Bound the replay so a very long transcript doesn't flood the pane.
+            final int MAX = 300;
+            int from = Math.max(0, lines.size() - MAX);
+            String agentId = session.getAgentId();
+            JsonArray batch = new JsonArray();
+            int idx = 0;
+            for (int i = from; i < lines.size(); i++) {
+                String line = lines.get(i);
+                if (line == null || line.isBlank()) continue;
+                JsonObject msg;
+                try { msg = com.google.gson.JsonParser.parseString(line).getAsJsonObject(); }
+                catch (Exception ignore) { continue; }
+                // The supervisor's own assistant turns + the user-role events it
+                // received render meaningfully; keep compact_boundary markers too;
+                // skip init/result frames.
+                String type = msg.has("type") && !msg.get("type").isJsonNull() ? msg.get("type").getAsString() : "";
+                boolean compact = "system".equals(type)
+                        && msg.has("subtype") && !msg.get("subtype").isJsonNull()
+                        && "compact_boundary".equals(msg.get("subtype").getAsString());
+                if (!"assistant".equals(type) && !"user".equals(type) && !compact) continue;
+                JsonObject env = new JsonObject();
+                env.addProperty("supervisorId", agentId);
+                env.addProperty("turnId", "hist_" + (idx++));
+                env.add("message", msg);   // raw SDK frame — webview rebuilds the message from .type/.message.content
+                batch.add(env);
+            }
+            if (batch.size() == 0) {
+                LOG.info("[PairHandler] supervisor history replay: nothing renderable for sessionId=" + sessionId);
+                return;
+            }
+            // Push through the dedicated, authoritative history channel (NOT the
+            // live append channel): the webview rebuilds the full prior conversation
+            // and merges it ahead of any live messages — idempotent, ordering-immune,
+            // and it renders emit_action decision cards (the live path skips those).
+            JsonObject payload = new JsonObject();
+            payload.addProperty("supervisorId", agentId);
+            payload.addProperty("sessionId", sessionId);
+            payload.add("frames", batch);
+            pushToWebview("window.onSupervisorHistoryLoad", gson.toJson(payload));
+            LOG.info("[PairHandler] supervisor history loaded: " + batch.size()
+                    + " frames into pane (sessionId=" + sessionId + ")");
+        } catch (Exception e) {
+            LOG.warn("[PairHandler] replaySupervisorHistory failed: "
+                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getName()));
+        }
+    }
+
+    /**
+     * Read the supervisor transcript lines for {@code sessionId} from wherever the
+     * SDK actually wrote them: the remote ai-bridge-server ({@code /history/session})
+     * in remote mode, or local disk otherwise. Mirrors main AI's
+     * {@code ClaudeSession.fetchRemoteClaudeSessionMessages}. Returns null when not
+     * found (the cause is logged).
+     */
+    private java.util.List<String> readSupervisorTranscriptLines(String sessionId) {
+        // ── Remote mode: the supervisor SDK runs on the server; fetch over HTTP. The
+        //    transcript is on the SERVER's disk — no local path can reach it. ──
+        com.github.claudecodegui.settings.RemoteModeContext rm =
+                com.github.claudecodegui.settings.RemoteModeContext.getInstance();
+        if (rm.isRemote()) {
+            try {
+                String remoteUrl = rm.remoteServerUrl();
+                if (remoteUrl == null || remoteUrl.isBlank()) {
+                    LOG.warn("[PairHandler] supervisor history replay: remote mode but remoteServerUrl empty");
+                    return null;
+                }
+                com.intellij.openapi.project.Project project = context.getProject();
+                String cwd = project != null ? project.getBasePath() : null;
+                String encodedProject =
+                        com.github.claudecodegui.path.HistoryProjectPathEncoder.encode(project, cwd);
+                if (encodedProject == null || encodedProject.isEmpty()) {
+                    LOG.warn("[PairHandler] supervisor history replay: cannot encode project for remote fetch (cwd="
+                            + cwd + ")");
+                    return null;
+                }
+                java.util.Optional<byte[]> raw =
+                        new com.github.claudecodegui.provider.claude.RemoteHistoryDataSource(remoteUrl)
+                                .readSessionRaw(encodedProject, sessionId);
+                if (raw.isEmpty()) {
+                    LOG.info("[PairHandler] supervisor history replay: remote /history/session empty for sessionId="
+                            + sessionId + " (project=" + encodedProject + ")");
+                    return null;
+                }
+                String body = new String(raw.get(), java.nio.charset.StandardCharsets.UTF_8);
+                // Translate remote→local paths per line (same as main AI), fail-soft.
+                com.github.claudecodegui.path.PathMapper mapper = project != null
+                        ? com.github.claudecodegui.path.PathMapperHolder.getInstance(project).get()
+                        : com.github.claudecodegui.path.IdentityPathMapper.INSTANCE;
+                java.util.List<String> out = new java.util.ArrayList<>();
+                for (String line : body.split("\\r?\\n")) {
+                    if (line.isEmpty()) continue;
+                    if (mapper.isActive()) {
+                        try {
+                            com.google.gson.JsonElement el = com.google.gson.JsonParser.parseString(line);
+                            if (el.isJsonObject()) {
+                                com.github.claudecodegui.path.PathFieldVisitor.applyInbound(
+                                        "__history_line__", el.getAsJsonObject(), mapper::toLocal);
+                                line = gson.toJson(el);
+                            }
+                        } catch (Exception ignore) { /* keep the raw line */ }
+                    }
+                    out.add(line);
+                }
+                LOG.info("[PairHandler] supervisor history replay: fetched " + out.size()
+                        + " remote transcript lines for sessionId=" + sessionId);
+                return out;
+            } catch (Exception e) {
+                LOG.warn("[PairHandler] supervisor history remote fetch failed: "
+                        + (e.getMessage() != null ? e.getMessage() : e.getClass().getName()));
+                return null;
+            }
+        }
+        // ── Local mode: scan candidate $HOME/.claude/projects roots (the daemon's
+        //    $HOME env may differ from the JVM's resolved home — sandbox runs). ──
+        final String fileName = sessionId + ".jsonl";
+        java.util.LinkedHashSet<java.nio.file.Path> roots = new java.util.LinkedHashSet<>();
+        addClaudeProjectsRoot(roots, System.getenv("HOME"));
+        addClaudeProjectsRoot(roots, com.github.claudecodegui.util.PlatformUtils.getHomeDirectory());
+        String cfgDir = System.getenv("CLAUDE_CONFIG_DIR");
+        if (cfgDir != null && !cfgDir.isEmpty()) {
+            java.nio.file.Path p = java.nio.file.Paths.get(cfgDir, "projects");
+            if (java.nio.file.Files.isDirectory(p)) roots.add(p);
+        }
+        java.nio.file.Path jsonl = null;
+        for (java.nio.file.Path projects : roots) {
+            jsonl = findTranscriptUnder(projects, fileName);
+            if (jsonl != null) break;
+        }
+        if (jsonl == null) {
+            LOG.info("[PairHandler] supervisor history replay: no .jsonl for sessionId=" + sessionId
+                    + " (scanned roots=" + roots + ")");
+            return null;
+        }
+        try {
+            return java.nio.file.Files.readAllLines(jsonl, java.nio.charset.StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            LOG.warn("[PairHandler] supervisor history read failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    /** Add {@code <home>/.claude/projects} to {@code roots} when it exists. */
+    private static void addClaudeProjectsRoot(java.util.Set<java.nio.file.Path> roots, String home) {
+        if (home == null || home.isEmpty()) return;
+        try {
+            java.nio.file.Path p = java.nio.file.Paths.get(home, ".claude", "projects");
+            if (java.nio.file.Files.isDirectory(p)) roots.add(p);
+        } catch (Exception ignore) { /* malformed path */ }
+    }
+
+    /** One-level (fast) then bounded-recursive lookup of {@code fileName} under a projects root. */
+    private static java.nio.file.Path findTranscriptUnder(java.nio.file.Path projects, String fileName) {
+        // Fast path: projects/<project-dir>/<sessionId>.jsonl (one level deep).
+        try (java.util.stream.Stream<java.nio.file.Path> dirs = java.nio.file.Files.list(projects)) {
+            java.nio.file.Path hit = dirs.filter(java.nio.file.Files::isDirectory)
+                    .map(d -> d.resolve(fileName))
+                    .filter(java.nio.file.Files::isRegularFile)
+                    .findFirst().orElse(null);
+            if (hit != null) return hit;
+        } catch (Exception ignore) { return null; }
+        // Rotated / subagent transcripts can live deeper. Bounded recursive fallback.
+        try (java.util.stream.Stream<java.nio.file.Path> walk = java.nio.file.Files.walk(projects, 4)) {
+            return walk.filter(java.nio.file.Files::isRegularFile)
+                    .filter(p -> p.getFileName().toString().equals(fileName))
+                    .findFirst().orElse(null);
+        } catch (Exception ignore) { return null; }
     }
 
     /**
@@ -410,6 +667,20 @@ public class PairHandler extends BaseMessageHandler {
         PairSessionManager mgr = PairSessionManager.getInstance(context.getProject());
         PairSession session = mgr.startPair(params, context.getClaudeSDKBridge());
 
+        // Session resume display: if this pair resumed a prior supervisor
+        // transcript, stage that session_id so handleWebviewReady replays it into
+        // the pane (SDK `resume` loads the model context but does NOT re-render the
+        // pane). Consumed once when the webview signals ready.
+        if (params.resumeSupervisorSessionId != null && !params.resumeSupervisorSessionId.isEmpty()) {
+            session.setPendingHistoryReplaySessionId(params.resumeSupervisorSessionId);
+            // Seed the session's supervisor id with the historical one up-front so
+            // getSupervisorSessionId() is usable for a webview-reload re-replay even
+            // BEFORE the resumed supervisor takes its first turn (when the daemon
+            // would otherwise re-emit [SUPERVISOR_SESSION]). Overwritten with the
+            // live id on that turn — the same id when resume is honoured.
+            session.setSupervisorSessionId(params.resumeSupervisorSessionId);
+        }
+
         // 2026-05-24: bind the live ClaudeSession to the pair so the
         // rotation decider can resolve it on auto-trigger without a
         // separate session registry. Nullable in headless tests.
@@ -463,6 +734,13 @@ public class PairHandler extends BaseMessageHandler {
         );
         session.setMessageBatcher(batcher);
         session.getSupervisorBridge().setMessageHandler(rawMsg -> {
+            // Mark live supervisor activity so the workflow-node liveness watchdog
+            // doesn't count up against an actively-streaming supervisor turn (its
+            // LLM turn is async on the daemon, not a monitor "tick").
+            try {
+                var sm = sessionRef.getSupervisorMonitor();
+                if (sm != null) sm.noteStreamActivity();
+            } catch (Exception ignored) { /* best-effort */ }
             JsonObject sdkUsage = extractSdkUsage(rawMsg);
             if (sdkUsage != null) {
                 UsagePushService.broadcast(
@@ -480,8 +758,52 @@ public class PairHandler extends BaseMessageHandler {
         // WaitingIndicator "↓ N tokens". Separate channel from the usage
         // broadcast above (which drives the context %) so the ticker can
         // update on every stream tick without recomputing the context window.
-        session.getSupervisorBridge().setLiveUsageHandler(usage ->
-                pushToWebview("window.onSupervisorLiveUsage", gson.toJson(usage)));
+        session.getSupervisorBridge().setLiveUsageHandler(usage -> {
+            // Finest-grained liveness signal — fires on every stream tick (incl.
+            // a long think before any message), so the node watchdog sees the
+            // supervisor as active throughout the turn.
+            try {
+                var sm = sessionRef.getSupervisorMonitor();
+                if (sm != null) sm.noteStreamActivity();
+            } catch (Exception ignored) { /* best-effort */ }
+            pushToWebview("window.onSupervisorLiveUsage", gson.toJson(usage));
+        });
+
+        // Session resume (SR3, session-resume-plan.md): capture the supervisor's
+        // SDK session_id (first turn) onto the PairSession AND notify the workflow
+        // manager so it persists into NodeRuntime for a future restart-resume.
+        final PairSession sessRef = session;
+        session.getSupervisorBridge().setSessionHandler(payload -> {
+            try {
+                String sid = payload != null && payload.has("sessionId") && !payload.get("sessionId").isJsonNull()
+                        ? payload.get("sessionId").getAsString() : null;
+                if (sid == null || sid.isEmpty()) return;
+                sessRef.setSupervisorSessionId(sid);
+                if (context.getProject() != null) {
+                    com.github.claudecodegui.session.pair.workflow.SupervisorWorkflowManager
+                            .getInstance(context.getProject())
+                            .onSupervisorSessionCaptured(sessRef.getPairId(), sid);
+                }
+            } catch (Exception e) {
+                LOG.warn("[PairHandler] session handler failed: " + e.getMessage());
+            }
+        });
+        // SR5: a resume-miss means the daemon could not honour the requested
+        // resume — log + record so the operator/telemetry sees the fallback.
+        session.getSupervisorBridge().setResumeMissHandler(payload -> {
+            try {
+                LOG.warn("[PairHandler] pair " + sessRef.getPairId()
+                        + " supervisor resume NOT honoured (SR6 fallback): " + payload);
+                PairStatusPusher sp = sessRef.getStatusPusher();
+                if (sp != null) {
+                    sp.recordCoordinatorEvent(
+                            com.github.claudecodegui.session.pair.PairStatusSnapshot.CoordinatorEvent.Source.GUARD,
+                            "resume_fallback",
+                            "supervisor 历史会话 resume 未生效,已按全新会话继续(主 AI 仍可能已恢复)",
+                            null);
+                }
+            } catch (Exception ignored) { /* best-effort */ }
+        });
 
         JsonObject result = new JsonObject();
         result.addProperty("pairId", session.getPairId());
@@ -537,6 +859,12 @@ public class PairHandler extends BaseMessageHandler {
         // path begins coordinating on the user's first message; the workflow
         // path is kicked off by SupervisorWorkflowManager (publishUserInput of
         // the assembled node plan) once pairStarted fires.
+
+        // Session resume display: the pending replay id is now set; if the webview
+        // already signalled ready DURING this (slow) start, fire the replay here —
+        // the matching trigger in handleWebviewReady covers the opposite ordering.
+        maybeReplaySupervisorHistory(session);
+
         return session;
     }
 

@@ -368,6 +368,28 @@ public class ClaudeChatWindow {
         return sessionId;
     }
 
+    /**
+     * Session resume (SR10, session-resume-plan.md): resume this window's main-AI
+     * session from a prior transcript by session_id — the same path the history
+     * view uses to "open a past session and continue" ({@code loadHistorySession}).
+     * Used by {@code IdeNodeLauncher} when recovering a workflow node so the node's
+     * main AI continues its prior conversation instead of starting fresh. No-op on
+     * a blank id; marshalled onto the EDT (loadHistorySession touches the webview).
+     */
+    public void resumeMainSession(String sessionId) {
+        if (sessionId == null || sessionId.isEmpty()) return;
+        Runnable r = () -> {
+            try {
+                String projectPath = sessionLifecycleManager.determineWorkingDirectory();
+                sessionLifecycleManager.loadHistorySession(sessionId, projectPath);
+            } catch (Exception e) {
+                LOG.warn("[ClaudeChatWindow] resumeMainSession failed for " + sessionId + ": " + e.getMessage());
+            }
+        };
+        com.intellij.openapi.application.Application app = ApplicationManager.getApplication();
+        if (app == null || app.isDispatchThread()) r.run(); else app.invokeLater(r);
+    }
+
     public ClaudeSession getSession() {
         return session;
     }

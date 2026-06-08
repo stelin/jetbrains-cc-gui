@@ -29,6 +29,30 @@ public class PairSession {
     private final SupervisorBridge supervisorBridge;
     private final ProgressManager progressManager;
     private final long startedAt = System.currentTimeMillis();
+    /**
+     * Epoch ms when this supervisor session's work finished (set when the owning
+     * workflow node reaches DONE). Null while running. Surfaced in the snapshot so
+     * the supervisor time strip can show 结束时间 / freeze 耗时.
+     */
+    private volatile Long finishedAt;
+    /**
+     * Session resume (SR3, session-resume-plan.md): the supervisor's SDK-assigned
+     * session_id, captured from the daemon's {@code [SUPERVISOR_SESSION]} line on
+     * the first turn (wired in {@code PairHandler.startPairWired}). Mutable — it
+     * isn't known at construction. Persisted into {@code NodeRuntime} so a restart
+     * can resume this supervisor's transcript. Null until the first turn / on a
+     * resume-miss.
+     */
+    private volatile String supervisorSessionId;
+    /**
+     * Session resume display (session-resume-plan.md): the prior supervisor
+     * session_id whose transcript should be REPLAYED into the supervisor pane once
+     * the webview is ready, so the operator can SEE the supervisor's history (the
+     * SDK `resume` only loads it into the model's context, it does not re-render
+     * the pane). Set when the pair is started in resume mode; consumed once by
+     * {@code PairHandler.handleWebviewReady}. Null on non-resume starts.
+     */
+    private volatile String pendingHistoryReplaySessionId;
 
     /**
      * Id of the tab that created this Pair. Used by {@link PairSessionManager}
@@ -209,6 +233,25 @@ public class PairSession {
 
     public String getPairId() { return pairId; }
     public String getMainSessionId() { return mainSessionId; }
+    /** Session resume (SR3): supervisor SDK session_id, or null until captured. */
+    public String getSupervisorSessionId() { return supervisorSessionId; }
+    public void setSupervisorSessionId(String id) {
+        if (id != null && !id.isEmpty()) this.supervisorSessionId = id;
+    }
+    /** Session resume display: stage a prior session_id to replay into the pane. */
+    public synchronized void setPendingHistoryReplaySessionId(String id) { this.pendingHistoryReplaySessionId = id; }
+    /** Non-consuming read of the staged replay id (null if none). */
+    public synchronized String peekPendingHistoryReplaySessionId() { return pendingHistoryReplaySessionId; }
+    /**
+     * Consume-once: returns the staged replay id and clears it (null if none).
+     * Synchronized so the two trigger sites ({@code handleWebviewReady} and the
+     * tail of {@code startPairWired}) can't both read the same id and double-replay.
+     */
+    public synchronized String consumePendingHistoryReplaySessionId() {
+        String id = pendingHistoryReplaySessionId;
+        pendingHistoryReplaySessionId = null;
+        return id;
+    }
     public String getAgentId() { return agentId; }
     public String getAgentName() { return agentName; }
     public Path getPairDir() { return pairDir; }
@@ -216,6 +259,9 @@ public class PairSession {
     public SupervisorBridge getSupervisorBridge() { return supervisorBridge; }
     public ProgressManager getProgressManager() { return progressManager; }
     public long getStartedAt() { return startedAt; }
+    /** Epoch ms the supervisor session finished (node DONE), or null while running. */
+    public Long getFinishedAt() { return finishedAt; }
+    public void setFinishedAt(Long ts) { this.finishedAt = ts; }
     /** Window id of the tab that created this Pair; nullable. See field doc. */
     public String getOwnerWindowId() { return ownerWindowId; }
 

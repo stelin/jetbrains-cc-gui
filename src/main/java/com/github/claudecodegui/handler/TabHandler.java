@@ -24,7 +24,9 @@ public class TabHandler extends BaseMessageHandler {
     private static final Logger LOG = Logger.getInstance(TabHandler.class);
 
     private static final String[] SUPPORTED_TYPES = {
-        "create_new_tab"
+        "create_new_tab",
+        "create_new_supervised_tab",
+        "open_history_in_new_tab"
     };
 
     public TabHandler(HandlerContext context) {
@@ -40,21 +42,84 @@ public class TabHandler extends BaseMessageHandler {
     public boolean handle(String type, String content) {
         if ("create_new_tab".equals(type)) {
             LOG.debug("[TabHandler] Processing create_new_tab");
-            handleCreateNewTab();
+            handleCreateNewTab(false);
+            return true;
+        }
+        if ("create_new_supervised_tab".equals(type)) {
+            LOG.debug("[TabHandler] Processing create_new_supervised_tab");
+            handleCreateNewTab(true);
+            return true;
+        }
+        if ("open_history_in_new_tab".equals(type)) {
+            LOG.debug("[TabHandler] Processing open_history_in_new_tab");
+            handleOpenHistoryInNewTab(content);
             return true;
         }
         return false;
     }
 
     /**
-     * Create a new chat tab in the tool window
+     * Create a new chat tab in the tool window.
+     *
+     * @param supervised when {@code true}, the new tab is born as a supervisor
+     *                   session (staged via {@code setPendingSupervised} so the
+     *                   agent picker auto-opens on first {@code frontend_ready}).
+     *                   Keeps the born-at-birth session-kind contract: supervised
+     *                   sessions only ever live in their own dedicated tab.
      */
-    private void handleCreateNewTab() {
+    private void handleCreateNewTab(boolean supervised) {
+        java.util.function.Consumer<ClaudeChatWindow> preMount =
+                supervised ? (win -> win.setPendingSupervised(true)) : (win -> { });
+        createTab(preMount, null);
+    }
+
+    /**
+     * Open a history session (normal or supervised) in a fresh tab. Mirrors the
+     * born-at-birth path: create the tab, stage the load payload, and let the new
+     * tab's webview run its own loadHistorySession on {@code frontend_ready} (via
+     * {@code window.onRequestLoadHistory}). This is why opening from the history
+     * list never needs to pre-open / reuse a tab of a particular kind — the new
+     * tab simply becomes whatever kind the loaded session is.
+     */
+    private void handleOpenHistoryInNewTab(String content) {
+        String sessionId, containerId, kind, title;
+        try {
+            com.google.gson.JsonObject o = com.google.gson.JsonParser.parseString(content).getAsJsonObject();
+            sessionId = strOrNull(o, "sessionId");
+            containerId = strOrNull(o, "containerId");
+            kind = strOrNull(o, "kind");
+            title = strOrNull(o, "title");
+        } catch (Exception e) {
+            LOG.warn("[TabHandler] open_history_in_new_tab: bad payload: " + e.getMessage());
+            return;
+        }
+        // ASCII-safe load payload handed to onRequestLoadHistory (UUIDs + kind
+        // enum only — title is intentionally excluded and used as the tab name
+        // instead, so callJavaScript's naive single-quote arg wrapping is safe).
+        com.google.gson.JsonObject load = new com.google.gson.JsonObject();
+        if (sessionId != null) load.addProperty("sessionId", sessionId);
+        if (containerId != null) load.addProperty("containerId", containerId);
+        load.addProperty("kind", kind != null ? kind : "normal");
+        final String loadJson = load.toString();
+        final String tabName = (title != null && !title.trim().isEmpty()) ? title.trim() : null;
+        createTab(win -> win.setPendingHistoryLoad(loadJson), tabName);
+    }
+
+    private static String strOrNull(com.google.gson.JsonObject o, String key) {
+        return o.has(key) && !o.get(key).isJsonNull() ? o.get(key).getAsString() : null;
+    }
+
+    /**
+     * Shared new-tab creation. {@code preMount} stages any pending markers on the
+     * window before its webview mounts (supervisor picker / history load).
+     * {@code preferredName}, when non-null, names the tab (e.g. the session title);
+     * otherwise the saved/auto name is used.
+     */
+    private void createTab(java.util.function.Consumer<ClaudeChatWindow> preMount, String preferredName) {
         Project project = context.getProject();
 
         ToolWindowManager.getInstance(project).invokeLater(() -> {
             try {
-                // Get the tool window
                 ToolWindow toolWindow = ToolWindowManager.getInstance(project)
                         .getToolWindow(ClaudeSDKToolWindow.TOOL_WINDOW_ID);
                 if (toolWindow == null) {
@@ -66,24 +131,29 @@ public class TabHandler extends BaseMessageHandler {
                 // Create a new chat window instance with skipRegister=true (don't replace the main instance)
                 ClaudeChatWindow newChatWindow = new ClaudeChatWindow(project, true);
 
-                // Get tab index before adding content
+                // Stage pending markers (supervisor picker / history load) BEFORE
+                // the webview mounts so handleFrontendReady() can act on them.
+                if (preMount != null) {
+                    preMount.accept(newChatWindow);
+                }
+
                 ContentManager contentManager = toolWindow.getContentManager();
                 int tabIndex = contentManager.getContentCount();
 
-                // Check if there's a saved name for this tab index
                 TabStateService tabStateService = TabStateService.getInstance(project);
                 String savedName = tabStateService.getTabName(tabIndex);
 
-                // Create a tab name: use saved name or generate new one
+                // Tab name: explicit preferred (session title) wins, else saved, else auto.
                 String tabName;
-                if (savedName != null && !savedName.isEmpty()) {
+                if (preferredName != null && !preferredName.isEmpty()) {
+                    tabName = preferredName.length() > 40 ? preferredName.substring(0, 40) : preferredName;
+                } else if (savedName != null && !savedName.isEmpty()) {
                     tabName = savedName;
                     LOG.info("[TabHandler] Restored tab name from storage: " + tabName);
                 } else {
                     tabName = ClaudeSDKToolWindow.getNextTabName(toolWindow);
                 }
 
-                // Create and add the new tab content
                 ContentFactory contentFactory = ContentFactory.getInstance();
                 Content content = contentFactory.createContent(newChatWindow.getContent(), tabName, false);
                 content.setCloseable(true);
@@ -93,7 +163,6 @@ public class TabHandler extends BaseMessageHandler {
                 contentManager.addContent(content);
                 contentManager.setSelectedContent(content);
 
-                // Ensure the tool window is visible
                 toolWindow.show(null);
 
                 LOG.info("[TabHandler] Created new tab: " + tabName);

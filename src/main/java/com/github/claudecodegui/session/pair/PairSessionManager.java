@@ -12,6 +12,7 @@ import com.github.claudecodegui.session.pair.rotation.RotationDecider;
 import com.github.claudecodegui.session.pair.rotation.RotationTriggers;
 import com.github.claudecodegui.session.pair.workflow.SupervisorWorkflowManager;
 import com.github.claudecodegui.settings.CodemossSettingsService;
+import com.github.claudecodegui.util.CodemossPaths;
 import com.google.gson.JsonObject;
 import com.intellij.openapi.Disposable;
 import com.intellij.openapi.components.Service;
@@ -58,15 +59,23 @@ public final class PairSessionManager implements Disposable {
 
     private final Project project;
     private final ConcurrentHashMap<String, PairSession> pairs = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, String> mainSessionToPair = new ConcurrentHashMap<>();
+    /**
+     * Session-kind refactor (S2): new primary index keyed by the persistent
+     * {@code containerId} (supervised / workflow sessions). Populated only when
+     * a Pair is started with a non-null containerId; the legacy {@link #pairs}
+     * map (pairId → session) is retained for rotation / internal use.
+     */
+    private final ConcurrentHashMap<String, PairSession> byContainer = new ConcurrentHashMap<>();
     private final PlanSnapshotter planSnapshotter = new PlanSnapshotter();
     /**
-     * Phase 3 (2026-05-24): per-project L2 durable-state store. The default
-     * implementation writes under {@code ~/.codemoss/pairs} (shared across
-     * projects), which is what we want — a Pair is identified by its
-     * generated {@code pairId} UUID so cross-project collisions don't happen.
+     * Phase 3 (2026-05-24): per-project L2 durable-state store.
+     * Session-kind refactor (S3): rooted at {@code ~/.codemoss/sessions/<projectHash>}
+     * and keyed by the persistent containerId ({@code PairSession.getL2Key()}), so a
+     * Pair's coordination state nests inside its container dir and survives an IDE
+     * restart (the pairId is regenerated each start). Constructor-assigned because
+     * the project hash needs {@link #project}.
      */
-    private final L2Store l2Store = new L2Store();
+    private final L2Store l2Store;
 
     /**
      * Phase 4 (2026-05-24): rotation infrastructure. Coordinator does the
@@ -74,7 +83,7 @@ public final class PairSessionManager implements Disposable {
      * runs the coordinator under the pair's write lock. Both share a single
      * background thread so multiple pairs serialize naturally.
      */
-    private final RotationCoordinator rotationCoordinator = new RotationCoordinator(l2Store);
+    private final RotationCoordinator rotationCoordinator;
 
     /**
      * 2026-05-24: main-AI rotation is now auto-only (manual entry removed).
@@ -82,12 +91,21 @@ public final class PairSessionManager implements Disposable {
      * inside {@code MainAIMonitor.onTurnEnd} and inside the post-compact path
      * on {@link PairSessionManager}.
      */
-    private final MainAIRotationCoordinator mainAIRotationCoordinator = new MainAIRotationCoordinator(l2Store);
-    private final RotationDecider rotationDecider = new RotationDecider(
-            pairs::values, rotationCoordinator, mainAIRotationCoordinator);
+    private final MainAIRotationCoordinator mainAIRotationCoordinator;
+    private final RotationDecider rotationDecider;
 
     public PairSessionManager(@NotNull Project project) {
         this.project = project;
+        // Session-kind refactor (S3): root L2 at ~/.codemoss/sessions/<projectHash>
+        // so each Pair's durable state nests inside its container dir. Needs the
+        // project hash, hence constructor-time (not field) init; the rotation infra
+        // depends on l2Store so it is wired here too.
+        this.l2Store = new L2Store(
+                CodemossPaths.sessionsRoot().resolve(CodemossPaths.projectHash(project.getBasePath())));
+        this.rotationCoordinator = new RotationCoordinator(l2Store);
+        this.mainAIRotationCoordinator = new MainAIRotationCoordinator(l2Store);
+        this.rotationDecider = new RotationDecider(
+                pairs::values, rotationCoordinator, mainAIRotationCoordinator);
         // Start the decider as soon as the service is instantiated; pairs
         // created later are picked up automatically via the supplier.
         rotationDecider.start();
@@ -151,6 +169,15 @@ public final class PairSessionManager implements Disposable {
         @Nullable public final String resumeSupervisorSessionId;
 
         /**
+         * Session-kind refactor (S2): the persistent container id this Pair
+         * belongs to. Non-null only on the {@code session_create_supervised}
+         * path; carried through to {@link PairSession#getContainerId()} and used
+         * as the {@link PairSessionManager#byContainer} index key. Null on every
+         * legacy path (composer pair_start, workflow node, rotation, tests).
+         */
+        @Nullable public final String containerId;
+
+        /**
          * Session resume display: the prior pair's pairId, whose persisted L2
          * coordinator-event strip should be carried into this resumed pair so the
          * CoordinatorEventStrip shows history after IDE-restart recovery. Mutable
@@ -158,6 +185,34 @@ public final class PairSessionManager implements Disposable {
          * constructors untouched). Null on every non-resume path.
          */
         @Nullable public String priorPairId;
+
+        /**
+         * Session-kind refactor (S2): full constructor carrying the persistent
+         * {@code containerId}. Used by {@code session_create_supervised} so the
+         * started Pair is indexed by container in {@link PairSessionManager#byContainer}.
+         * Every other (legacy) constructor delegates here with {@code containerId=null}.
+         */
+        public StartPairParams(
+                String mainSessionId,
+                String agentId,
+                @Nullable String planPath,
+                @Nullable String modelOverride,
+                @Nullable Boolean longContextOverride,
+                @Nullable String reasoningOverride,
+                @Nullable String ownerWindowId,
+                @Nullable String resumeSupervisorSessionId,
+                @Nullable String containerId
+        ) {
+            this.mainSessionId = mainSessionId;
+            this.agentId = agentId;
+            this.planPath = planPath;
+            this.modelOverride = modelOverride;
+            this.longContextOverride = longContextOverride;
+            this.reasoningOverride = reasoningOverride;
+            this.ownerWindowId = ownerWindowId;
+            this.resumeSupervisorSessionId = resumeSupervisorSessionId;
+            this.containerId = containerId;
+        }
 
         public StartPairParams(
                 String mainSessionId,
@@ -169,14 +224,8 @@ public final class PairSessionManager implements Disposable {
                 @Nullable String ownerWindowId,
                 @Nullable String resumeSupervisorSessionId
         ) {
-            this.mainSessionId = mainSessionId;
-            this.agentId = agentId;
-            this.planPath = planPath;
-            this.modelOverride = modelOverride;
-            this.longContextOverride = longContextOverride;
-            this.reasoningOverride = reasoningOverride;
-            this.ownerWindowId = ownerWindowId;
-            this.resumeSupervisorSessionId = resumeSupervisorSessionId;
+            this(mainSessionId, agentId, planPath, modelOverride, longContextOverride,
+                    reasoningOverride, ownerWindowId, resumeSupervisorSessionId, null);
         }
 
         /** Back-compat: no session-resume (the common path). */
@@ -368,7 +417,8 @@ public final class PairSessionManager implements Disposable {
                 planContent,
                 projectSpec,
                 model,
-                params.ownerWindowId
+                params.ownerWindowId,
+                params.containerId
         );
         session.setAutoCompactThreshold(autoCompactThreshold);
         // Seed the resolved reasoning tier so EventBus.restartSupervisor +
@@ -380,6 +430,12 @@ public final class PairSessionManager implements Disposable {
         // Seed mcpAccess so handoff (RotationCoordinator) + lazy restart
         // (EventBus) replay it from the session snapshot.
         session.setMcpAccess(mcpAccess);
+
+        // Session-kind refactor (S3): every L2 read/write for this Pair is keyed
+        // by its persistent containerId (pairId fallback for legacy/workflow pairs)
+        // so the durable state survives an IDE restart. Resolved once here; pairId
+        // stays for daemon ids, logs, and PlanStateMachine/ContractRegistry ids.
+        final String l2Key = session.getL2Key();
 
         // Phase 4 (2026-05-24): generation-0 start uses the same daemon
         // command as rotation (supervisor.start with successorPromptAppend),
@@ -464,7 +520,7 @@ public final class PairSessionManager implements Disposable {
                     // Merge the prior strip into THIS pair's L2 (prepended, deduped,
                     // trimmed) so buildSnapshot renders it AND it persists for a
                     // second restart-resume.
-                    l2Store.update(pairId, s -> {
+                    l2Store.update(l2Key, s -> {
                         java.util.Set<String> seen = new java.util.HashSet<>();
                         for (L2State.PersistedCoordinatorEvent e : s.recentCoordinatorEvents) {
                             if (e != null) seen.add(e.ts + " " + e.type + " " + e.message);
@@ -499,7 +555,8 @@ public final class PairSessionManager implements Disposable {
         // when getBudgetTracker() returns non-null on first access).
         com.github.claudecodegui.session.pair.watcher.HealthWatcher healthWatcher =
                 new com.github.claudecodegui.session.pair.watcher.HealthWatcher(
-                        pairId, coordinator, statusPusher, l2Store);
+                        // S3: L2 metrics keyed by the container id, like every other L2 write.
+                        l2Key, coordinator, statusPusher, l2Store);
         com.github.claudecodegui.session.pair.watcher.RotationWatcher rotationWatcher =
                 new com.github.claudecodegui.session.pair.watcher.RotationWatcher(pairId, coordinator);
         session.setHealthWatcher(healthWatcher);
@@ -510,7 +567,7 @@ public final class PairSessionManager implements Disposable {
             // restart, not just from the live in-memory counter.
             L2State postL2 = null;
             try {
-                postL2 = l2Store.update(pairId, s -> {
+                postL2 = l2Store.update(l2Key, s -> {
                     L2State.CompactionEntry ce = new L2State.CompactionEntry();
                     ce.at = payload != null && payload.has("ts") && !payload.get("ts").isJsonNull()
                             ? payload.get("ts").getAsLong() : System.currentTimeMillis();
@@ -568,7 +625,7 @@ public final class PairSessionManager implements Disposable {
         bridge.setStateUpdateHandler(payload -> {
             try {
                 if (payload != null && payload.has("delta") && payload.get("delta").isJsonObject()) {
-                    l2Store.applyUpdateStateDelta(pairId, payload.getAsJsonObject("delta"));
+                    l2Store.applyUpdateStateDelta(l2Key, payload.getAsJsonObject("delta"));
                 }
             } catch (Exception e) {
                 LOG.warn("[PairSessionManager] L2 applyUpdateStateDelta failed: " + e.getMessage());
@@ -580,7 +637,7 @@ public final class PairSessionManager implements Disposable {
         // the rotation coordinator a recent fallback if the producer prompt
         // also fails post-compact.
         bridge.setPreCompactHandler(payload -> {
-            try { l2Store.writePrecompactSnapshot(pairId); }
+            try { l2Store.writePrecompactSnapshot(l2Key); }
             catch (Exception e) {
                 LOG.warn("[PairSessionManager] L2 writePrecompactSnapshot failed: " + e.getMessage());
             }
@@ -590,7 +647,7 @@ public final class PairSessionManager implements Disposable {
         // update_state arrives — keeps subsequent reads cheap (cache hit)
         // and gives rotation coordinator something to read on first launch.
         try {
-            l2Store.update(pairId, s -> {
+            l2Store.update(l2Key, s -> {
                 if (s.pairId == null) s.pairId = pairId;
                 if (s.createdAt <= 0) s.createdAt = System.currentTimeMillis();
                 return s;
@@ -602,11 +659,11 @@ public final class PairSessionManager implements Disposable {
         // Phase 6a (2026-05-24): per-pair main-AI observability monitor.
         // Constructed eagerly; mainSessionId may be null at this point
         // (pair started before the first main-AI message). The monitor
-        // tolerates a null sessionId and tracks turns as they arrive —
-        // when the SDK assigns a sessionId, callers can use
-        // {@link #bindMainSessionIdToPair} to update the L2 binding.
+        // tolerates a null sessionId and tracks turns as they arrive.
+        // S3: pass the container-scoped L2 key so its turn/error/compact
+        // counters land in the same L2 file as every other writer.
         MainAIMonitor mainAIMonitor = new MainAIMonitor(
-                pairId, params.mainSessionId, l2Store, statusPusher);
+                l2Key, params.mainSessionId, l2Store, statusPusher);
         session.setMainAIMonitor(mainAIMonitor);
 
         // Phase 6b (2026-05-24): main-AI rotation RPC façade. Wraps the same
@@ -638,7 +695,7 @@ public final class PairSessionManager implements Disposable {
 
         // Hydrate plan + open contracts from L2 if present (IDE restart path).
         try {
-            L2State persisted = l2Store.read(pairId);
+            L2State persisted = l2Store.read(l2Key);
             if (persisted != null && persisted.plan != null) {
                 planSm.restore(
                         com.github.claudecodegui.session.pair.plan.PlanPersistence.fromPersisted(
@@ -740,12 +797,13 @@ public final class PairSessionManager implements Disposable {
         }
 
         pairs.put(pairId, session);
-        // mainSessionId is null when the SDK hasn't assigned one yet (the very
-        // common case for "start pair before first turn"). ConcurrentHashMap
-        // forbids null keys, so we just skip the index — ClaudeMessageHandler's
-        // findAttachedPair falls back to "any active pair" anyway.
-        if (params.mainSessionId != null && !params.mainSessionId.isEmpty()) {
-            mainSessionToPair.put(params.mainSessionId, pairId);
+        // Session-kind refactor (S3): index supervised/workflow pairs by their
+        // persistent container id — the new pair_* routing key, replacing the
+        // deleted mainSessionToPair glue. Null on legacy paths (composer
+        // pair_start, workflow node, rotation) — skip, since ConcurrentHashMap
+        // forbids null keys.
+        if (params.containerId != null && !params.containerId.isEmpty()) {
+            byContainer.put(params.containerId, session);
         }
         LOG.info("[PairSessionManager] Started pair " + pairId + " for session " + params.mainSessionId);
 
@@ -753,27 +811,12 @@ public final class PairSessionManager implements Disposable {
     }
 
     /**
-     * Phase 6a (2026-05-24): late-binding entry point for the main-AI
-     * session id. {@code ClaudeMessageHandler.handleSessionId} can call this
-     * once the SDK assigns the UUID to a pair that started before the first
-     * turn — common when the user opens the supervisor pane before sending
-     * a message. The map is also kept in sync via the existing index.
+     * Session-kind refactor (S2): resolve a live Pair by its persistent
+     * container id (the new primary key for supervised / workflow sessions).
+     * Returns null if no Pair is indexed under {@code containerId}.
      */
-    public void bindMainSessionIdToPair(String pairId, String mainSessionId) {
-        if (pairId == null || mainSessionId == null || mainSessionId.isEmpty()) return;
-        PairSession session = pairs.get(pairId);
-        if (session == null) return;
-        mainSessionToPair.putIfAbsent(mainSessionId, pairId);
-        MainAIMonitor mainAI = session.getMainAIMonitor();
-        if (mainAI != null) mainAI.rebindSessionId(mainSessionId);
-    }
-
-    /** Find the Pair tracking a given main-session id, or null if none. */
-    @Nullable
-    public PairSession findByMainSession(String mainSessionId) {
-        if (mainSessionId == null) return null;
-        String pairId = mainSessionToPair.get(mainSessionId);
-        return pairId == null ? null : pairs.get(pairId);
+    public PairSession getByContainer(String containerId) {
+        return byContainer.get(containerId);
     }
 
     @Nullable
@@ -864,7 +907,7 @@ public final class PairSessionManager implements Disposable {
      * <ol>
      *   <li><b>Synchronous (callers see immediately):</b> remove from maps,
      *       markDisposed, stop in-memory monitors. After this the pair is no
-     *       longer discoverable via {@code findByMainSession} / {@code get}
+     *       longer discoverable via {@code getByContainer} / {@code get}
      *       and any cross-tab fallback ignores it.</li>
      *   <li><b>Async (background):</b> daemon {@code supervisor.stop} round-trip
      *       (up to 5s) and {@code progress.json} write. These do not affect
@@ -877,9 +920,11 @@ public final class PairSessionManager implements Disposable {
     public void stopPair(String pairId) {
         PairSession session = pairs.remove(pairId);
         if (session == null) return;
-        String mainSid = session.getMainSessionId();
-        if (mainSid != null && !mainSid.isEmpty()) {
-            mainSessionToPair.remove(mainSid);
+        // Session-kind refactor (S3): drop the container index entry so a stopped
+        // pair is no longer resolvable via getByContainer (the new pair_* routing).
+        String containerId = session.getContainerId();
+        if (containerId != null && !containerId.isEmpty()) {
+            byContainer.remove(containerId);
         }
         session.markDisposed();
 
@@ -1078,7 +1123,10 @@ public final class PairSessionManager implements Disposable {
                 // supervisor explicitly completed without updating planProgress,
                 // mirror Plan.steps[].status into planProgress so the writer
                 // produces a meaningful report.
-                L2State state = store.update(session.getPairId(), s -> {
+                // Session-kind refactor (S3): keyed by the persistent container id
+                // like every other L2 writer (else this completion mirror would
+                // split-brain to a different file for a supervised pair).
+                L2State state = store.update(session.getL2Key(), s -> {
                     if (now.steps != null && !now.steps.isEmpty()
                             && (s.planProgress == null || s.planProgress.isEmpty())) {
                         if (s.planProgress == null) s.planProgress = new java.util.ArrayList<>();

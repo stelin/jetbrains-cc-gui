@@ -79,6 +79,11 @@ public class L2Store {
      * corruption, then to a fresh {@link L2State#initial} as a last resort).
      */
     public L2State read(String pairId) {
+        // Session-kind refactor (S3): callers pass PairSession.getL2Key() (containerId,
+        // or pairId fallback), which is never null/empty for a live pair. Guard
+        // defensively so a stray null degrades to a throwaway state instead of an
+        // NPE on the cache (ConcurrentHashMap forbids null keys).
+        if (pairId == null || pairId.isEmpty()) return L2State.initial("__transient__");
         return cache.computeIfAbsent(pairId, this::loadFromDisk);
     }
 
@@ -90,6 +95,13 @@ public class L2Store {
      * <p>If the mutator throws, the previous state is preserved.
      */
     public L2State update(String pairId, UnaryOperator<L2State> mutator) {
+        // Session-kind refactor (S3): degrade gracefully on a null/empty key
+        // (skip persistence) rather than NPE — see read().
+        if (pairId == null || pairId.isEmpty()) {
+            L2State next = mutator.apply(L2State.initial("__transient__"));
+            if (next != null) next.trimRings();
+            return next;
+        }
         ReentrantLock lock = locks.computeIfAbsent(pairId, k -> new ReentrantLock());
         lock.lock();
         try {
@@ -200,7 +212,13 @@ public class L2Store {
     // ── internals ─────────────────────────────────────────────────────────
 
     private Path pairDir(String pairId) {
-        return baseDir.resolve(pairId);
+        // Session-kind refactor (S3): the key is now the persistent containerId
+        // (PairSession.getL2Key()), and L2 lives under the container's own dir —
+        // {@code <baseDir=sessions/<projectHash>>/<containerId>/l2}, i.e. exactly
+        // SessionRegistry.l2Dir(containerId). Keeps manifest.json (at the container
+        // root) and L2 state cleanly separated, and lets SessionRegistry.delete()
+        // remove the whole container in one rm.
+        return baseDir.resolve(pairId).resolve("l2");
     }
 
     private Path stateFile(String pairId) {

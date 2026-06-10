@@ -283,28 +283,30 @@ public class SessionSendService {
     private String prependPairContextMarker(String currentAppend) {
         try {
             if (project == null) return currentAppend;
-            String sessionId = state.getSessionId();
-            // Find attached pair: by main session id first, fall back to the
-            // most-recently-started pair OWNED BY THIS TAB (covers the
-            // "pair started before first response" window without crossing
-            // tab boundaries — see 2026-05-25 fix in
-            // ClaudeMessageHandler.findAttachedPair). If no windowId is
-            // available (legacy / test contexts), give up rather than guess.
             com.github.claudecodegui.session.pair.PairSessionManager mgr =
                     com.github.claudecodegui.session.pair.PairSessionManager.getInstance(project);
-            com.github.claudecodegui.session.pair.PairSession pair = null;
-            if (sessionId != null && !sessionId.isEmpty()) {
-                pair = mgr.findByMainSession(sessionId);
-            }
+            // Primary: resolve the attached pair by this tab's persistent containerId
+            // (set when a supervised session is created).
+            String cid = state.getContainerId();
+            com.github.claudecodegui.session.pair.PairSession pair =
+                    (cid != null && !cid.isEmpty()) ? mgr.getByContainer(cid) : null;
+            // Fallback: resolve by this tab's windowId. containerId can be null or
+            // arrive late on the live SessionState — for workflow nodes it is stamped
+            // asynchronously, and ANY session swap (loadHistorySession / createNewSession
+            // build a brand-new SessionState) drops it. The windowId, by contrast, is
+            // preserved across swaps and is set on the pair at start, so it reliably
+            // resolves the node's / tab's pair. windowId-scoped = one pair per supervised
+            // tab → cross-tab safe; a normal tab owns no pair, so it still gets no marker.
             if (pair == null) {
                 String windowId = state.getWindowId();
-                if (windowId == null) return currentAppend;
-                pair = mgr.getActivePairsOwnedBy(windowId).stream()
-                        .filter(p -> !p.isDisposed())
-                        .reduce((a, b) -> a.getStartedAt() > b.getStartedAt() ? a : b)
-                        .orElse(null);
+                if (windowId != null) {
+                    pair = mgr.getActivePairsOwnedBy(windowId).stream()
+                            .filter(p -> !p.isDisposed())
+                            .reduce((a, b) -> a.getStartedAt() > b.getStartedAt() ? a : b)
+                            .orElse(null);
+                }
             }
-            if (pair == null) return currentAppend;
+            if (pair == null || pair.isDisposed()) return currentAppend;
             String existing = currentAppend == null ? "" : currentAppend;
             if (existing.startsWith("<!--pair-context:")) return currentAppend;
 

@@ -7,6 +7,7 @@ import com.github.claudecodegui.cache.SessionIndexCache;
 import com.github.claudecodegui.cache.SessionIndexManager;
 import com.github.claudecodegui.provider.claude.ClaudeHistoryReader;
 import com.github.claudecodegui.provider.codex.CodexHistoryReader;
+import com.github.claudecodegui.session.registry.SessionRegistry;
 import com.github.claudecodegui.settings.RemoteModeContext;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -22,6 +23,7 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Base64;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -80,6 +82,18 @@ class HistoryLoadService {
                         historyJson = historyReader.getProjectDataAsJson(projectPath);
                     }
                 }
+
+                // Session-kind refactor (S4): the normal history tab must not leak
+                // the main leg of any supervised / workflow session. This is the
+                // single exclusion point — placed AFTER the local/remote merge
+                // (remote bodies are already path-translated by fetchRemoteProjectData,
+                // local needs none) and BEFORE the webview push, so both modes share
+                // it. sessionId is a UUID (unaffected by path translation) in the same
+                // id space as the claimed set, so the subtraction is exact.
+                // claimedMainSessionIds() is the union of EVERY main-session id a
+                // container ever owned (full mainSessionIds[] set, not just the current
+                // pointer) — a re-run's orphaned prior session is excluded too.
+                historyJson = filterClaimedMainSessions(historyJson);
 
                 // Load favorite data and merge into history data
                 String enhancedJson = enhanceHistoryWithFavorites(historyJson, provider);
@@ -242,6 +256,73 @@ class HistoryLoadService {
 
         } catch (Exception e) {
             LOG.warn("[HistoryHandler] 增强标题数据失败，返回原始数据: " + e.getMessage());
+            return historyJson;
+        }
+    }
+
+    /**
+     * Session-kind refactor (S4): drop every session whose id was claimed by a
+     * supervised / workflow container (its main leg), so the normal history tab
+     * shows only bare sessions. No-op when no containers exist (empty claimed set)
+     * or none of their legs appear in this list. Fail-soft: on any parse error the
+     * unfiltered JSON is returned (better a stray entry than an empty normal tab).
+     */
+    /** Daemon-assembled supervisor user frames all start with this (ai-bridge
+     *  {@code event-summarizer.js}: {@code ## USER MESSAGE [${elapsed}]}). A
+     *  supervisor session's default title (its first user frame) therefore carries
+     *  this signature — used to drop legacy supervisor leaks that have no manifest. */
+    private static final String SUPERVISOR_TITLE_SIGNATURE = "## USER MESSAGE [";
+
+    private String filterClaimedMainSessions(String historyJson) {
+        try {
+            if (context.getProject() == null) return historyJson;
+            // Two reasons a session is a supervised leg, not a real normal chat:
+            //  (a) its id is claimed by a container manifest (precise; new sessions);
+            //  (b) its default title carries the supervisor prompt signature (catches
+            //      LEGACY supervisor sessions that predate the manifest — no claimed
+            //      entry exists for them). We must NOT early-return on an empty claimed
+            //      set, or (b) would never run for the existing leaks.
+            Set<String> claimed = SessionRegistry.getInstance(context.getProject())
+                    .claimedMainSessionIds();
+
+            JsonObject history = new Gson().fromJson(historyJson, JsonObject.class);
+            if (history == null || !history.has("sessions") || !history.get("sessions").isJsonArray()) {
+                return historyJson;
+            }
+            JsonArray sessions = history.getAsJsonArray("sessions");
+            JsonArray kept = new JsonArray();
+            int removedClaimed = 0, removedSignature = 0;
+            for (int i = 0; i < sessions.size(); i++) {
+                JsonObject s = sessions.get(i).getAsJsonObject();
+                String sid = s.has("sessionId") && !s.get("sessionId").isJsonNull()
+                        ? s.get("sessionId").getAsString() : null;
+                if (sid != null && claimed.contains(sid)) {
+                    removedClaimed++;
+                    continue;
+                }
+                // Runs BEFORE enhanceHistoryWithTitles, so `title` is still the raw
+                // first-message text (not a user custom title) — the signature holds.
+                String title = s.has("title") && !s.get("title").isJsonNull()
+                        ? s.get("title").getAsString() : null;
+                if (title != null && title.trim().startsWith(SUPERVISOR_TITLE_SIGNATURE)) {
+                    removedSignature++;
+                    continue;
+                }
+                kept.add(s);
+            }
+            int removed = removedClaimed + removedSignature;
+            if (removed == 0) return historyJson;
+            history.add("sessions", kept);
+            // Keep the count fields (if present) consistent with the filtered list.
+            if (history.has("total")) history.addProperty("total", kept.size());
+            if (history.has("sessionCount")) history.addProperty("sessionCount", kept.size());
+            LOG.info("[HistoryHandler] normal-tab filter: removed " + removedClaimed
+                    + " claimed main leg(s) + " + removedSignature
+                    + " supervisor-signature session(s)");
+            return new Gson().toJson(history);
+        } catch (Exception e) {
+            LOG.warn("[HistoryHandler] normal-history filter failed (returning unfiltered): "
+                    + e.getMessage());
             return historyJson;
         }
     }

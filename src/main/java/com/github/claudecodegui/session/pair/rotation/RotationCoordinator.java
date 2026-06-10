@@ -63,12 +63,16 @@ public class RotationCoordinator {
     public RotationResult execute(PairSession pair, String triggerReason) {
         long t0 = System.currentTimeMillis();
         String pairId = pair.getPairId();
+        // Session-kind refactor (S3): L2 durable state is keyed by the persistent
+        // container id (pairId for legacy/workflow pairs). pairId stays for logs +
+        // daemon supervisorId derivation.
+        String l2Key = pair.getL2Key();
         SupervisorBridge bridge = pair.getSupervisorBridge();
         PairStatusPusher statusPusher = pair.getStatusPusher();
         SupervisorMonitor monitor = pair.getSupervisorMonitor();
 
         // ── 0. Cooldown check ────────────────────────────────────────────
-        L2State l2 = l2Store.read(pairId);
+        L2State l2 = l2Store.read(l2Key);
         if (l2.lastRotation != null) {
             long sinceLast = System.currentTimeMillis() - l2.lastRotation.at;
             if (sinceLast < ROTATION_COOLDOWN_MS) {
@@ -126,9 +130,9 @@ public class RotationCoordinator {
         boolean wasReset = false;
         if (merged.generation >= L2Schema.GENERATION_RESET_THRESHOLD) {
             try {
-                l2Store.archiveKnownConstraints(pairId);
+                l2Store.archiveKnownConstraints(l2Key);
                 // Reload fresh snapshot post-archive (clears knownConstraints + persists).
-                L2State postArchive = l2Store.read(pairId);
+                L2State postArchive = l2Store.read(l2Key);
                 merged.knownConstraints = postArchive.knownConstraints;
                 merged.generation = 0;
                 wasReset = true;
@@ -215,7 +219,7 @@ public class RotationCoordinator {
                 ? (health == HealthState.UNHEALTHY ? "l2_unhealthy" : "l2_fallback")
                 : "producer";
         final int finalGen = newGeneration;
-        l2Store.update(pairId, s -> {
+        l2Store.update(l2Key, s -> {
             s.generation = finalGen;
             s.rotationCount = s.rotationCount + 1;
             L2State.RotationInfo ri = new L2State.RotationInfo();
@@ -236,7 +240,7 @@ public class RotationCoordinator {
         });
 
         // ── 13. snapshot .bak — last-known-good for next generation ──────
-        l2Store.snapshotBackup(pairId);
+        l2Store.snapshotBackup(l2Key);
 
         // ── 14. Notify status pusher + queue banner for next monitor tick ─
         if (statusPusher != null) {

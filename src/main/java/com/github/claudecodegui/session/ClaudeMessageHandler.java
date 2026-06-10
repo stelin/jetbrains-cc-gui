@@ -8,6 +8,7 @@ import com.github.claudecodegui.provider.common.SDKResult;
 import com.github.claudecodegui.session.pair.EventBus;
 import com.github.claudecodegui.session.pair.PairSession;
 import com.github.claudecodegui.session.pair.PairSessionManager;
+import com.github.claudecodegui.session.registry.SessionRegistry;
 import com.github.claudecodegui.util.TokenUsageUtils;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -526,34 +527,37 @@ public class ClaudeMessageHandler implements MessageCallback {
         state.setSessionId(content);
         callbackHandler.notifySessionIdReceived(content);
         LOG.info("Captured session ID: " + content);
-        // Phase 6b (2026-05-24): a pair started before the first turn was
-        // wired with mainSessionId=null; now that the SDK has assigned one,
-        // late-bind it on the manager so MainAIMonitor's L2 records carry
-        // the right sid and findByMainSession works for subsequent lookups.
-        // Best-effort — never break the main turn flow.
-        lateBindSessionIdToPair(content);
-    }
-
-    /**
-     * Phase 6b helper. Finds the attached pair (via the fallback "most recent
-     * active" path, since findByMainSession would still miss — the index isn't
-     * populated yet) and asks PairSessionManager to wire the sid.
-     */
-    private void lateBindSessionIdToPair(String newSessionId) {
-        if (project == null || newSessionId == null || newSessionId.isEmpty()) return;
-        try {
-            PairSession pair = findAttachedPair();
-            if (pair == null) return;
-            String boundSid = pair.getMainSessionId();
-            if (newSessionId.equals(boundSid)) return; // already bound (started with sid)
-            PairSessionManager.getInstance(project)
-                    .bindMainSessionIdToPair(pair.getPairId(), newSessionId);
-            // Session resume (SR7): persist the node's main-AI session id so a
-            // restart can resume its transcript. No-op for non-workflow pairs.
-            com.github.claudecodegui.session.pair.workflow.SupervisorWorkflowManager
-                    .getInstance(project)
-                    .onMainSessionCaptured(pair.getPairId(), newSessionId);
-        } catch (Throwable ignored) { /* never propagate */ }
+        // Session-kind refactor (S3): best-effort backfill the freshly-assigned
+        // main-session id onto the container manifest so the normal history tab
+        // can subtract claimed legs (S4) and restore can resume the main leg (S5).
+        // Off the critical path — never break the main turn flow. Replaces the
+        // deleted lateBindSessionIdToPair glue (pair routing is now containerId-based).
+        String cid = state != null ? state.getContainerId() : null;
+        if (cid != null && !cid.isEmpty() && project != null) {
+            try {
+                SessionRegistry.getInstance(project).bindMainSession(cid, content);
+            } catch (Throwable ignored) { /* never propagate */ }
+        }
+        // Session-kind refactor (S3, review fix): keep the attached pair's live
+        // bindings following the freshly-assigned main-session id — the deleted
+        // lateBindSessionIdToPair did this. Without it the supervised pair's
+        // MainAIMonitor.mainSessionId stays null (it was wired before the first
+        // turn) so main-AI rotation eval never fires, and the workflow node's main
+        // leg is never captured for restart-resume. findAttachedPair resolves by
+        // containerId → null (skipped) for normal sessions. Best-effort, off the
+        // critical path — never break the main turn flow.
+        if (project != null) {
+            try {
+                PairSession pair = findAttachedPair();
+                if (pair != null) {
+                    com.github.claudecodegui.session.pair.MainAIMonitor mainAI = pair.getMainAIMonitor();
+                    if (mainAI != null) mainAI.rebindSessionId(content);
+                    com.github.claudecodegui.session.pair.workflow.SupervisorWorkflowManager
+                            .getInstance(project)
+                            .onMainSessionCaptured(pair.getPairId(), content);
+                }
+            } catch (Throwable ignored) { /* never propagate */ }
+        }
     }
 
     /**
@@ -1271,21 +1275,27 @@ public class ClaudeMessageHandler implements MessageCallback {
     private PairSession findAttachedPair() {
         if (project == null) return null;
         try {
+            // Session-kind refactor (S3): primary resolve by this tab's persistent
+            // containerId (set when a supervised session is created).
             PairSessionManager mgr = PairSessionManager.getInstance(project);
-            String sid = state != null ? state.getSessionId() : null;
-            if (sid != null && !sid.isEmpty()) {
-                PairSession exact = mgr.findByMainSession(sid);
-                if (exact != null) return exact;
+            String cid = state != null ? state.getContainerId() : null;
+            PairSession pair = (cid != null && !cid.isEmpty()) ? mgr.getByContainer(cid) : null;
+            // Fallback: resolve by this tab's windowId. containerId can be null/late
+            // on the live SessionState (stamped asynchronously for workflow nodes, or
+            // dropped when a session is swapped), but the windowId is preserved across
+            // swaps and set on the pair at start. windowId-scoped → cross-tab safe; a
+            // normal tab owns no pair so this still returns null. Mirrors the fallback
+            // in SessionSendService.prependPairContextMarker.
+            if (pair == null) {
+                String windowId = state != null ? state.getWindowId() : null;
+                if (windowId != null) {
+                    pair = mgr.getActivePairsOwnedBy(windowId).stream()
+                            .filter(p -> !p.isDisposed())
+                            .reduce((a, b) -> a.getStartedAt() > b.getStartedAt() ? a : b)
+                            .orElse(null);
+                }
             }
-            // Window-scoped fallback: only consider pairs owned by THIS tab.
-            // Without a windowId we deliberately give up rather than guess —
-            // a missed first-turn event is better than a cross-tab miss-route.
-            String windowId = state != null ? state.getWindowId() : null;
-            if (windowId == null) return null;
-            return mgr.getActivePairsOwnedBy(windowId).stream()
-                    .filter(p -> !p.isDisposed())
-                    .reduce((a, b) -> a.getStartedAt() > b.getStartedAt() ? a : b)
-                    .orElse(null);
+            return (pair != null && !pair.isDisposed()) ? pair : null;
         } catch (Throwable t) {
             // PairSessionManager service may not exist in pure unit tests.
             return null;

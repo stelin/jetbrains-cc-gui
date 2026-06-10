@@ -82,13 +82,16 @@ public class MainAIRotationCoordinator {
         if (pair.isDisposed()) return RotationResult.aborted("pair disposed");
 
         String pairId = pair.getPairId();
+        // Session-kind refactor (S3): L2 keyed by the persistent container id
+        // (pairId fallback for legacy/workflow pairs). pairId stays for logs.
+        String l2Key = pair.getL2Key();
         String oldSid = session.getSessionId();
         if (oldSid == null || oldSid.isEmpty()) {
             return RotationResult.aborted("main AI session id not yet assigned (no turns run)");
         }
 
         // ── 0. Cooldown check (5min since last completed rotation) ───────
-        L2State l2 = l2Store.read(pairId);
+        L2State l2 = l2Store.read(l2Key);
         L2State.MainAIState mainAI = l2.mainAI;
         if (mainAI != null && mainAI.lastRotation != null) {
             long sinceLast = System.currentTimeMillis() - mainAI.lastRotation.at;
@@ -168,7 +171,7 @@ public class MainAIRotationCoordinator {
         // ── 12. Update L2: lastRotation + rotationCount++ ────────────────
         final String handoffSource = degraded ? "l2_fallback" : "producer";
         final long now = System.currentTimeMillis();
-        l2Store.update(pairId, s -> {
+        l2Store.update(l2Key, s -> {
             if (s.mainAI == null) s.mainAI = new L2State.MainAIState();
             // Cleared so the next [SESSION_ID] from the daemon is treated as new
             // (ClaudeMessageHandler.handleSessionId will publish the new id).
@@ -185,7 +188,7 @@ public class MainAIRotationCoordinator {
         });
 
         // ── 13. snapshot .bak ────────────────────────────────────────────
-        l2Store.snapshotBackup(pairId);
+        l2Store.snapshotBackup(l2Key);
 
         // ── 14. Notify status pusher ─────────────────────────────────────
         PairStatusPusher pusher = pair.getStatusPusher();

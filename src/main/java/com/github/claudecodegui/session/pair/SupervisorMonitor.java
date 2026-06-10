@@ -461,7 +461,8 @@ public class SupervisorMonitor {
 
         if (l2Store == null) return;
         try {
-            L2State l2 = l2Store.read(pair.getPairId());
+            // Session-kind refactor (S3): L2 keyed by the persistent container id.
+            L2State l2 = l2Store.read(pair.getL2Key());
             RotationConfig cfg = RotationConfig.loadOrDefault(
                     new CodemossSettingsService().getSupervisorAgentManager());
             RotationTriggers.Trigger trig = RotationTriggers.evaluate(l2, ratio, cfg);
@@ -519,7 +520,7 @@ public class SupervisorMonitor {
         // and post-rotation observers see lifetime degraded/unhealthy totals.
         if (l2Store == null) return;
         try {
-            l2Store.update(pair.getPairId(), s -> {
+            l2Store.update(pair.getL2Key(), s -> {
                 if (s.metrics == null) s.metrics = new L2State.Metrics();
                 if (target == HealthState.DEGRADED) s.metrics.degradedCount += 1;
                 if (target == HealthState.UNHEALTHY) s.metrics.unhealthyCount += 1;

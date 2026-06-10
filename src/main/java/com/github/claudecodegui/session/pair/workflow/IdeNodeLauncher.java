@@ -50,6 +50,12 @@ public final class IdeNodeLauncher implements NodeLauncher {
      * entry may be null.
      */
     private final Map<String, String[]> pendingResume = new ConcurrentHashMap<>();
+    /**
+     * Session-kind refactor (S6): nodeName → persistent container id, staged by
+     * {@link #setPendingContainerId} before each launch and consumed by the next
+     * {@link #startNodePair} (→ {@code StartPairParams.containerId}).
+     */
+    private final Map<String, String> pendingContainerId = new ConcurrentHashMap<>();
 
     public IdeNodeLauncher(Project project) {
         this.project = project;
@@ -64,6 +70,16 @@ public final class IdeNodeLauncher implements NodeLauncher {
             return;
         }
         pendingResume.put(nodeName, new String[]{ supervisorSessionId, mainSessionId, priorPairId });
+    }
+
+    @Override
+    public void setPendingContainerId(String nodeName, String containerId) {
+        if (nodeName == null) return;
+        if (containerId == null || containerId.isEmpty()) {
+            pendingContainerId.remove(nodeName);
+            return;
+        }
+        pendingContainerId.put(nodeName, containerId);
     }
 
     @Override
@@ -152,10 +168,16 @@ public final class IdeNodeLauncher implements NodeLauncher {
             String resumeMainSid = resume != null ? resume[1] : null;
             String priorPairId = resume != null && resume.length > 2 ? resume[2] : null;
 
+            // Session-kind refactor (S6): the node's stable container id, staged at
+            // workflow start. Threaded into StartPairParams so the pair's L2 +
+            // pair_* routing key by it (PairSession.getL2Key() now returns it
+            // instead of the pairId fallback used before S6).
+            String containerId = pendingContainerId.remove(node.name);
+
             PairSessionManager.StartPairParams params = new PairSessionManager.StartPairParams(
                     null, node.supervisorId, planPath == null ? null : planPath.toString(),
                     node.model, node.longContext, node.reasoning, win.getWindowId(),
-                    resumeSupervisorSid);
+                    resumeSupervisorSid, containerId);
             // Carry the prior pair's persisted coordinator-event strip forward.
             params.priorPairId = priorPairId;
             if (win.getChatWindowDelegate() == null
@@ -163,13 +185,26 @@ public final class IdeNodeLauncher implements NodeLauncher {
                 sink.failed("节点窗口未就绪，无法启动监督者");
                 return;
             }
+            // Session-kind refactor: stamp the container id onto the node window's
+            // main-AI SessionState so SessionSendService.prependPairContextMarker
+            // injects the pair-context marker → daemon mounts mcp__main → the node's
+            // main AI calls report_turn_completion (parity with the manual
+            // session_create_supervised path, PairHandler.handleCreateSupervisedImpl).
+            // The resume branch below also rebuilds the session WITH the container id
+            // (loadHistorySession), but a FRESH node never resumes — without this
+            // stamp its main leg would carry a null container and never report.
+            if (containerId != null && !containerId.isEmpty()
+                    && win.getSession() != null && win.getSession().getState() != null) {
+                win.getSession().getState().setContainerId(containerId);
+                LOG.info("[Workflow] node " + node.name + " stamped containerId on main-AI session: " + containerId);
+            }
             // SR10: seed the node window's main-AI session to resume its transcript
             // on its first turn (triggered by the supervisor's first inject_prompt).
             // Best-effort: only if the window exposes a resume hook. Logged so the
             // E2E test (§9.3) can confirm the main-AI resume fired.
             if (resumeMainSid != null && !resumeMainSid.isEmpty()) {
                 try {
-                    win.resumeMainSession(resumeMainSid);
+                    win.resumeMainSession(resumeMainSid, containerId);
                     LOG.info("[Workflow] node " + node.name + " main-AI resume seeded sessionId=" + resumeMainSid);
                 } catch (Throwable t) {
                     LOG.warn("[Workflow] node " + node.name + " main-AI resume seed failed (will start fresh): " + t.getMessage());
@@ -177,6 +212,16 @@ public final class IdeNodeLauncher implements NodeLauncher {
             }
             PairSession pair = win.getChatWindowDelegate().getPairHandler().startPairWired(
                     params, new com.github.claudecodegui.session.pair.protocol.PairBudget());
+            // Session-kind refactor (S6): record the live pairId on the node's
+            // container manifest (internal pointer; no longer the directory key).
+            if (containerId != null && !containerId.isEmpty() && project != null) {
+                try {
+                    com.github.claudecodegui.session.registry.SessionRegistry.getInstance(project)
+                            .setPairId(containerId, pair.getPairId());
+                } catch (Exception e) {
+                    LOG.warn("[Workflow] node " + node.name + " setPairId failed: " + e.getMessage());
+                }
+            }
             handle.pair = pair;
             handle.pairDir = pair.getPairDir();
             sink.pairStarted(pair.getPairId(), pair.getPairDir());

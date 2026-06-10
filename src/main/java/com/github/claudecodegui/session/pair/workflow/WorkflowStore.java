@@ -15,7 +15,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -75,19 +74,9 @@ public final class WorkflowStore {
      * deterministic across restarts). Null/blank base path → {@code "default"}.
      */
     static String projectHash(@Nullable String basePath) {
-        if (basePath == null || basePath.isEmpty()) return "default";
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            byte[] digest = md.digest(basePath.getBytes(StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder();
-            for (int i = 0; i < 8 && i < digest.length; i++) {
-                sb.append(String.format("%02x", digest[i]));
-            }
-            return sb.toString();
-        } catch (Exception e) {
-            // Fall back to a sanitized hashCode — still deterministic per run.
-            return Integer.toHexString(basePath.hashCode());
-        }
+        // Session-kind refactor: single source of truth so WorkflowStore and
+        // SessionRegistry derive the same per-project subdirectory name.
+        return com.github.claudecodegui.util.CodemossPaths.projectHash(basePath);
     }
 
     // ─── definitions ────────────────────────────────────────────────────

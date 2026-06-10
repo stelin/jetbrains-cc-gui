@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from 'react';
 import type { TFunction } from 'i18next';
-import type { ClaudeMessage, HistoryData } from '../types';
-import { sendBridgeEvent } from '../utils/bridge';
+import type { ClaudeMessage, HistoryData, HistoryKind } from '../types';
+import { sendBridgeEvent, sendToJava } from '../utils/bridge';
 
 type ViewMode = 'chat' | 'history' | 'settings' | 'workflow';
 
@@ -38,11 +38,30 @@ interface UseSessionManagementReturn {
   suppressNextStatusToastRef: React.MutableRefObject<boolean>;
   createNewSession: () => void;
   forceCreateNewSession: () => void;
+  /**
+   * Session-kind refactor: reset the main-chat UI for a brand-new supervised
+   * session (interrupt if loading + clear messages/transition). The actual
+   * `session_create_supervised` IPC is sent by PairContext.createSupervisedSession;
+   * this only resets the left-pane chat so the new session starts clean.
+   */
+  beginSupervisedSession: () => void;
   handleConfirmNewSession: () => void;
   handleCancelNewSession: () => void;
   handleConfirmInterrupt: () => void;
   handleCancelInterrupt: () => void;
-  loadHistorySession: (sessionId: string) => void;
+  loadHistorySession: (
+    sessionId: string,
+    opts?: { containerId?: string; kind?: HistoryKind; title?: string }
+  ) => void;
+  /**
+   * Open a history session in a NEW tab (instead of replacing the current tab's
+   * session). Used by the history list so normal AND supervised sessions both
+   * open fresh, correct-kind tabs. Workflow still opens its own top-level view.
+   */
+  openHistoryInNewTab: (
+    sessionId: string,
+    opts?: { containerId?: string; kind?: HistoryKind; title?: string }
+  ) => void;
   deleteHistorySession: (sessionId: string) => void;
   exportHistorySession: (sessionId: string, title: string) => void;
   toggleFavoriteSession: (sessionId: string) => void;
@@ -151,6 +170,17 @@ export function useSessionManagement({
     sendBridgeEvent('create_new_session');
   }, [beginSessionTransition, loading]);
 
+  // Session-kind refactor: reset the left-pane chat for a new supervised
+  // session. No create IPC here — PairContext.createSupervisedSession sends
+  // `session_create_supervised`; this just clears messages/transition so the
+  // new session's main AI starts from a clean slate.
+  const beginSupervisedSession = useCallback(() => {
+    if (loading) {
+      sendBridgeEvent('interrupt_session');
+    }
+    beginSessionTransition(null, null);
+  }, [beginSessionTransition, loading]);
+
   // Confirm new session
   const handleConfirmNewSession = useCallback(() => {
     setShowNewSessionConfirm(false);
@@ -185,18 +215,58 @@ export function useSessionManagement({
     pendingActionRef.current = null;
   }, []);
 
-  // Load history session
-  const loadHistorySession = useCallback((sessionId: string) => {
+  // Load history session.
+  // Session-kind refactor: normal sessions route by sessionId (unchanged);
+  // supervised/workflow route by persistent containerId via a JSON load_session
+  // payload, and workflow restores switch to the workflow view.
+  const loadHistorySession = useCallback((
+    sessionId: string,
+    opts?: { containerId?: string; kind?: HistoryKind; title?: string }
+  ) => {
     // [FIX] Send interrupt signal if AI is responding
     if (loading) {
       sendBridgeEvent('interrupt_session');
     }
 
-    const session = historyDataRef.current?.sessions?.find(s => s.sessionId === sessionId);
-    beginSessionTransition(sessionId, session?.title ?? null);
+    const title = opts?.title
+      ?? historyDataRef.current?.sessions?.find(s => s.sessionId === sessionId)?.title
+      ?? null;
+
+    if (opts?.containerId && opts.kind && opts.kind !== 'normal') {
+      beginSessionTransition(opts.containerId, title);
+      sendToJava('load_session', { containerId: opts.containerId, kind: opts.kind });
+      setCurrentView(opts.kind === 'workflow' ? 'workflow' : 'chat');
+      return;
+    }
+
+    beginSessionTransition(sessionId, title);
     sendBridgeEvent('load_session', sessionId);
     setCurrentView('chat');
   }, [beginSessionTransition, loading, setCurrentView]);
+
+  // Session-kind refactor: open a history session in a NEW tab. Both the normal
+  // and supervised lists route here so each open spawns a fresh tab of the
+  // matching kind (no more "this is a normal tab, open a supervisor tab first"
+  // guard). Java creates the tab, then its webview runs loadHistorySession
+  // in-place via window.onRequestLoadHistory. Workflow keeps its existing
+  // top-level cockpit behaviour (loaded in place, switches the workflow view).
+  const openHistoryInNewTab = useCallback((
+    sessionId: string,
+    opts?: { containerId?: string; kind?: HistoryKind; title?: string }
+  ) => {
+    const kind: HistoryKind = opts?.kind ?? 'normal';
+    if (kind === 'workflow') {
+      loadHistorySession(sessionId, opts);
+      return;
+    }
+    const payload: Record<string, unknown> = { sessionId, kind };
+    if (opts?.containerId) payload.containerId = opts.containerId;
+    if (opts?.title) payload.title = opts.title;
+    // Two-arg form: sendToJava appends ":<payload>" itself. Passing the whole
+    // "type:json" as one arg double-encodes to `...:{json}:{}`, whose trailing
+    // `:{}` makes Java's JsonParser.parseString throw → handler bails → no tab.
+    sendToJava('open_history_in_new_tab', payload);
+  }, [loadHistorySession]);
 
   // Delete history session
   const deleteHistorySession = useCallback((sessionId: string) => {
@@ -306,11 +376,13 @@ export function useSessionManagement({
     suppressNextStatusToastRef,
     createNewSession,
     forceCreateNewSession,
+    beginSupervisedSession,
     handleConfirmNewSession,
     handleCancelNewSession,
     handleConfirmInterrupt,
     handleCancelInterrupt,
     loadHistorySession,
+    openHistoryInNewTab,
     deleteHistorySession,
     exportHistorySession,
     toggleFavoriteSession,

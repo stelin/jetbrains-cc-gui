@@ -42,6 +42,17 @@ public interface NodeLauncher {
     default void setPendingResume(String nodeName, String supervisorSessionId,
                                   String mainSessionId, String priorPairId) { }
 
+    /**
+     * Session-kind refactor (S6): stage the persistent container id for the NEXT
+     * {@link #launch} of {@code nodeName} (the node's SUPERVISED sub-container,
+     * registered at workflow start). Consumed-and-cleared by that launch and
+     * threaded into {@code StartPairParams.containerId} so the node's L2 + pair_*
+     * routing key by the stable container id (survives restart). Default no-op so
+     * test fakes / legacy paths compile unchanged; only {@code IdeNodeLauncher}
+     * honours it.
+     */
+    default void setPendingContainerId(String nodeName, String containerId) { }
+
     /** Jump: focus the node's tab (EDT). No-op when the handle has no live tab. */
     void focus(NodeHandle handle);
 

@@ -121,6 +121,19 @@ public class MainAIMonitor {
     }
 
     /**
+     * Session-kind refactor (S3): the key under which this pair's L2 durable
+     * state lives — the persistent container id when the pair is bound (survives
+     * an IDE restart), else the live {@link #pairId} (temp fallback for legacy /
+     * workflow-node pairs until S6). The {@link #pair} back-reference is injected
+     * right after construction and is always set before any turn-driven L2 write
+     * fires, so this stays consistent across the session.
+     */
+    private String l2Key() {
+        PairSession p = this.pair;
+        return p != null ? p.getL2Key() : pairId;
+    }
+
+    /**
      * Contract State Machine v3 (2026-05-25): true while a turn is in flight
      * (turnStartedAt is set on {@link #onTurnStart} and cleared on
      * {@link #onTurnEnd}). DeadlockGuard reads this to skip retries while the
@@ -232,7 +245,7 @@ public class MainAIMonitor {
             LOG.info("[MainAIMonitor] " + pairId + " rebind " + old + " -> " + newSessionId);
         }
         try {
-            l2Store.update(pairId, s -> {
+            l2Store.update(l2Key(), s -> {
                 if (s.mainAI == null) s.mainAI = new L2State.MainAIState();
                 s.mainAI.sessionId = newSessionId;
                 return s;
@@ -251,7 +264,7 @@ public class MainAIMonitor {
         // answered or superseded — drop the awaiting-user latch.
         clearAwaitingUser();
         try {
-            l2Store.update(pairId, s -> {
+            l2Store.update(l2Key(), s -> {
                 if (s.mainAI == null) s.mainAI = new L2State.MainAIState();
                 if (s.mainAI.sessionId == null && mainSessionId != null) {
                     s.mainAI.sessionId = mainSessionId;
@@ -271,7 +284,7 @@ public class MainAIMonitor {
         long startedAt = turnStartedAt.getAndSet(0L);
         long durationMs = startedAt > 0 ? (now - startedAt) : 0L;
         try {
-            l2Store.update(pairId, s -> {
+            l2Store.update(l2Key(), s -> {
                 if (s.mainAI == null) s.mainAI = new L2State.MainAIState();
                 if (s.mainAI.sessionId == null && mainSessionId != null) {
                     s.mainAI.sessionId = mainSessionId;
@@ -336,7 +349,7 @@ public class MainAIMonitor {
         }
 
         L2State l2;
-        try { l2 = l2Store.read(p.getPairId()); }
+        try { l2 = l2Store.read(l2Key()); }
         catch (Exception e) {
             LOG.warn("[MainAIMonitor] L2 read for trigger eval failed: " + e.getMessage());
             return;
@@ -374,7 +387,7 @@ public class MainAIMonitor {
         if (text == null || text.isBlank()) return;
         long now = System.currentTimeMillis();
         try {
-            l2Store.update(pairId, s -> {
+            l2Store.update(l2Key(), s -> {
                 if (s.mainAI == null) s.mainAI = new L2State.MainAIState();
                 if (s.mainAI.recentUserMessages == null) {
                     s.mainAI.recentUserMessages = new java.util.ArrayList<>();
@@ -398,7 +411,7 @@ public class MainAIMonitor {
         lastErrorAt.set(now);
         long newCount;
         try {
-            L2State updated = l2Store.update(pairId, s -> {
+            L2State updated = l2Store.update(l2Key(), s -> {
                 if (s.mainAI == null) s.mainAI = new L2State.MainAIState();
                 s.mainAI.errorCount += 1;
                 return s;
@@ -425,7 +438,7 @@ public class MainAIMonitor {
     public void onCompactBoundary() {
         long now = System.currentTimeMillis();
         try {
-            l2Store.update(pairId, s -> {
+            l2Store.update(l2Key(), s -> {
                 if (s.mainAI == null) s.mainAI = new L2State.MainAIState();
                 s.mainAI.compactCount += 1;
                 s.mainAI.lastCompactAt = now;
@@ -448,7 +461,7 @@ public class MainAIMonitor {
      */
     public void updateContextUsage(Double ratio, Long used, Long limit) {
         try {
-            l2Store.update(pairId, s -> {
+            l2Store.update(l2Key(), s -> {
                 if (s.mainAI == null) s.mainAI = new L2State.MainAIState();
                 s.mainAI.lastContextRatio = ratio;
                 s.mainAI.lastUsedTokens = used;

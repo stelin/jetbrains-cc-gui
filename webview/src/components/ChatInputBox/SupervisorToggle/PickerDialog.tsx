@@ -82,7 +82,7 @@ export default function PickerDialog({
               return (
                 <div
                   key={agent.id}
-                  className={styles.agentRow}
+                  className={`${styles.agentRow} ${isChecked ? styles.selected : ''}`}
                   onClick={() => setSelectedId(agent.id)}
                 >
                   <div className={`${styles.radioBox} ${isChecked ? styles.checkedRadio : ''}`}>

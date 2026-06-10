@@ -24,6 +24,7 @@
  */
 
 import { loadClaudeSdk, loadZod, isClaudeSdkAvailable } from '../utils/sdk-loader.js';
+import { setupApiKey, buildCliEnv } from '../config/api-config.js';
 import { AsyncStream } from '../utils/async-stream.js';
 import { estimateTokensFromChars } from '../utils/usage-utils.js';
 import { summarizeEvent } from '../services/supervisor/event-summarizer.js';
@@ -476,6 +477,21 @@ export async function startSupervisorSession(params) {
         ...externalMcp.allowedTools,
     ];
 
+    // Credentials + CLI identity. The supervisor runs its OWN Claude SDK session
+    // in the same daemon, but — unlike the main-AI channel (message-sender.js) —
+    // it never set up auth. So when a supervisor turn runs BEFORE any main-AI
+    // request (composer mode: the user talks to the supervisor directly), the
+    // global process.env has no ANTHROPIC_* creds and the SDK 403s ("Request not
+    // allowed"). Mirror the main AI: populate the current provider's creds into
+    // process.env via setupApiKey(), then snapshot them + the CLI identity into
+    // the SDK child via options.env (buildCliEnv). Best-effort — a genuinely
+    // missing key still surfaces the same 403, but a configured one now works.
+    try {
+        setupApiKey();
+    } catch (e) {
+        process.stderr.write(`[supervisor] setupApiKey failed (relying on existing env): ${e?.message || e}\n`);
+    }
+
     // SDK options. Supervisor judgment-only: no project-scoped settings, no
     // file checkpointing. We do still pass a cwd because the SDK requires one.
     const cwd = process.env.IDEA_PROJECT_PATH || process.env.PROJECT_PATH || process.cwd();
@@ -483,6 +499,9 @@ export async function startSupervisorSession(params) {
         prompt: runtime.inputStream,
         options: {
             cwd,
+            // Snapshot the provider creds (set by setupApiKey above) + CLI identity
+            // into the supervisor's SDK child process — same as the main-AI channel.
+            env: buildCliEnv(),
             model: runtime.model,
             maxTurns: 100,
             // 2026-05-28: emit partial-message stream_event frames so the

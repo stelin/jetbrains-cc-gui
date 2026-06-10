@@ -52,11 +52,13 @@ import { FILE_MODIFY_TOOL_NAMES, isToolName } from './utils/toolConstants';
 import type { RewindableMessage } from './components/RewindSelectDialog';
 import { AppDialogs } from './components/AppDialogs';
 import { PairProvider, PairLayout, usePairContext } from './components/SupervisorPair';
+import NewSupervisedDialog from './components/SupervisorPair/NewSupervisedDialog';
 import { WorkflowProvider, WorkflowView, RunStatusBar, EscalationToast } from './components/WorkflowOrchestration';
 import { APP_VERSION } from './version/version';
 import type {
   ClaudeMessage,
   HistoryData,
+  HistoryKind,
   ToolResultBlock,
 } from './types';
 
@@ -231,6 +233,8 @@ const App = () => {
   const [historyData, setHistoryData] = useState<HistoryData | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
   const [addModelDialogOpen, setAddModelDialogOpen] = useState(false);
+  // Session-kind refactor: "new supervised session" picker visibility.
+  const [showNewSupervisedDialog, setShowNewSupervisedDialog] = useState(false);
   const isFirstMountRef = useRef(true);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [customSessionTitle, setCustomSessionTitle] = useState<string | null>(null);
@@ -362,10 +366,10 @@ const App = () => {
   const {
     showNewSessionConfirm, showInterruptConfirm,
     suppressNextStatusToastRef,
-    createNewSession, forceCreateNewSession,
+    createNewSession, forceCreateNewSession, beginSupervisedSession,
     handleConfirmNewSession, handleCancelNewSession,
     handleConfirmInterrupt, handleCancelInterrupt,
-    loadHistorySession, deleteHistorySession, exportHistorySession,
+    loadHistorySession, openHistoryInNewTab, deleteHistorySession, exportHistorySession,
     toggleFavoriteSession, updateHistoryTitle,
   } = useSessionManagement({
     messages, loading, historyData, currentSessionId,
@@ -524,6 +528,43 @@ const App = () => {
       if (usageOutputTokens !== undefined) setUsageOutputTokens(undefined);
     }
   }, [loading, turnEffort, usageOutputTokens, setUsageOutputTokens]);
+
+  // Bridge callback: a freshly-created "新监督者标签页" tab is born supervised.
+  // Java pushes this once on frontend_ready so the new tab auto-opens the
+  // supervisor agent picker (born-at-birth — no in-place normal→supervised swap).
+  useEffect(() => {
+    window.onRequestNewSupervised = () => setShowNewSupervisedDialog(true);
+    return () => {
+      delete window.onRequestNewSupervised;
+    };
+  }, []);
+
+  // Bridge callback: a tab opened via `open_history_in_new_tab` is told, once its
+  // webview is ready, which session to load. We run the in-place loadHistorySession
+  // here so the session loads into THIS (fresh) tab — normal or supervised alike.
+  useEffect(() => {
+    window.onRequestLoadHistory = (json: string) => {
+      try {
+        const o = JSON.parse(json) as {
+          sessionId?: string;
+          containerId?: string;
+          kind?: HistoryKind;
+          title?: string;
+        };
+        if (!o.sessionId && !o.containerId) return;
+        loadHistorySession(o.sessionId ?? '', {
+          containerId: o.containerId,
+          kind: o.kind ?? 'normal',
+          title: o.title,
+        });
+      } catch {
+        /* ignore malformed */
+      }
+    };
+    return () => {
+      delete window.onRequestLoadHistory;
+    };
+  }, [loadHistorySession]);
 
   // Bridge callback: server echoes the effort tier it actually applied to the SDK
   // (parsed from the daemon's "[REASONING_EFFORT] ✓ ... applied options.effort=xxx" log).
@@ -706,11 +747,9 @@ const App = () => {
             updateHistoryTitle(currentSessionId, newTitle);
           }
         }}
-        onOpenSupervisorManager={() => {
-          setSettingsInitialTab('supervisor');
-          setCurrentView('settings');
-        }}
         onOpenWorkflow={() => setCurrentView('workflow')}
+        onNewSupervised={() => sendBridgeEvent('create_new_supervised_tab')}
+        hasMessages={messages.length > 0}
       />
 
       {/* Supervisor workflow orchestration: non-modal run strip + escalation toast.
@@ -868,13 +907,27 @@ const App = () => {
         <HistoryView
           historyData={historyData}
           currentProvider={currentProvider}
-          onLoadSession={loadHistorySession}
+          onLoadSession={openHistoryInNewTab}
           onDeleteSession={deleteHistorySession}
           onExportSession={exportHistorySession}
           onToggleFavorite={toggleFavoriteSession}
           onUpdateTitle={updateHistoryTitle}
         />
       )}
+
+      {/* Session-kind refactor: born-at-birth supervised-session picker. */}
+      <NewSupervisedDialog
+        open={showNewSupervisedDialog}
+        onClose={() => setShowNewSupervisedDialog(false)}
+        onCreated={() => {
+          beginSupervisedSession();
+          setCurrentView('chat');
+        }}
+        onOpenManager={() => {
+          setSettingsInitialTab('supervisor');
+          setCurrentView('settings');
+        }}
+      />
 
       <div id="image-preview-root" />
 

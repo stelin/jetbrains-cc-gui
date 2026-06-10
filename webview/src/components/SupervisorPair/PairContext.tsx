@@ -188,6 +188,15 @@ interface PairContextValue {
    * 1M-context bug report.
    */
   startSupervisorPair: (agent: SupervisorAgent) => void;
+  /**
+   * Session-kind refactor (born-at-birth): create a NEW supervised session.
+   * Unlike {@link startSupervisorPair} (legacy runtime toggle that bolted a
+   * supervisor onto the current main session via {@code pair_start}), this
+   * sends {@code session_create_supervised} so Java registers a container +
+   * starts the pair atomically at creation. Used by the "new supervised
+   * session" entry; the runtime SupervisorToggle is removed.
+   */
+  createSupervisedSession: (agent: SupervisorAgent) => void;
   isPairActive: boolean;
   openManager: () => void;
   registerOpenManager: (fn: () => void) => void;
@@ -199,6 +208,12 @@ interface PairContextValue {
    */
   messagesByAgentId: Record<string, ClaudeMessage[]>;
   pairId: string | null;
+  /**
+   * Session-kind refactor: the persistent containerId of the active supervised
+   * session (born at creation, survives reload/restart). Routing key for all
+   * pair_* IPC; mainSessionId/pairId are internal. Null for normal sessions.
+   */
+  containerId: string | null;
   pendingEscalate: EscalateRequest | null;
   thinkingByAgentId: Record<string, boolean>;
   /**
@@ -359,6 +374,10 @@ export function PairProvider({ children }: PairProviderProps) {
   const [messagesByAgentId, setMessagesByAgentId] = useState<Record<string, ClaudeMessage[]>>({});
   const [streamingByAgentId, setStreamingByAgentId] = useState<Record<string, boolean>>({});
   const [pairId, setPairId] = useState<string | null>(null);
+  // Session-kind refactor: persistent container identity for the active
+  // supervised session. Routing key for pair_* IPC (mirrors pairId, but stable
+  // across reload/restart). Null for normal sessions.
+  const [containerId, setContainerId] = useState<string | null>(null);
   const [pendingEscalate, setPendingEscalate] = useState<EscalateRequest | null>(null);
   const [thinkingByAgentId, setThinkingByAgentId] = useState<Record<string, boolean>>({});
   // 2026-05-28: live per-turn output-token count per supervisor (CLI-style ticker).
@@ -418,6 +437,10 @@ export function PairProvider({ children }: PairProviderProps) {
   const pendingInjectQueueRef = useRef<Array<{ pairId: string; supervisorId: string; prompt: string; directiveId?: string }>>([]);
   const pairIdRef = useRef<string | null>(null);
   useEffect(() => { pairIdRef.current = pairId; }, [pairId]);
+  // Session-kind refactor: keep a ref so IPC senders stamp the current
+  // containerId without re-creating callbacks on every change.
+  const containerIdRef = useRef<string | null>(null);
+  useEffect(() => { containerIdRef.current = containerId; }, [containerId]);
 
   const setSelected = useCallback((next: SelectedSupervisor[]) => {
     setSelectedState(next);
@@ -425,6 +448,7 @@ export function PairProvider({ children }: PairProviderProps) {
       setMessagesByAgentId({});
       setStreamingByAgentId({});
       setPairId(null);
+      setContainerId(null);
       setPendingEscalate(null);
       setThinkingByAgentId({});
       setModelOverrideByAgentId({});
@@ -474,6 +498,7 @@ export function PairProvider({ children }: PairProviderProps) {
     sendToJava(
       `pair_set_model:${JSON.stringify({
         pairId: pid,
+        containerId: containerIdRef.current ?? '',
         supervisorId: agentId,
         model: model ?? '',
       })}`
@@ -486,6 +511,7 @@ export function PairProvider({ children }: PairProviderProps) {
     sendToJava(
       `pair_set_reasoning:${JSON.stringify({
         pairId: pid,
+        containerId: containerIdRef.current ?? '',
         supervisorId: agentId,
         effort,
       })}`
@@ -539,6 +565,51 @@ export function PairProvider({ children }: PairProviderProps) {
 
     try {
       sendToJava(`pair_start:${JSON.stringify(payload)}`);
+    } catch { /* ignore — handler is best-effort */ }
+  }, [setSelected, reasoningByAgentId]);
+
+  // Session-kind refactor (born-at-birth). Creates a NEW supervised session:
+  // resolves the same composer state as startSupervisorPair, seeds `selected`
+  // optimistically, then ships a single `session_create_supervised` so Java
+  // registers a container + starts the pair at creation. The container's
+  // pairId/containerId come back via onSessionCreated / onPairStarted.
+  const createSupervisedSession = useCallback((agent: SupervisorAgent) => {
+    const next: SelectedSupervisor[] = [{
+      agentId: agent.id,
+      name: agent.name,
+      role: 'coordinator',
+      model: agent.model,
+      defaultLongContext: agent.defaultLongContext,
+      defaultReasoning: agent.defaultReasoning,
+    }];
+    setSelected(next);
+
+    let resolvedLongContext: boolean;
+    try {
+      const stored = window.localStorage.getItem(LONG_CONTEXT_KEY);
+      resolvedLongContext = stored === null
+        ? (agent.defaultLongContext ?? false)
+        : stored === '1';
+    } catch {
+      resolvedLongContext = agent.defaultLongContext ?? false;
+    }
+
+    const baseModel = strip1MContextSuffix(agent.model || '');
+    const effectiveModel = baseModel
+      ? apply1MContextSuffix(baseModel, resolvedLongContext)
+      : '';
+
+    const effectiveReasoning: ReasoningEffort =
+      reasoningByAgentId[agent.id] ??
+      ((agent.defaultReasoning as ReasoningEffort | undefined) ?? 'medium');
+
+    const payload: Record<string, unknown> = { agentId: agent.id };
+    if (effectiveModel) payload.model = effectiveModel;
+    payload.longContextEnabled = resolvedLongContext;
+    payload.reasoningEffort = effectiveReasoning;
+
+    try {
+      sendToJava(`session_create_supervised:${JSON.stringify(payload)}`);
     } catch { /* ignore — handler is best-effort */ }
   }, [setSelected, reasoningByAgentId]);
 
@@ -700,6 +771,7 @@ export function PairProvider({ children }: PairProviderProps) {
     const pid = pairIdRef.current;
     if (pid) {
       const payload: Record<string, unknown> = { pairId: pid, choice };
+      if (containerIdRef.current) payload.containerId = containerIdRef.current;
       if (note) payload.note = note;
       sendToJava(`pair_human_response:${JSON.stringify(payload)}`);
     }
@@ -716,6 +788,7 @@ export function PairProvider({ children }: PairProviderProps) {
       if (!trimmed) return;
       const pid = pairIdRef.current ?? '';
       const payload: Record<string, unknown> = { pairId: pid, text: trimmed };
+      if (containerIdRef.current) payload.containerId = containerIdRef.current;
       if (attachments && attachments.length > 0) {
         payload.attachments = attachments;
       }
@@ -853,6 +926,7 @@ export function PairProvider({ children }: PairProviderProps) {
     const prevSupervisorLiveUsage = window.onSupervisorLiveUsage;
     const prevPairStatus = window.onPairStatusUpdate;
     const prevPairResume = window.onPairResume;
+    const prevSessionCreated = window.onSessionCreated;
     // Protocol v2 (2026-05-24): non-blocking alert from record_alert.
     const prevAlert = window.onPairAlert;
     const prevNotice = window.onPairNotice;
@@ -898,6 +972,7 @@ export function PairProvider({ children }: PairProviderProps) {
       try {
         const o = JSON.parse(json) as {
           pairId?: string;
+          containerId?: string;
           agentId?: string;
           agentName?: string;
           model?: string;
@@ -905,6 +980,16 @@ export function PairProvider({ children }: PairProviderProps) {
           defaultReasoning?: string;
         };
         if (o.pairId) setPairId(o.pairId);
+        // Restoring/switching into a DIFFERENT supervised container in THIS tab
+        // (e.g. opening a supervised history session while another supervisor is
+        // already active): the previous session's `selected` + messages must be
+        // dropped so the reopened session shows cleanly. Detected by comparing the
+        // incoming containerId against the one currently held (ref read before the
+        // state update, so it still holds the previous value here).
+        const containerChanged = !!o.containerId
+          && containerIdRef.current !== null
+          && containerIdRef.current !== o.containerId;
+        if (o.containerId) setContainerId(o.containerId);
         // 2026-06-05 (cockpit supervisor-pane race fix): a workflow node's
         // floating window realizes its webview immediately (before its pair
         // finishes starting), so its frontend_ready → replayActivePairs usually
@@ -913,14 +998,12 @@ export function PairProvider({ children }: PairProviderProps) {
         // `selected`, the right pane (gated on selected.length > 0) never shows,
         // leaving only the main-AI pane. onPairStarted is pushed exactly when the
         // pair goes active to the (already-mounted) node webview, so use it to
-        // seed `selected` here. Only when empty: the composer path has already
-        // called setSelected with the user's richer per-agent config, and the
-        // "pair active before webview mounts" case is still covered by
-        // onPairResume.
+        // seed `selected` here. Only when empty (composer set its richer config) —
+        // UNLESS the container changed, in which case we replace the stale agent.
         if (o.agentId) {
           const agentId = o.agentId;
           setSelectedState((prev) =>
-            prev.length > 0
+            (prev.length > 0 && !containerChanged)
               ? prev
               : [{
                   agentId,
@@ -932,11 +1015,18 @@ export function PairProvider({ children }: PairProviderProps) {
                 }]
           );
         }
+        // Clear the previous session's supervisor messages/streaming so the new
+        // session's history replay (onSupervisorHistoryLoad) starts clean.
+        if (containerChanged) {
+          setMessagesByAgentId({});
+          setStreamingByAgentId({});
+        }
       } catch { /* ignore */ }
     };
 
     window.onPairStopped = () => {
       setPairId(null);
+      setContainerId(null);
       setMessagesByAgentId({});
       setStreamingByAgentId({});
       setPendingEscalate(null);
@@ -1198,6 +1288,22 @@ export function PairProvider({ children }: PairProviderProps) {
               }
               blocks.push({ type: 'tool_use', id: b.id ?? `act_${turnStr}`,
                 name: 'mcp__supervisor__emit_action', input: { action, reason, payload } } as ClaudeContentOrResultBlock);
+              // Parity with the live daemon's dispatchDecisions (ActionRouter):
+              // a `decisions[]` array riding on the emit_action is expanded into
+              // individual decision cards — the SAME mcp__supervisor__decision_record
+              // / SupervisorDecisionBlock the live onPairActionEvent(kind=
+              // 'decision_record') renders. Without this, restored history shows
+              // ONE action card with the decisions buried in its payload, while a
+              // live run shows N separate decision cards — the style mismatch.
+              const decisions = Array.isArray(payload.decisions) ? payload.decisions as unknown[] : [];
+              decisions.forEach((dec, di) => {
+                if (!dec || typeof dec !== 'object') return;
+                const d = dec as Record<string, unknown>;
+                const step = (typeof d.step === 'string' || typeof d.step === 'number')
+                  ? String(d.step) : String(di);
+                blocks.push({ type: 'tool_use', id: `dec_${turnStr}_${step}`,
+                  name: 'mcp__supervisor__decision_record', input: d } as ClaudeContentOrResultBlock);
+              });
               continue;
             }
             blocks.push(block as ClaudeContentOrResultBlock);
@@ -1301,6 +1407,7 @@ export function PairProvider({ children }: PairProviderProps) {
       try {
         const o = JSON.parse(json) as {
           pairId?: string;
+          containerId?: string;
           agentId?: string;
           name?: string;
           model?: string;
@@ -1317,6 +1424,43 @@ export function PairProvider({ children }: PairProviderProps) {
           defaultReasoning: o.defaultReasoning,
         }]);
         if (o.pairId) setPairId(o.pairId);
+        if (o.containerId) setContainerId(o.containerId);
+      } catch { /* ignore malformed */ }
+    };
+
+    // Session-kind refactor: pushed when a `session_create_supervised` (or a
+    // restored supervised container) finishes registering on Java. Seeds
+    // containerId + pairId + selected so the born-at-birth supervised session
+    // shows its pane without the (removed) runtime toggle. Mirrors onPairStarted
+    // but always carries the persistent containerId.
+    window.onSessionCreated = (json: string) => {
+      try {
+        const o = JSON.parse(json) as {
+          containerId?: string;
+          pairId?: string;
+          agentId?: string;
+          agentName?: string;
+          model?: string;
+          defaultLongContext?: boolean;
+          defaultReasoning?: string;
+        };
+        if (o.containerId) setContainerId(o.containerId);
+        if (o.pairId) setPairId(o.pairId);
+        if (o.agentId) {
+          const agentId = o.agentId;
+          setSelectedState((prev) =>
+            prev.length > 0
+              ? prev
+              : [{
+                  agentId,
+                  name: o.agentName ?? agentId,
+                  role: 'coordinator',
+                  model: o.model,
+                  defaultLongContext: o.defaultLongContext,
+                  defaultReasoning: o.defaultReasoning,
+                }]
+          );
+        }
       } catch { /* ignore malformed */ }
     };
 
@@ -1482,6 +1626,7 @@ export function PairProvider({ children }: PairProviderProps) {
       window.onPairThinking = prevThinking;
       window.onPairStatusUpdate = prevPairStatus;
       window.onPairResume = prevPairResume;
+      window.onSessionCreated = prevSessionCreated;
       window.onPairAlert = prevAlert;
       window.onPairNotice = prevNotice;
       window.onSupervisorLiveUsage = prevSupervisorLiveUsage;
@@ -1497,7 +1642,7 @@ export function PairProvider({ children }: PairProviderProps) {
   useEffect(() => {
     if (!pairId) return;
     try {
-      sendToJava(`pair_webview_ready:${JSON.stringify({ pairId })}`);
+      sendToJava(`pair_webview_ready:${JSON.stringify({ pairId, containerId: containerIdRef.current ?? undefined })}`);
       console.info('[INJECT_TRACE] PairProvider sent pair_webview_ready', { pairId });
     } catch (err) {
       console.warn('[INJECT_TRACE] PairProvider sending pair_webview_ready failed', err);
@@ -1538,11 +1683,13 @@ export function PairProvider({ children }: PairProviderProps) {
       selected,
       setSelected,
       startSupervisorPair,
+      createSupervisedSession,
       isPairActive: selected.length > 0,
       openManager,
       registerOpenManager,
       messagesByAgentId,
       pairId,
+      containerId,
       pendingEscalate,
       thinkingByAgentId,
       streamingByAgentId,
@@ -1574,10 +1721,12 @@ export function PairProvider({ children }: PairProviderProps) {
       selected,
       setSelected,
       startSupervisorPair,
+      createSupervisedSession,
       openManager,
       registerOpenManager,
       messagesByAgentId,
       pairId,
+      containerId,
       pendingEscalate,
       thinkingByAgentId,
       streamingByAgentId,
@@ -1620,11 +1769,13 @@ export function usePairContext(): PairContextValue {
     selected: [],
     setSelected: () => { /* no-op */ },
     startSupervisorPair: () => { /* no-op */ },
+    createSupervisedSession: () => { /* no-op */ },
     isPairActive: false,
     openManager: () => { /* no-op */ },
     registerOpenManager: () => { /* no-op */ },
     messagesByAgentId: {},
     pairId: null,
+    containerId: null,
     pendingEscalate: null,
     thinkingByAgentId: {},
     streamingByAgentId: {},

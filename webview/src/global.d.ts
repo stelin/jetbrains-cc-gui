@@ -577,6 +577,45 @@ interface Window {
   onPairResume?: (json: string) => void;
 
   /**
+   * Session-kind refactor (containerId model): pushed by Java right after a
+   * `session_create_supervised` (or workflow node) container is registered and
+   * its pair started. Payload mirrors onPairStarted plus the persistent
+   * containerId: { containerId, kind, pairId?, agentId?, agentName?, model?,
+   * defaultLongContext?, defaultReasoning? }. PairContext uses it to seed
+   * containerId + selected without going through the (removed) runtime toggle.
+   */
+  onSessionCreated?: (json: string) => void;
+
+  /**
+   * Born-at-birth supervisor tab ("新监督者标签页"): pushed once by Java on the
+   * first `frontend_ready` of a tab created via `create_new_supervised_tab`, so
+   * the fresh tab auto-opens the supervisor agent picker.
+   */
+  onRequestNewSupervised?: () => void;
+
+  /**
+   * History-in-new-tab: pushed once by Java on the first `frontend_ready` of a
+   * tab created via `open_history_in_new_tab`. Carries JSON `{sessionId,
+   * containerId?, kind}` so the fresh tab loads that session in-place.
+   */
+  onRequestLoadHistory?: (json: string) => void;
+
+  /**
+   * Session-kind refactor: supervised-session history list (read from the
+   * SessionRegistry manifests, kind=supervised, parents excluded). Payload is
+   * the same HistoryData shape as setHistoryData but each session carries
+   * { containerId, kind:'supervised', agentId }.
+   */
+  onSupervisedHistory?: (json: string) => void;
+
+  /**
+   * Session-kind refactor: workflow-run history list (kind=workflow containers).
+   * Payload is HistoryData-shaped; each session carries
+   * { containerId, kind:'workflow', childCount }.
+   */
+  onWorkflowHistory?: (json: string) => void;
+
+  /**
    * Update prompts list
    */
   updatePrompts?: (json: string) => void;

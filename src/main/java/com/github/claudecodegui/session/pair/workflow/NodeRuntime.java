@@ -21,6 +21,15 @@ public class NodeRuntime {
     public NodeStatus status = NodeStatus.PENDING;
 
     public String pairId;
+    /**
+     * Session-kind refactor (S6): the node's persistent SUPERVISED container id
+     * (registered at workflow start with {@code parentContainerId = wfId}, so it
+     * stays hidden behind the workflow container in the supervised history tab).
+     * Distinct from {@link #pairId} — that is the internal active-pair id,
+     * regenerated on each (re)dispatch; {@code containerId} is stable across
+     * re-runs and is the node's L2 + pair_* routing key (PairSession.getL2Key()).
+     */
+    public String containerId;
     public String windowId;
     public String completionReportPath;
     public String escalationReason;

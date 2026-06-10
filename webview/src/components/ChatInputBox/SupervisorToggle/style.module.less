@@ -126,6 +126,19 @@
     background: var(--vscode-list-hoverBackground);
   }
 
+  // Currently-selected agent: clear full-row highlight + accent ring so it's
+  // obvious which supervisor is picked (matches the PlanApprovalDialog option
+  // pattern: bg tint + accent border). box-shadow ring avoids layout shift on
+  // the otherwise-borderless row.
+  &.selected {
+    background: var(--bg-active, var(--vscode-list-activeSelectionBackground, var(--vscode-list-hoverBackground)));
+    box-shadow: inset 0 0 0 1px var(--accent-primary, var(--vscode-focusBorder, var(--vscode-button-background)));
+
+    &:hover {
+      background: var(--bg-active, var(--vscode-list-activeSelectionBackground, var(--vscode-list-hoverBackground)));
+    }
+  }
+
   &.disabled {
     opacity: 0.5;
     cursor: not-allowed;
@@ -163,7 +176,7 @@
   background: var(--vscode-input-background);
 
   &.checkedRadio {
-    border-color: var(--vscode-button-background);
+    border-color: var(--accent-primary, var(--vscode-button-background));
   }
 }
 
@@ -171,7 +184,7 @@
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--vscode-button-background);
+  background: var(--accent-primary, var(--vscode-button-background));
 }
 
 .agentMeta {

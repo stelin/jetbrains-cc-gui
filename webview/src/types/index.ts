@@ -65,7 +65,22 @@ export interface HistorySessionSummary {
   favoritedAt?: number;
   provider?: string; // 'claude' or 'codex'
   fileSize?: number;
+  /**
+   * Session-kind refactor (containerId model): present for supervised/workflow
+   * history entries. Normal sessions omit it (they have no container — they
+   * live as bare .claude/projects jsonl). Restore routes by containerId when set.
+   */
+  containerId?: string;
+  /** 'normal' | 'supervised' | 'workflow'. Absent ⇒ treat as 'normal'. */
+  kind?: 'normal' | 'supervised' | 'workflow';
+  /** Supervised: the bound supervisor agent id (shown as a badge in the list). */
+  agentId?: string;
+  /** Workflow: number of child node containers (shown as a badge). */
+  childCount?: number;
 }
+
+/** Session-kind tabs in the history view (session-container refactor). */
+export type HistoryKind = 'normal' | 'supervised' | 'workflow';
 
 export interface HistoryData {
   success: boolean;

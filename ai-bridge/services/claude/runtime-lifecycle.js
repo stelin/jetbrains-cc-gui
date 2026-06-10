@@ -1,6 +1,7 @@
 import { AsyncStream } from '../../utils/async-stream.js';
 import { loadClaudeSdk } from '../../utils/sdk-loader.js';
 import { createPreToolUseHook, normalizePermissionMode } from './permission-mode.js';
+import { buildMainAiMcpServer, MAIN_MCP_NAME } from './main-ai-tools.js';
 import {
   beginRuntimeTurn,
   cleanupStaleAnonymousRuntimes as cleanupAnonymousFromRegistry,
@@ -16,7 +17,7 @@ import {
 
 let cachedQueryFn = null;
 
-export function buildRuntimeSignature(options, systemPromptAppend, streamingEnabled, runtimeSessionEpoch) {
+export function buildRuntimeSignature(options, systemPromptAppend, streamingEnabled, runtimeSessionEpoch, pairId) {
   const material = {
     cwd: options.cwd || '',
     additionalDirectories: options.additionalDirectories || [],
@@ -24,6 +25,11 @@ export function buildRuntimeSignature(options, systemPromptAppend, streamingEnab
     streamingEnabled: !!streamingEnabled,
     runtimeSessionEpoch: runtimeSessionEpoch || '',
     model: options.model || '',
+    // Pair mode: include pairId so a Pair-mode runtime (which mounts the
+    // mcp__main report_turn_completion server) is NEVER reused by a non-Pair
+    // request and vice versa. Same pairId keeps reusing across back-to-back
+    // Pair turns, which is what we want.
+    pairId: pairId || '',
     // Toggling 'ultra' (ultracode) flips workflow orchestration, which the SDK
     // only reads at query creation. Including it here forces a clean recreation
     // when the user switches into/out of Ultra. Plain effort levels are NOT in
@@ -84,6 +90,14 @@ async function createRuntime(requestContext, callbacks) {
   const queryFn = await ensureQueryFn();
   const initialPermissionMode = normalizePermissionMode(requestContext.permissionMode);
 
+  // Pair mode: when Java attaches a supervisor Pair, buildRequestContext sets
+  // requestContext.pairContext.pairId (extracted from the <!--pair-context-->
+  // marker). The runtime then mounts the mcp__main MCP server exposing
+  // report_turn_completion. Non-Pair requests skip it — legacy behaviour fully
+  // preserved (pairId stays null → no extra server, no behaviour change).
+  const pairContext = requestContext.pairContext || null;
+  const pairId = pairContext?.pairId || null;
+
   const runtime = {
     closed: false,
     sessionId: requestContext.requestedSessionId || null,
@@ -99,6 +113,12 @@ async function createRuntime(requestContext, callbacks) {
     stderrLines: [],
     query: null,
     inputStream: new AsyncStream(),
+    // Pair-mode bookkeeping. report_turn_completion tags its [TURN_REPORT]
+    // line with these so the Java EventBus can correlate the report back to
+    // the supervisor's outstanding directive.
+    pairId,
+    activeDirectiveId: pairContext?.activeDirectiveId || null,
+    currentTurnId: null,
     // Mutable cell holding the per-turn windowId. The PreToolUse hook closes
     // over this ref (not the value) so each AskUserQuestion uses the
     // CURRENT turn's windowId. Set by applyDynamicControls on every reuse;
@@ -145,6 +165,22 @@ async function createRuntime(requestContext, callbacks) {
     }]
   };
 
+  // mcp__main MCP server (Pair mode only). report_turn_completion writes a
+  // [TURN_REPORT] NDJSON line that the Java EventBus consumes. A build failure
+  // degrades gracefully (Pair still runs, just without the explicit report).
+  if (pairId) {
+    try {
+      const mainMcp = await buildMainAiMcpServer(runtime);
+      options.mcpServers = {
+        ...(options.mcpServers || {}),
+        [MAIN_MCP_NAME]: mainMcp,
+      };
+    } catch (err) {
+      console.error('[LIFECYCLE] buildMainAiMcpServer failed (Pair mode degraded, '
+        + 'report_turn_completion will be unavailable):', err?.message || err);
+    }
+  }
+
   runtime.query = queryFn({
     prompt: runtime.inputStream,
     options
@@ -154,7 +190,8 @@ async function createRuntime(requestContext, callbacks) {
 
   console.log('[LIFECYCLE] createRuntime sessionId=' + (runtime.sessionId || '(new)')
     + ' epoch=' + (runtime.runtimeSessionEpoch || '(none)')
-    + ' signature=' + runtime.runtimeSignature);
+    + ' signature=' + runtime.runtimeSignature
+    + (pairId ? ' pairId=' + pairId + ' (mcp__main mounted)' : ''));
 
   return runtime;
 }

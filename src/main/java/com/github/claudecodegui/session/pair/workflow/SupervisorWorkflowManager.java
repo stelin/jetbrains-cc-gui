@@ -5,6 +5,8 @@ import com.github.claudecodegui.session.pair.MainAIMonitor;
 import com.github.claudecodegui.session.pair.SupervisorMonitor;
 import com.github.claudecodegui.session.pair.plan.Plan;
 import com.github.claudecodegui.session.pair.plan.PlanStateMachine;
+import com.github.claudecodegui.session.registry.SessionKind;
+import com.github.claudecodegui.session.registry.SessionRegistry;
 import com.github.claudecodegui.settings.CodemossSettingsService;
 import com.github.claudecodegui.settings.RemoteModeContext;
 import com.google.gson.Gson;
@@ -292,6 +294,16 @@ public final class SupervisorWorkflowManager implements Disposable {
         return e != null && (e.state == WorkflowState.RUNNING || e.state == WorkflowState.PAUSED);
     }
 
+    /**
+     * Session-kind refactor (S6): per-project session ledger. Null in unit tests
+     * that construct the manager without a {@link Project} — callers null-check so
+     * the scheduler core stays IDE-free.
+     */
+    @Nullable
+    private SessionRegistry sessionRegistry() {
+        return project != null ? SessionRegistry.getInstance(project) : null;
+    }
+
     // ─── run / abort / jump / report (scheduler thread; §8) ──────────────
 
     /** §8.2 — single-workflow lock + cycle check + clamp concurrency, then pump. */
@@ -332,6 +344,28 @@ public final class SupervisorWorkflowManager implements Disposable {
             pairToNode.clear();
             handles.clear();
             exec.state = WorkflowState.RUNNING;
+
+            // Session-kind refactor (S6): the workflow becomes a container (stable
+            // id == wfId) + one SUPERVISED child container per node (parent = wfId,
+            // so child nodes stay hidden behind the workflow in the supervised tab).
+            // Idempotent re-run: the fixed-id workflow register no-ops if present,
+            // and rt.containerId is only assigned when still null. WorkflowStore
+            // (definition/execution) is untouched — the manifest is purely the
+            // history ledger + claimed-set source, aligned by containerId == wfId.
+            SessionRegistry registry = sessionRegistry();
+            if (registry != null) {
+                if (registry.get(def.id) == null) {
+                    registry.register(SessionKind.WORKFLOW, null, def.name, null, def.id);
+                }
+                for (Map.Entry<String, NodeRuntime> e : exec.nodes.entrySet()) {
+                    NodeRuntime rt = e.getValue();
+                    if (rt != null && rt.containerId == null) {
+                        WorkflowNode wn = nameToNode.get(e.getKey());
+                        rt.containerId = registry.register(SessionKind.SUPERVISED, def.id,
+                                e.getKey(), wn != null ? wn.supervisorId : null, null);
+                    }
+                }
+            }
 
             LOG.info("[Workflow] start wf=" + def.id + " nodes=" + def.nodesSafe().size()
                     + " concurrency=" + n);
@@ -789,6 +823,9 @@ public final class SupervisorWorkflowManager implements Disposable {
         }
 
         final String nodeName = node.name;
+        // Session-kind refactor (S6): stage the node's stable container id so the
+        // launcher threads it into StartPairParams (→ the pair's L2 / routing key).
+        launcher.setPendingContainerId(nodeName, rt.containerId);
         launcher.launch(node, planPath, new NodeLauncher.Sink() {
             @Override
             public void tabCreated(String windowId, NodeHandle handle) {
@@ -1336,13 +1373,26 @@ public final class SupervisorWorkflowManager implements Disposable {
                 return;
             }
             rt.supervisorSessionId = sessionId;
+            // Session-kind refactor (S6): mirror into the container manifest (the
+            // history ledger + restore source). Best-effort; never break capture.
+            SessionRegistry registry = sessionRegistry();
+            if (registry != null && rt.containerId != null) {
+                try { registry.setSupervisorSession(rt.containerId, sessionId, rt.supervisorGeneration); }
+                catch (Exception ignored) { /* best-effort */ }
+            }
             // Best-effort: also snapshot the main-AI session id if it's already
             // bound (it usually binds later, on the first main-AI turn — see
             // onMainSessionCaptured for that path).
             NodeHandle h = handles.get(name);
             if (h != null && h.pair != null && rt.mainSessionId == null) {
                 String msid = h.pair.getMainSessionId();
-                if (msid != null && !msid.isEmpty()) rt.mainSessionId = msid;
+                if (msid != null && !msid.isEmpty()) {
+                    rt.mainSessionId = msid;
+                    if (registry != null && rt.containerId != null) {
+                        try { registry.bindMainSession(rt.containerId, msid); }
+                        catch (Exception ignored) { /* best-effort */ }
+                    }
+                }
             }
             LOG.info("[Workflow] node " + name + " captured supervisorSessionId=" + sessionId);
             persist();
@@ -1364,6 +1414,14 @@ public final class SupervisorWorkflowManager implements Disposable {
             NodeRuntime rt = exec.nodes.get(name);
             if (rt == null || mainSessionId.equals(rt.mainSessionId)) return;
             rt.mainSessionId = mainSessionId;
+            // Session-kind refactor (S6): append to the container's owned main-session
+            // set (the FULL set, so a reset-in-place re-run's old main leg stays
+            // claimed and never leaks into the normal history tab). Best-effort.
+            SessionRegistry registry = sessionRegistry();
+            if (registry != null && rt.containerId != null) {
+                try { registry.bindMainSession(rt.containerId, mainSessionId); }
+                catch (Exception ignored) { /* best-effort */ }
+            }
             LOG.info("[Workflow] node " + name + " captured mainSessionId=" + mainSessionId);
             persist();
         });

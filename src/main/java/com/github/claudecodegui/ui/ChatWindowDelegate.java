@@ -105,6 +105,17 @@ public class ChatWindowDelegate {
         void setSlashCommandsFetched(boolean fetched);
         void setFetchedSlashCommandsCount(int count);
         void persistTabSessionState();
+        /**
+         * Read-and-clear the born-at-birth supervisor-tab marker. {@code true}
+         * exactly once, on the first {@code frontend_ready} of a "新监督者标签页".
+         */
+        boolean consumePendingSupervised();
+        /**
+         * Read-and-clear the staged history-load JSON ({@code {sessionId,
+         * containerId, kind}}). Non-null exactly once, on the first
+         * {@code frontend_ready} of a tab opened via {@code open_history_in_new_tab}.
+         */
+        String consumePendingHistoryLoad();
     }
 
     private final DelegateHost host;
@@ -347,6 +358,38 @@ public class ChatWindowDelegate {
         HistoryHandler historyHandler = new HistoryHandler(handlerContext);
         historyHandler.setSessionLoadCallback((sessionId, projectPath) ->
             host.getSessionLifecycleManager().loadHistorySession(sessionId, projectPath));
+        // Session-kind refactor (S5): supervised restore reaches this tab's window
+        // (main-AI leg) + PairHandler (supervisor leg) through ChatWindowDelegate,
+        // which owns both. Reuses loadHistorySession (the SR10 resume mechanism, same
+        // as the normal sessionLoadCallback above + ClaudeChatWindow.resumeMainSession)
+        // and PairHandler.startPairWired — no new resume machinery.
+        historyHandler.setSupervisedRestoreBridge(new HistoryHandler.SupervisedRestoreBridge() {
+            @Override
+            public void resumeMainSession(String mainSessionId, String containerId) {
+                if (mainSessionId == null || mainSessionId.isEmpty()) return; // null-safe: skip main leg
+                Runnable r = () -> {
+                    try {
+                        String projectPath = host.getSessionLifecycleManager().determineWorkingDirectory();
+                        host.getSessionLifecycleManager().loadHistorySession(mainSessionId, projectPath, containerId);
+                    } catch (Exception e) {
+                        LOG.warn("[ChatWindowDelegate] supervised main-AI resume failed: " + e.getMessage());
+                    }
+                };
+                com.intellij.openapi.application.Application app = ApplicationManager.getApplication();
+                if (app == null || app.isDispatchThread()) r.run(); else app.invokeLater(r);
+            }
+            @Override
+            public com.github.claudecodegui.session.pair.PairSession startSupervisorPair(
+                    com.github.claudecodegui.session.pair.PairSessionManager.StartPairParams params) {
+                try {
+                    return ChatWindowDelegate.this.pairHandler.startPairWired(
+                            params, new com.github.claudecodegui.session.pair.protocol.PairBudget());
+                } catch (Exception e) {
+                    LOG.warn("[ChatWindowDelegate] supervised pair resume failed: " + e.getMessage());
+                    return null;
+                }
+            }
+        });
         host.setHistoryHandler(historyHandler);
         messageDispatcher.registerHandler(historyHandler);
 
@@ -515,6 +558,24 @@ public class ChatWindowDelegate {
             catch (Exception e) { LOG.warn("[ChatWindowDelegate] replayActivePairs failed: " + e.getMessage()); }
         }
         host.persistTabSessionState();
+
+        // Born-at-birth supervisor tab ("新监督者标签页"): once the fresh tab's
+        // webview is up, auto-open the supervisor agent picker. Consumed once so a
+        // later webview reload won't re-prompt over an active session.
+        if (host.consumePendingSupervised()) {
+            LOG.info("[ChatWindowDelegate] Pending supervisor tab — opening agent picker");
+            host.callJavaScript("onRequestNewSupervised");
+        }
+
+        // Tab opened to load a history session (normal or supervised): now that
+        // its webview is ready, hand it the {sessionId, containerId, kind} payload
+        // so it runs its own (in-place) loadHistorySession and the session loads
+        // into THIS fresh tab. Consumed once so a reload doesn't re-load.
+        String pendingHistoryLoad = host.consumePendingHistoryLoad();
+        if (pendingHistoryLoad != null && !pendingHistoryLoad.isEmpty()) {
+            LOG.info("[ChatWindowDelegate] Pending history load — " + pendingHistoryLoad);
+            host.callJavaScript("onRequestLoadHistory", pendingHistoryLoad);
+        }
 
         if (pendingQuickFixPrompt != null && pendingQuickFixCallback != null) {
             LOG.info("Processing pending QuickFix message after frontend ready");

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { HistoryData, HistorySessionSummary } from '../../types';
+import type { HistoryData, HistorySessionSummary, HistoryKind } from '../../types';
 import VirtualList from './VirtualList';
 import { extractCommandMessageContent } from '../../utils/messageUtils';
 import { sendBridgeEvent } from '../../utils/bridge';
@@ -13,7 +13,10 @@ const DEEP_SEARCH_TIMEOUT_MS = 30000;
 interface HistoryViewProps {
   historyData: HistoryData | null;
   currentProvider?: string; // Current provider (claude or codex)
-  onLoadSession: (sessionId: string) => void;
+  onLoadSession: (
+    sessionId: string,
+    opts?: { containerId?: string; kind?: HistoryKind; title?: string }
+  ) => void;
   onDeleteSession: (sessionId: string) => void; // Delete session callback
   onExportSession: (sessionId: string, title: string) => void; // Export session callback
   onToggleFavorite: (sessionId: string) => void; // Toggle favorite callback
@@ -66,13 +69,16 @@ const deduplicateHistorySessions = (sessions: HistorySessionSummary[]) => {
   const deduplicated = new Map<string, HistorySessionSummary>();
 
   for (const session of sessions) {
-    if (!session?.sessionId) {
+    // Session-kind refactor: supervised/workflow rows are keyed by their
+    // persistent containerId; normal rows fall back to sessionId.
+    const id = session?.containerId ?? session?.sessionId;
+    if (!id) {
       continue;
     }
 
-    const existing = deduplicated.get(session.sessionId);
+    const existing = deduplicated.get(id);
     if (!existing) {
-      deduplicated.set(session.sessionId, session);
+      deduplicated.set(id, session);
       continue;
     }
 
@@ -81,7 +87,7 @@ const deduplicateHistorySessions = (sessions: HistorySessionSummary[]) => {
     const preferred = incomingTs >= existingTs ? session : existing;
     const fallback = preferred === session ? existing : session;
 
-    deduplicated.set(session.sessionId, {
+    deduplicated.set(id, {
       ...preferred,
       title: preferred.title || fallback.title,
       messageCount: Math.max(preferred.messageCount || 0, fallback.messageCount || 0),
@@ -96,6 +102,18 @@ const deduplicateHistorySessions = (sessions: HistorySessionSummary[]) => {
 
 const HistoryView = ({ historyData, currentProvider, onLoadSession, onDeleteSession, onExportSession, onToggleFavorite, onUpdateTitle }: HistoryViewProps) => {
   const { t } = useTranslation();
+  // Session-kind refactor: opening any history item (normal or supervised) now
+  // always spawns a NEW tab of the matching kind and loads the session there
+  // (onLoadSession is wired to useSessionManagement.openHistoryInNewTab). The old
+  // strict same-tab cross-kind guard is gone — you no longer have to pre-open a
+  // supervisor tab before opening supervised history, and a normal session opens
+  // its own fresh tab too.
+  const handleLoadSession = (
+    sessionId: string,
+    opts?: { containerId?: string; kind?: HistoryKind; title?: string },
+  ) => {
+    onLoadSession(sessionId, opts);
+  };
   const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight || 600);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null); // Session ID pending deletion
   const [inputValue, setInputValue] = useState(''); // Immediate value of search input
@@ -107,6 +125,46 @@ const HistoryView = ({ historyData, currentProvider, onLoadSession, onDeleteSess
   const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null); // Copy status timeout timer
   const [copiedSessionId, setCopiedSessionId] = useState<string | null>(null); // Track which session ID was copied
   const [copyFailedSessionId, setCopyFailedSessionId] = useState<string | null>(null); // Track which session ID copy failed
+
+  // Session-kind refactor: three history tabs (normal / supervised / workflow).
+  // Normal still arrives via the setHistoryData → historyData prop path; the
+  // other two are fetched + received here so the tabs stay physically isolated.
+  const [historyKind, setHistoryKind] = useState<HistoryKind>('normal');
+  const [supervisedData, setSupervisedData] = useState<HistoryData | null>(null);
+  const [workflowData, setWorkflowData] = useState<HistoryData | null>(null);
+
+  useEffect(() => {
+    const prevSup = window.onSupervisedHistory;
+    const prevWf = window.onWorkflowHistory;
+    window.onSupervisedHistory = (json: string) => {
+      prevSup?.(json);
+      try { setSupervisedData(JSON.parse(json) as HistoryData); } catch { /* ignore malformed */ }
+    };
+    window.onWorkflowHistory = (json: string) => {
+      prevWf?.(json);
+      try { setWorkflowData(JSON.parse(json) as HistoryData); } catch { /* ignore malformed */ }
+    };
+    return () => {
+      window.onSupervisedHistory = prevSup;
+      window.onWorkflowHistory = prevWf;
+    };
+  }, []);
+
+  // Request the active kind's data when switching to supervised/workflow.
+  // (Normal is loaded by useHistoryLoader on view entry.)
+  useEffect(() => {
+    if (historyKind === 'supervised') {
+      sendBridgeEvent('load_supervised_history', currentProvider || 'claude');
+    } else if (historyKind === 'workflow') {
+      sendBridgeEvent('load_workflow_history', currentProvider || 'claude');
+    }
+  }, [historyKind, currentProvider]);
+
+  const activeData = historyKind === 'supervised'
+    ? supervisedData
+    : historyKind === 'workflow'
+      ? workflowData
+      : historyData;
 
   // Clean up all timeout timers on unmount
   useEffect(() => {
@@ -140,7 +198,7 @@ const HistoryView = ({ historyData, currentProvider, onLoadSession, onDeleteSess
   // When historyData updates, stop deep search state and clean up timeout timer
   // Uses functional update to avoid isDeepSearching dependency while cleaning up the corresponding timeout
   useEffect(() => {
-    if (historyData) {
+    if (activeData) {
       setIsDeepSearching(prev => {
         if (prev && deepSearchTimeoutRef.current) {
           clearTimeout(deepSearchTimeoutRef.current);
@@ -149,11 +207,11 @@ const HistoryView = ({ historyData, currentProvider, onLoadSession, onDeleteSess
         return false;
       });
     }
-  }, [historyData]);
+  }, [activeData]);
 
   // Sort and filter sessions: favorited on top (by favorite time descending), unfavorited below (original order)
   const sessions = useMemo(() => {
-    const rawSessions = deduplicateHistorySessions(historyData?.sessions ?? []);
+    const rawSessions = deduplicateHistorySessions(activeData?.sessions ?? []);
 
     // Search filter (case-insensitive)
     const filteredSessions = searchQuery.trim()
@@ -171,46 +229,44 @@ const HistoryView = ({ historyData, currentProvider, onLoadSession, onDeleteSess
 
     // Merge: favorited first, unfavorited after
     return [...favorited, ...unfavorited];
-  }, [historyData?.sessions, searchQuery]);
+  }, [activeData?.sessions, searchQuery]);
 
   const infoBar = useMemo(() => {
-    if (!historyData) {
+    if (!activeData) {
       return '';
     }
     const sessionCount = sessions.length;
-    const messageCount = historyData.total ?? 0;
+    const messageCount = activeData.total ?? 0;
     return t('history.totalSessions', { count: sessionCount, total: messageCount });
-  }, [historyData, sessions.length, t]);
+  }, [activeData, sessions.length, t]);
 
-  if (!historyData) {
-    return (
-      <div className="messages-container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <div style={{ textAlign: 'center', color: '#858585' }}>
-          <div style={{
-            width: '48px',
-            height: '48px',
-            margin: '0 auto 16px',
-            border: '4px solid rgba(133, 133, 133, 0.2)',
-            borderTop: '4px solid #858585',
-            borderRadius: '50%',
-            animation: 'spin 1s linear infinite'
-          }}></div>
-          <div>{t('history.loading')}</div>
-        </div>
+  // Loading / error are rendered inside the body (below the tab bar) so the
+  // user can always switch tabs even while a tab's data is still loading.
+  const renderLoading = () => (
+    <div className="messages-container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ textAlign: 'center', color: '#858585' }}>
+        <div style={{
+          width: '48px',
+          height: '48px',
+          margin: '0 auto 16px',
+          border: '4px solid rgba(133, 133, 133, 0.2)',
+          borderTop: '4px solid #858585',
+          borderRadius: '50%',
+          animation: 'spin 1s linear infinite'
+        }}></div>
+        <div>{t('history.loading')}</div>
       </div>
-    );
-  }
+    </div>
+  );
 
-  if (!historyData.success) {
-    return (
-      <div className="messages-container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-        <div style={{ textAlign: 'center', color: '#858585' }}>
-          <div style={{ fontSize: '48px', marginBottom: '16px' }}>⚠️</div>
-          <div>{historyData.error ?? t('history.loadFailed')}</div>
-        </div>
+  const renderError = () => (
+    <div className="messages-container" style={{ display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ textAlign: 'center', color: '#858585' }}>
+        <div style={{ fontSize: '48px', marginBottom: '16px' }}>⚠️</div>
+        <div>{activeData?.error ?? t('history.loadFailed')}</div>
       </div>
-    );
-  }
+    </div>
+  );
 
   // Render empty state (no search results or no sessions)
   const renderEmptyState = () => {
@@ -381,9 +437,15 @@ const HistoryView = ({ historyData, currentProvider, onLoadSession, onDeleteSess
 
   const renderHistoryItem = (session: HistorySessionSummary) => {
     const isEditing = editingSessionId === session.sessionId;
+    const itemKey = session.containerId ?? session.sessionId;
+    // Session-kind refactor: supervised/workflow restore routes by the
+    // persistent containerId (+kind); normal stays sessionId-based.
+    const loadOpts = session.kind && session.kind !== 'normal'
+      ? { containerId: session.containerId, kind: session.kind, title: session.title }
+      : undefined;
 
     return (
-      <div key={`${session.sessionId}-${session.lastTimestamp ?? '0'}`} className="history-item" onClick={() => !isEditing && onLoadSession(session.sessionId)}>
+      <div key={`${itemKey}-${session.lastTimestamp ?? '0'}`} className="history-item" onClick={() => !isEditing && handleLoadSession(session.sessionId, loadOpts)}>
         <div className="history-item-header">
           <div className="history-item-title">
             {/* Provider Logo */}
@@ -485,6 +547,18 @@ const HistoryView = ({ historyData, currentProvider, onLoadSession, onDeleteSess
         </div>
         <div className="history-item-meta">
           <span>{t('history.messageCount', { count: session.messageCount })}</span>
+          {session.kind === 'supervised' && session.agentId && (
+            <>
+              <span className="history-meta-dot">•</span>
+              <span title={t('history.supervisorBadge', '监督者')}>{session.agentId}</span>
+            </>
+          )}
+          {session.kind === 'workflow' && typeof session.childCount === 'number' && (
+            <>
+              <span className="history-meta-dot">•</span>
+              <span>{t('history.nodeCount', { count: session.childCount, defaultValue: '{{count}} 节点' })}</span>
+            </>
+          )}
           {session.fileSize ? (() => {
             const { text, isMB } = formatFileSize(session.fileSize);
             return (
@@ -520,6 +594,36 @@ const HistoryView = ({ historyData, currentProvider, onLoadSession, onDeleteSess
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+      {/* Session-kind refactor: three physically-isolated history tabs. */}
+      <div
+        className="history-tabs"
+        style={{ display: 'flex', gap: 4, padding: '6px 8px', borderBottom: '1px solid rgba(128,128,128,0.2)' }}
+      >
+        {([
+          { key: 'normal' as const, label: t('history.tab.normal', '普通会话') },
+          { key: 'supervised' as const, label: t('history.tab.supervised', '监督者会话') },
+          { key: 'workflow' as const, label: t('history.tab.workflow', '工作流') },
+        ]).map((tab) => (
+          <button
+            key={tab.key}
+            className={`history-tab-btn ${historyKind === tab.key ? 'active' : ''}`}
+            onClick={() => setHistoryKind(tab.key)}
+            style={{
+              padding: '4px 12px',
+              fontSize: 12,
+              cursor: 'pointer',
+              border: 'none',
+              borderRadius: 4,
+              background: historyKind === tab.key ? 'var(--vscode-button-background, #0e639c)' : 'transparent',
+              color: historyKind === tab.key ? 'var(--vscode-button-foreground, #fff)' : 'inherit',
+            }}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+      {!activeData ? renderLoading() : !activeData.success ? renderError() : (
+      <>
       <div className="history-header">
         <div className="history-info">{infoBar}</div>
         {/* Deep search button */}
@@ -552,13 +656,15 @@ const HistoryView = ({ historyData, currentProvider, onLoadSession, onDeleteSess
             itemHeight={78}
             height={listHeight}
             renderItem={renderHistoryItem}
-            getItemKey={(session) => `${session.sessionId}-${session.lastTimestamp ?? '0'}`}
+            getItemKey={(session) => `${session.containerId ?? session.sessionId}-${session.lastTimestamp ?? '0'}`}
             className="messages-container"
           />
         ) : (
           renderEmptyState()
         )}
       </div>
+      </>
+      )}
 
       {/* Delete confirmation dialog */}
       {deletingSessionId && (

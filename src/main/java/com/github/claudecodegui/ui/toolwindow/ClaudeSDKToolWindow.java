@@ -422,8 +422,13 @@ public class ClaudeSDKToolWindow implements ToolWindowFactory, DumbAware {
             Content loadingContent
     ) {
         TabStateService tabStateService = TabStateService.getInstance(project);
-        int savedTabCount = tabStateService.getTabCount();
-        LOG.info("[TabManager] Restoring " + savedTabCount + " tabs from storage");
+        // Clean-start policy (2026-06-09): every IDE restart opens a single fresh
+        // tab — previously-open tabs are NOT restored across restarts. In-session
+        // multi-tab state is still tracked (crash resilience) but not replayed at
+        // startup. Forces the restore loop to one tab instead of getTabCount().
+        int savedTabCount = 1;
+        LOG.info("[TabManager] Clean-start: restoring a single fresh tab (saved="
+                + tabStateService.getTabCount() + ")");
 
         ClaudeChatWindow firstChatWindow = new ClaudeChatWindow(project, false);
         String firstTabName = resolveRestoredTabName(tabStateService, 0);
@@ -453,8 +458,11 @@ public class ClaudeSDKToolWindow implements ToolWindowFactory, DumbAware {
             ContentManager contentManager
     ) {
         TabStateService tabStateService = TabStateService.getInstance(project);
-        int savedTabCount = tabStateService.getTabCount();
-        LOG.info("[TabManager] Restoring " + savedTabCount + " tabs from storage");
+        // Clean-start policy (2026-06-09): one fresh tab per IDE restart; see
+        // replaceLoadingPanelWithChatWindow. Previously-open tabs are not replayed.
+        int savedTabCount = 1;
+        LOG.info("[TabManager] Clean-start: restoring a single fresh tab (saved="
+                + tabStateService.getTabCount() + ")");
 
         for (int i = 0; i < savedTabCount; i++) {
             boolean isFirstTab = (i == 0);

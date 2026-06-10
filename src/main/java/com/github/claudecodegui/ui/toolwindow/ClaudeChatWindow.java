@@ -77,6 +77,25 @@ public class ClaudeChatWindow {
     private volatile boolean slashCommandsFetched = false;
     private volatile int fetchedSlashCommandsCount = 0;
 
+    /**
+     * Set when this tab was created as a "新监督者标签页" (new supervisor tab):
+     * the tab is born supervised. Consumed once on the first
+     * {@code frontend_ready} by {@link ChatWindowDelegate#handleFrontendReady()},
+     * which then pushes {@code window.onRequestNewSupervised} so the webview
+     * auto-opens the supervisor agent picker. Self-clearing so a webview reload
+     * (watchdog/manual) doesn't re-open the picker over an active session.
+     */
+    private volatile boolean pendingSupervised = false;
+
+    /**
+     * Set when this tab was created to open a history session in a fresh tab
+     * (normal or supervised). Holds the ASCII-safe JSON {@code {sessionId,
+     * containerId, kind}} to hand to {@code window.onRequestLoadHistory} once the
+     * webview is ready, so the new tab loads that session in-place. Consumed once
+     * (self-clearing) so a webview reload doesn't re-trigger the load.
+     */
+    private volatile String pendingHistoryLoad = null;
+
     private HandlerContext handlerContext;
     private MessageDispatcher messageDispatcher;
     private PermissionHandler permissionHandler;
@@ -351,6 +370,49 @@ public class ClaudeChatWindow {
         return windowId;
     }
 
+    /**
+     * Mark this tab as a born-at-birth supervisor tab (see {@link #pendingSupervised}).
+     * Called by {@code TabHandler} right after construction, before the webview
+     * mounts, for the header "新监督者标签页" action.
+     */
+    public void setPendingSupervised(boolean pending) {
+        this.pendingSupervised = pending;
+    }
+
+    /**
+     * Atomically read-and-clear the pending-supervised marker. Returns {@code true}
+     * exactly once per {@link #setPendingSupervised(boolean) staging}, so the
+     * supervisor agent picker auto-opens on the first {@code frontend_ready} but
+     * not on subsequent webview reloads.
+     */
+    public synchronized boolean consumePendingSupervised() {
+        if (pendingSupervised) {
+            pendingSupervised = false;
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Stage a history-load request to run once this tab's webview is ready (see
+     * {@link #pendingHistoryLoad}). Called by {@code TabHandler} right after
+     * construction, before the webview mounts.
+     */
+    public void setPendingHistoryLoad(String json) {
+        this.pendingHistoryLoad = json;
+    }
+
+    /**
+     * Atomically read-and-clear the staged history-load JSON. Returns the payload
+     * exactly once per staging (null otherwise), so the load fires on the first
+     * {@code frontend_ready} but not on subsequent webview reloads.
+     */
+    public synchronized String consumePendingHistoryLoad() {
+        String v = pendingHistoryLoad;
+        pendingHistoryLoad = null;
+        return v;
+    }
+
     public CodexSDKBridge getCodexSDKBridge() {
         return codexSDKBridge;
     }
@@ -377,11 +439,21 @@ public class ClaudeChatWindow {
      * a blank id; marshalled onto the EDT (loadHistorySession touches the webview).
      */
     public void resumeMainSession(String sessionId) {
+        resumeMainSession(sessionId, null);
+    }
+
+    /**
+     * Session-kind refactor: variant that carries the workflow node's persistent
+     * {@code containerId} so the resumed main-AI session keeps its pair routing.
+     * Without it loadHistorySession's fresh SessionState drops the containerId and
+     * the node's supervisor stops being notified (no report_turn_completion).
+     */
+    public void resumeMainSession(String sessionId, String containerId) {
         if (sessionId == null || sessionId.isEmpty()) return;
         Runnable r = () -> {
             try {
                 String projectPath = sessionLifecycleManager.determineWorkingDirectory();
-                sessionLifecycleManager.loadHistorySession(sessionId, projectPath);
+                sessionLifecycleManager.loadHistorySession(sessionId, projectPath, containerId);
             } catch (Exception e) {
                 LOG.warn("[ClaudeChatWindow] resumeMainSession failed for " + sessionId + ": " + e.getMessage());
             }
@@ -961,6 +1033,16 @@ public class ClaudeChatWindow {
             @Override
             public void persistTabSessionState() {
                 ClaudeChatWindow.this.persistTabSessionState();
+            }
+
+            @Override
+            public boolean consumePendingSupervised() {
+                return ClaudeChatWindow.this.consumePendingSupervised();
+            }
+
+            @Override
+            public String consumePendingHistoryLoad() {
+                return ClaudeChatWindow.this.consumePendingHistoryLoad();
             }
         };
     }

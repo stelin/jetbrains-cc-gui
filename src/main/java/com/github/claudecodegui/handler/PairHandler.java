@@ -9,6 +9,8 @@ import com.github.claudecodegui.session.pair.ActionRouter;
 import com.github.claudecodegui.session.pair.PairSession;
 import com.github.claudecodegui.session.pair.PairSessionManager;
 import com.github.claudecodegui.session.pair.PairStatusPusher;
+import com.github.claudecodegui.session.registry.SessionKind;
+import com.github.claudecodegui.session.registry.SessionRegistry;
 import com.github.claudecodegui.settings.CodemossSettingsService;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
@@ -64,7 +66,11 @@ public class PairHandler extends BaseMessageHandler {
             // 2026-05-25 (intermittent-inject fix D): webview signals it's
             // mounted and ready to receive injects. ActionRouter buffers any
             // dispatch that arrived before this and drains on ready.
-            "pair_webview_ready"
+            "pair_webview_ready",
+            // Session-kind refactor (S2): create a supervised session that is
+            // "born typed" — registers a container manifest first, then starts
+            // the Pair indexed by that container id.
+            "session_create_supervised"
     };
 
     private final Gson gson;
@@ -121,6 +127,9 @@ public class PairHandler extends BaseMessageHandler {
             case "pair_webview_ready":
                 handleWebviewReady(content);
                 return true;
+            case "session_create_supervised":
+                handleCreateSupervised(content);
+                return true;
             default:
                 return false;
         }
@@ -138,7 +147,7 @@ public class PairHandler extends BaseMessageHandler {
             JsonObject data = gson.fromJson(content, JsonObject.class);
             String pairId = data != null && data.has("pairId") && !data.get("pairId").isJsonNull()
                     ? data.get("pairId").getAsString() : "";
-            PairSession session = resolvePair(pairId);
+            PairSession session = resolvePair(data);
             if (session == null && pairId != null && !pairId.isEmpty()) {
                 // The webview tracked a pairId that no longer resolves (stale after a
                 // restart/rotation). Fall back to this window's most-recent active
@@ -429,7 +438,7 @@ public class PairHandler extends BaseMessageHandler {
             JsonObject data = gson.fromJson(content, JsonObject.class);
             String pairId = data.has("pairId") && !data.get("pairId").isJsonNull()
                     ? data.get("pairId").getAsString() : "";
-            PairSession session = resolvePair(pairId);
+            PairSession session = resolvePair(data);
             if (session == null && pairId != null && !pairId.isEmpty()) {
                 // The webview tracked a pairId but it no longer resolves (stale id
                 // after a restart/rotation, or an ownership mismatch). Rather than
@@ -480,7 +489,7 @@ public class PairHandler extends BaseMessageHandler {
             JsonObject data = gson.fromJson(content, JsonObject.class);
             String pairId = data.has("pairId") && !data.get("pairId").isJsonNull()
                     ? data.get("pairId").getAsString() : "";
-            PairSession session = resolvePair(pairId);
+            PairSession session = resolvePair(data);
             if (session == null) {
                 LOG.info("[PairHandler] pair_resume ignored — no active pair for id=" + pairId);
                 return;
@@ -513,7 +522,7 @@ public class PairHandler extends BaseMessageHandler {
                     ? data.get("pairId").getAsString() : "";
             String mode = data.has("mode") && !data.get("mode").isJsonNull()
                     ? data.get("mode").getAsString() : "full";
-            PairSession session = resolvePair(pairId);
+            PairSession session = resolvePair(data);
             if (session == null) {
                 LOG.info("[PairHandler] pair_set_autonomy_mode ignored — no active pair for id=" + pairId);
                 return;
@@ -551,7 +560,7 @@ public class PairHandler extends BaseMessageHandler {
                 LOG.warn("[PairHandler] pair_directive_ack missing directiveId, ignoring");
                 return;
             }
-            PairSession session = resolvePair(pairId);
+            PairSession session = resolvePair(data);
             if (session == null || session.getActionRouter() == null) {
                 LOG.debug("[PairHandler] pair_directive_ack for unknown/disposed pair " + pairId);
                 return;
@@ -631,6 +640,91 @@ public class PairHandler extends BaseMessageHandler {
                     ? e.getMessage()
                     : "Internal error: " + e.getClass().getSimpleName();
             sendError("pair_start", msg);
+        }
+    }
+
+    /**
+     * Session-kind refactor (S2): create a supervised session that is "born
+     * typed". Unlike {@code pair_start} (which attaches a supervisor to an
+     * existing main session via the composer toggle), this registers a
+     * persistent container manifest FIRST, then starts the Pair indexed by that
+     * container id, so the session is a complete, listable, restorable entity
+     * from creation.
+     *
+     * <p>Offloaded to the background pool for the same reason as
+     * {@link #handleStart}: {@code startPair} does a ~20s synchronous daemon
+     * handshake that would otherwise freeze the EDT.
+     */
+    private void handleCreateSupervised(String content) {
+        AppExecutorUtil.getAppExecutorService().submit(() -> handleCreateSupervisedImpl(content));
+    }
+
+    private void handleCreateSupervisedImpl(String content) {
+        try {
+            JsonObject data = gson.fromJson(content, JsonObject.class);
+            String title = data.has("title") && !data.get("title").isJsonNull()
+                    ? data.get("title").getAsString() : null;
+            String agentId = data.has("agentId") && !data.get("agentId").isJsonNull()
+                    ? data.get("agentId").getAsString() : null;
+            // Same optional runtime overrides pair_start accepts; null means
+            // "fall back to the agent's defaults from supervisor-agents.json".
+            String modelOverride = data.has("model") && !data.get("model").isJsonNull()
+                    ? data.get("model").getAsString() : null;
+            Boolean longContextOverride = (data.has("longContextEnabled")
+                    && !data.get("longContextEnabled").isJsonNull())
+                    ? data.get("longContextEnabled").getAsBoolean() : null;
+            String reasoningOverride = data.has("reasoningEffort") && !data.get("reasoningEffort").isJsonNull()
+                    ? data.get("reasoningEffort").getAsString() : null;
+
+            if (agentId == null) {
+                throw new IllegalArgumentException("session_create_supervised requires agentId");
+            }
+            if (context.getProject() == null) {
+                throw new IllegalStateException("no project context");
+            }
+
+            // 1. Write the container manifest FIRST (before any daemon call) so
+            //    the session is complete + restorable from creation.
+            SessionRegistry registry = SessionRegistry.getInstance(context.getProject());
+            String containerId = registry.register(SessionKind.SUPERVISED, null, title, agentId);
+
+            // 2. Stamp the container id onto this tab's session state so later
+            //    pair_* routing (S3) can resolve the container from the tab.
+            if (context.getSession() != null && context.getSession().getState() != null) {
+                context.getSession().getState().setContainerId(containerId);
+            }
+
+            // 3. Start the Pair carrying the container id. mainSessionId stays
+            //    null — the SDK assigns the main leg on its first turn and it is
+            //    bound back onto the manifest later (S3). No budget caps here,
+            //    mirroring pair_start when the webview ships no budget object.
+            com.github.claudecodegui.session.pair.protocol.PairBudget budget =
+                    new com.github.claudecodegui.session.pair.protocol.PairBudget();
+            PairSessionManager.StartPairParams params = new PairSessionManager.StartPairParams(
+                    null, agentId, null,
+                    modelOverride, longContextOverride, reasoningOverride,
+                    context.getWindowId(), null, containerId);
+            PairSession session = startPairWired(params, budget);
+
+            // 4. Record the internal pairId on the manifest (implementation id,
+            //    no longer the directory key).
+            registry.setPairId(containerId, session.getPairId());
+
+            // 5. Tell the webview the container is born so it can render its tab.
+            JsonObject created = new JsonObject();
+            created.addProperty("containerId", containerId);
+            created.addProperty("kind", "supervised");
+            created.addProperty("agentId", agentId);
+            created.addProperty("pairId", session.getPairId());
+            if (title != null) created.addProperty("title", title);
+            pushToWebview("window.onSessionCreated", gson.toJson(created));
+        } catch (Exception e) {
+            LOG.warn("[PairHandler] session_create_supervised failed: "
+                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getName()), e);
+            String msg = e.getMessage() != null
+                    ? e.getMessage()
+                    : "Internal error: " + e.getClass().getSimpleName();
+            sendError("session_create_supervised", msg);
         }
     }
 
@@ -779,6 +873,21 @@ public class PairHandler extends BaseMessageHandler {
                         ? payload.get("sessionId").getAsString() : null;
                 if (sid == null || sid.isEmpty()) return;
                 sessRef.setSupervisorSessionId(sid);
+                // 治本(捕获即落盘):把 supervisor sessionId 镜像进容器 manifest——对
+                // 所有监督者会话生效,而非仅工作流节点。普通(session_create_supervised /
+                // 新监督者标签页)会话过去从不落盘 supervisorSessionId,导致从历史恢复时
+                // m.supervisorSessionId==null → 监督腿不 resume、pane 回放被跳过(协调者
+                // 历史为空)。这里按 pair 自己的 containerId 入册,与主腿 mainSessionId 的
+                // bindMainSession 同一种"捕获即落盘"纪律;且这是所有代(含 rotation)
+                // supervisor sessionId 的唯一汇集点。generation 仍由下游工作流路径补写
+                // (此处传 null 不覆盖已有 generation)。
+                String cid = sessRef.getContainerId();
+                if (cid != null && !cid.isEmpty() && context.getProject() != null) {
+                    try {
+                        SessionRegistry.getInstance(context.getProject())
+                                .setSupervisorSession(cid, sid, null);
+                    } catch (Exception ignored) { /* best-effort,绝不打断捕获 */ }
+                }
                 if (context.getProject() != null) {
                     com.github.claudecodegui.session.pair.workflow.SupervisorWorkflowManager
                             .getInstance(context.getProject())
@@ -807,6 +916,15 @@ public class PairHandler extends BaseMessageHandler {
 
         JsonObject result = new JsonObject();
         result.addProperty("pairId", session.getPairId());
+        // Carry the persistent containerId so the webview retargets its pair_*
+        // routing (incl. pair_webview_ready) to THIS pair. Critical when a
+        // supervised history session is restored into a tab that already holds a
+        // live pair: without it the webview keeps the previous container id, so
+        // pair_webview_ready resolves the OLD pair on Java and this pair's history
+        // replay never fires (supervisor pane stays empty).
+        if (session.getContainerId() != null && !session.getContainerId().isEmpty()) {
+            result.addProperty("containerId", session.getContainerId());
+        }
         result.addProperty("agentId", session.getAgentId());
         result.addProperty("agentName", session.getAgentName());
         result.addProperty("mainSessionId", session.getMainSessionId() == null ? "" : session.getMainSessionId());
@@ -876,11 +994,19 @@ public class PairHandler extends BaseMessageHandler {
             PairSessionManager mgr = PairSessionManager.getInstance(context.getProject());
             String ownerWindowId = context.getWindowId();
 
+            // Session-kind refactor (S3): prefer the precise containerId (the new
+            // routing key); fall back to the legacy ownership-scoped pairId lookup.
+            String containerId = data.has("containerId") && !data.get("containerId").isJsonNull()
+                    ? data.get("containerId").getAsString() : null;
+            PairSession byCid = (containerId != null && !containerId.isEmpty())
+                    ? mgr.getByContainer(containerId) : null;
             // Webview rarely tracks pairId; fall back to the most-recently-started
             // pair OWNED BY THIS TAB. Falling back to any project-wide pair would
             // let one tab silently stop another tab's supervisor (cross-tab
             // routing bug, 2026-05-24).
-            if (pairId.isEmpty()) {
+            if (byCid != null) {
+                pairId = byCid.getPairId();
+            } else if (pairId.isEmpty()) {
                 PairSession latest = mgr.getActivePairsOwnedBy(ownerWindowId).stream()
                         .reduce((a, b) -> a.getStartedAt() > b.getStartedAt() ? a : b)
                         .orElse(null);
@@ -926,7 +1052,7 @@ public class PairHandler extends BaseMessageHandler {
             String model = data.has("model") && !data.get("model").isJsonNull()
                     ? data.get("model").getAsString() : "";
 
-            PairSession session = resolvePair(pairId);
+            PairSession session = resolvePair(data);
             if (session == null) {
                 LOG.info("[PairHandler] pair_set_model ignored — no active pair for id=" + pairId);
                 return;
@@ -956,7 +1082,7 @@ public class PairHandler extends BaseMessageHandler {
             String effort = data.has("effort") && !data.get("effort").isJsonNull()
                     ? data.get("effort").getAsString() : "";
 
-            PairSession session = resolvePair(pairId);
+            PairSession session = resolvePair(data);
             if (session == null) {
                 LOG.info("[PairHandler] pair_set_reasoning ignored — no active pair for id=" + pairId);
                 return;
@@ -1028,6 +1154,27 @@ public class PairHandler extends BaseMessageHandler {
     }
 
     /**
+     * Session-kind refactor (S3): resolve the target Pair container-first from
+     * the IPC payload. Prefers the persistent {@code containerId} (the new
+     * primary key — a precise identity, so no ownership scan needed); falls back
+     * to the legacy ownership-scoped {@code pairId} lookup when containerId is
+     * absent (older webview) or no longer resolves (e.g. a stale id after stop).
+     */
+    private PairSession resolvePair(JsonObject data) {
+        if (data != null && data.has("containerId") && !data.get("containerId").isJsonNull()) {
+            String containerId = data.get("containerId").getAsString();
+            if (!containerId.isEmpty() && context.getProject() != null) {
+                PairSession byCid = PairSessionManager.getInstance(context.getProject())
+                        .getByContainer(containerId);
+                if (byCid != null && !byCid.isDisposed()) return byCid;
+            }
+        }
+        String pairId = (data != null && data.has("pairId") && !data.get("pairId").isJsonNull())
+                ? data.get("pairId").getAsString() : "";
+        return resolvePair(pairId);
+    }
+
+    /**
      * Look up an active pair by id, falling back to the most-recently-started
      * pair OWNED BY THIS TAB when the webview didn't track the id (mirrors
      * handleStop / handleUserInput). Filtering by ownerWindowId avoids
@@ -1083,15 +1230,22 @@ public class PairHandler extends BaseMessageHandler {
 
             PairSessionManager mgr = PairSessionManager.getInstance(context.getProject());
             String ownerWindowId = context.getWindowId();
+            // Session-kind refactor (S3): prefer the precise containerId.
+            String containerId = data.has("containerId") && !data.get("containerId").isJsonNull()
+                    ? data.get("containerId").getAsString() : null;
+            PairSession session = (containerId != null && !containerId.isEmpty())
+                    ? mgr.getByContainer(containerId) : null;
             // Scope lookup to this tab. Without this, a webview that adopted
             // another tab's pair via onPairResume would post user input to that
             // tab's daemon, and the response would route back to that tab's
             // webview only — current tab silently sees nothing.
-            PairSession session = pairId.isEmpty()
-                    ? mgr.getActivePairsOwnedBy(ownerWindowId).stream()
-                        .reduce((a, b) -> a.getStartedAt() > b.getStartedAt() ? a : b)
-                        .orElse(null)
-                    : mgr.getOwnedBy(pairId, ownerWindowId);
+            if (session == null) {
+                session = pairId.isEmpty()
+                        ? mgr.getActivePairsOwnedBy(ownerWindowId).stream()
+                            .reduce((a, b) -> a.getStartedAt() > b.getStartedAt() ? a : b)
+                            .orElse(null)
+                        : mgr.getOwnedBy(pairId, ownerWindowId);
+            }
             if (session == null) {
                 sendError("pair_send_user_input", "no active pair to receive user input");
                 return;
@@ -1181,15 +1335,18 @@ public class PairHandler extends BaseMessageHandler {
     private void handleHumanResponse(String content) {
         try {
             JsonObject data = gson.fromJson(content, JsonObject.class);
-            String pairId = data.get("pairId").getAsString();
+            String pairId = data.has("pairId") && !data.get("pairId").isJsonNull()
+                    ? data.get("pairId").getAsString() : "";
             String choice = data.has("choice") ? data.get("choice").getAsString() : null;
             String note = data.has("note") && !data.get("note").isJsonNull()
                     ? data.get("note").getAsString() : null;
 
-            PairSession session = PairSessionManager.getInstance(context.getProject())
-                    .getOwnedBy(pairId, context.getWindowId());
+            // Session-kind refactor (S3): container-first resolution (resolvePair
+            // falls back to the ownership-scoped pairId lookup used previously).
+            PairSession session = resolvePair(data);
             if (session == null) {
-                sendError("pair_human_response", "pair not found: " + pairId);
+                sendError("pair_human_response", "pair not found: "
+                        + (pairId.isEmpty() ? "(none)" : pairId));
                 return;
             }
             if (session.getEventBus() != null) {

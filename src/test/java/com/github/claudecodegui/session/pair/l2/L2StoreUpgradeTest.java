@@ -126,7 +126,9 @@ public class L2StoreUpgradeTest {
     }
 
     private void writeRawStateFile(String pairId, JsonObject content) throws IOException {
-        Path pairDir = tmp.resolve(pairId);
+        // Session-kind refactor (S3): L2 now lives under <baseDir>/<id>/l2/ (matches
+        // SessionRegistry.l2Dir), so raw fixtures must be placed in the l2 subdir.
+        Path pairDir = tmp.resolve(pairId).resolve("l2");
         Files.createDirectories(pairDir);
         Path state = pairDir.resolve(L2Schema.STATE_FILE);
         Files.writeString(state, content.toString());

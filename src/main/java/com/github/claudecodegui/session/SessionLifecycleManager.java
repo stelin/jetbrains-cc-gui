@@ -161,6 +161,20 @@ public class SessionLifecycleManager {
      * Load a history session by ID.
      */
     public void loadHistorySession(String sessionId, String projectPath) {
+        loadHistorySession(sessionId, projectPath, null);
+    }
+
+    /**
+     * Session-kind refactor: load/restore a session while preserving the caller's
+     * persistent {@code containerId}. This method builds a BRAND-NEW ClaudeSession
+     * (fresh SessionState) and swaps it into the window; without re-stamping the
+     * containerId the supervised-restore stamp on the old SessionState is dropped,
+     * so {@code prependPairContextMarker} / {@code findAttachedPair} resolve null
+     * and the daemon never re-enables {@code report_turn_completion} (the supervisor
+     * stops being notified after a resume). {@code containerId} is null for normal
+     * history loads (normal sessions never own a container).
+     */
+    public void loadHistorySession(String sessionId, String projectPath, String containerId) {
         LOG.info("Loading history session: " + sessionId + " from project: " + projectPath);
 
         ClaudeSession oldSession = host.getSession();
@@ -208,8 +222,16 @@ public class SessionLifecycleManager {
             newSession.setPermissionMode(previousPermissionMode);
             newSession.setProvider(previousProvider);
             newSession.setModel(previousModel);
+            // Session-kind refactor: carry the persistent containerId onto the
+            // freshly-built SessionState so supervised-session pair routing survives
+            // the session swap (null for normal loads). Without this the resumed
+            // supervised tab loses its pair → supervisor stops being notified.
+            if (newSession.getState() != null) {
+                newSession.getState().setContainerId(containerId);
+            }
             LOG.info("Restored session state to loaded session: mode=" + previousPermissionMode
-                             + ", provider=" + previousProvider + ", model=" + previousModel);
+                             + ", provider=" + previousProvider + ", model=" + previousModel
+                             + ", containerId=" + (containerId != null ? containerId : "(none)"));
 
             host.setSession(newSession);
             host.getHandlerContext().setSession(newSession);

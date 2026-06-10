@@ -48,7 +48,7 @@ export default function SupervisorPane({
   status,
 }: SupervisorPaneProps) {
   const { t } = useTranslation();
-  const { selected, setSelected, thinkingByAgentId, streamingByAgentId, pairId, pairStatus } = usePairContext();
+  const { selected, thinkingByAgentId, streamingByAgentId, pairId, pairStatus } = usePairContext();
 
   if (selected.length === 0) return null;
 
@@ -96,6 +96,10 @@ export default function SupervisorPane({
               plan ACTIVE (see `interruptible`) so the user can also pause during
               the post-turn Liveness-guard countdown, not just while the
               supervisor is visibly thinking/streaming. */}
+          {/* Session-kind refactor: the close button is gone — a supervised
+              session is supervised-by-birth, so the pane is intrinsic to it
+              (closing = closing the whole session/tab). Interrupt (and
+              server-side rotation) remain. */}
           <button
             className={styles.iconButton}
             title={t('pairLayout.interruptSupervisor',
@@ -104,13 +108,6 @@ export default function SupervisorPane({
             disabled={!interruptible || !pairId}
           >
             <span className="codicon codicon-debug-stop" />
-          </button>
-          <button
-            className={styles.iconButton}
-            title={t('pairLayout.closePane')}
-            onClick={() => setSelected([])}
-          >
-            <span className="codicon codicon-close" />
           </button>
         </div>
       </div>

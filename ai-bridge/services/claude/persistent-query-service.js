@@ -93,6 +93,70 @@ function resolveStreamingEnabled(params, settings) {
     : (settings?.streamingEnabled ?? false);
 }
 
+// Pair mode: the load-bearing instruction that makes the main AI call
+// report_turn_completion. Appended to the system prompt only when the request
+// carries a pair-context marker. Ported from ai-bridge-server so local mode
+// behaves the same as remote.
+const PAIR_MODE_SYSTEM_PROMPT_APPEND = [
+  '# Supervisor Pair 模式约束',
+  '',
+  '你现在在 Supervisor Pair 协作模式下工作。supervisor 是你的协作者(类似 PM / 架构师),通过 `inject_prompt` 派任务,你执行后必须**结构化汇报**结果。',
+  '',
+  '## 强约束:每个 turn 必调 `report_turn_completion`',
+  '',
+  '在每个 turn 结束前,你**必须**调用 `mcp__main__report_turn_completion` 工具汇报本轮工作。',
+  '这是硬性要求:只要 supervisor 通过 inject_prompt 给你派了任务,**无论本轮是分析 / 读取 / 调研还是编码**,turn 结束前都必须调用一次 report_turn_completion——**分析类任务也要调**(结论写进 `summary`,产出或被分析的文件写进 `deliverables`;本轮没改任何文件时 `deliverables` 给空数组即可)。',
+  '**禁止**以纯文本结论结尾而不调用该工具:那样 supervisor 收不到结构化回执(selfAssessment / deliverables),只能走降级兜底,review 分诊会失真。唯一可不调的情形:本轮你要向 supervisor 反问澄清——此时改用澄清渠道,而不是停在纯文本提问。',
+  '',
+  '工具入参:',
+  '- `summary`: 1-2 句任务级摘要',
+  '- `deliverables`: 你新增/修改的文件清单(相对项目根 POSIX 路径)+ 每个文件 `change` 描述 + 可选 `confidence`',
+  '- `verifications` (可选): 你跑过的命令 + pass/fail + 失败时 stderrTail (<=1KB)',
+  '- `selfAssessment` (必填):',
+  '  - `confidence`: high / medium / low',
+  '  - `concerns`: 你自己觉得不踏实的具体点(空数组表示完全自信)',
+  '  - `suggestedReview` (可选): 建议 supervisor 重点 review 哪里 (如 "user_dao.go:42-58")',
+  '',
+  '## confidence 怎么定',
+  '- **high**: 做完 + verifications 全 pass + 没有 unaddressed concerns → supervisor 信任直接通过',
+  '- **medium**: 主流程对了但某些边界没验证 → supervisor 会自己 Read 验证',
+  '- **low**: 你按指令做了但心里没底 → supervisor 必派 code reviewer 子 agent 重 review',
+  '',
+  '**不要骗 supervisor** — 故意报 high 但实际有问题,后续会被发现,trust 降级到全部强制 reviewer。',
+  '',
+  '## inject_prompt 收到后',
+  'supervisor 派来的 inject_prompt 是结构化任务派单,含 `objective` + `expectedDeliverables` (期望产出路径) + `acceptanceCriteria` (验收标准)。如果含 `spilledPath` (>8KB 指令存在磁盘文件), 先 Read 该路径再执行。',
+  '',
+  '你的 `deliverables` 应覆盖 `expectedDeliverables` 中所有路径(可以多但不能少)。',
+  '',
+  '## 你内部的子 agent',
+  '你**可以**派 Task 子 agent (并行/隔离),这是你的内部行为不需要向 supervisor 解释。**但子 agent 的产出也算你的 deliverables**——子 agent 改的文件,你的 `deliverables` 数组也要列。',
+  '',
+  '## turn 收尾规则',
+  '每个 turn 必须以下三者之一结尾,**禁止**以"请发送..."、"我将立即..."、"等待..."、"请告诉我..."等等待型语句结束:',
+  '1. **至少一个 tool_use** (实际执行了操作)',
+  '2. **`mcp__main__report_turn_completion`** 调用 (显式汇报完成 / 阻塞 / 需澄清)',
+  '3. 显式的澄清请求',
+  '违反此规则会被系统检测为"对话漂移",立即触发重推消息,影响协作效率。',
+  '',
+  'supervisor 在 plan 全部 step 完成后会调 `emit_action(complete_plan)` 收尾——你不需要"等下个 tick 检测 isComplete",你的最后一轮 report_turn_completion 就是收尾。',
+].join('\n');
+
+// Peel a leading <!--pair-context:{...}--> marker (prepended by Java's
+// SessionSendService.prependPairContextMarker) out of the raw systemPromptAppend
+// IPC string into a structured pairContext object. No marker → pairContext null.
+const PAIR_CTX_MARKER_RE = /^<!--pair-context:({[\s\S]+?})-->\r?\n?/;
+function extractInlinedPairContext(systemPromptAppendRaw) {
+  if (typeof systemPromptAppendRaw !== 'string' || systemPromptAppendRaw.length === 0) {
+    return { pairContext: null, cleaned: systemPromptAppendRaw };
+  }
+  const m = systemPromptAppendRaw.match(PAIR_CTX_MARKER_RE);
+  if (!m) return { pairContext: null, cleaned: systemPromptAppendRaw };
+  let parsed = null;
+  try { parsed = JSON.parse(m[1]); } catch (_) { /* malformed, ignore */ }
+  return { pairContext: parsed, cleaned: systemPromptAppendRaw.slice(m[0].length) };
+}
+
 function buildSystemPromptAppend(params) {
   const openedFiles = params.openedFiles || null;
   const agentPrompt = params.agentPrompt || null;
@@ -193,7 +257,18 @@ async function buildRequestContext(params, withAttachments) {
   const maxThinkingTokens = normalizedReasoningEffort
     ? undefined
     : resolveThinkingTokens(params, settings);
-  const systemPromptAppend = buildSystemPromptAppend(params);
+  // Pair mode: Java prepends a <!--pair-context:{...}--> marker onto the
+  // systemPromptAppend IPC field. Peel it into a structured pairContext; when
+  // present, append the load-bearing "must call report_turn_completion" rule so
+  // the main AI reliably calls the tool, and signal createRuntime to mount the
+  // mcp__main MCP server. Non-Pair sends see no marker → unchanged behaviour.
+  const { pairContext } = extractInlinedPairContext(params.systemPromptAppend);
+  const pairId = (pairContext && typeof pairContext.pairId === 'string' && pairContext.pairId.length > 0)
+    ? pairContext.pairId : null;
+  const baseSystemPromptAppend = buildSystemPromptAppend(params);
+  const systemPromptAppend = pairId
+    ? [baseSystemPromptAppend, PAIR_MODE_SYSTEM_PROMPT_APPEND].filter(Boolean).join('\n\n')
+    : baseSystemPromptAppend;
 
   if (ultracodeSettings) {
     console.log(`[REASONING_EFFORT] ✓ persistent buildRequestContext applied ULTRACODE (effort=xhigh + settings.ultracode/enableWorkflows) (model=${sdkModelName ?? modelId ?? 'default'}, maxThinkingTokens disabled due to mutex)`);
@@ -218,10 +293,13 @@ async function buildRequestContext(params, withAttachments) {
 
   const userMessage = await buildUserMessage(params, withAttachments, requestedSessionId);
 
-  const runtimeSignature = buildRuntimeSignature(options, systemPromptAppend, streamingEnabled, runtimeSessionEpoch);
+  const runtimeSignature = buildRuntimeSignature(
+    options, systemPromptAppend, streamingEnabled, runtimeSessionEpoch, pairId
+  );
   console.log('[LIFECYCLE] buildRequestContext sessionId=' + (requestedSessionId || '(new)')
     + ' epoch=' + (runtimeSessionEpoch || '(none)')
-    + ' signature=' + runtimeSignature);
+    + ' signature=' + runtimeSignature
+    + (pairId ? ' pairId=' + pairId : ''));
 
   return {
     requestedSessionId,
@@ -234,6 +312,11 @@ async function buildRequestContext(params, withAttachments) {
     maxThinkingTokens,
     runtimeSignature,
     windowId,
+    // Pair mode: consumed by createRuntime to mount the mcp__main MCP server
+    // (report_turn_completion). Null for normal sends.
+    pairContext: pairId
+      ? { pairId, activeDirectiveId: (typeof pairContext.activeDirectiveId === 'string' ? pairContext.activeDirectiveId : null) }
+      : null,
   };
 }
 

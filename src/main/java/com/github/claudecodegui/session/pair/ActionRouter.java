@@ -1378,14 +1378,47 @@ public class ActionRouter {
                     + " pair=" + pair.getPairId()
                     + " directiveId=" + (directiveId != null ? directiveId : "(none)")
                     + " v2=" + (directiveId != null && !directiveId.isEmpty()));
+            // Append the report mandate to the task itself (in the main AI's
+            // immediate context), not just the system prompt. Empirically the
+            // system-prompt rule was applied inconsistently across parallel
+            // workflow nodes (one reported, one didn't); putting the instruction
+            // in the dispatched task makes report_turn_completion reliable.
+            String finalPrompt = withReportMandate(prompt);
             if (directiveId != null && !directiveId.isEmpty()) {
-                webview.onInjectPromptV2(pair.getPairId(), pair.getAgentId(), directiveId, prompt);
+                webview.onInjectPromptV2(pair.getPairId(), pair.getAgentId(), directiveId, finalPrompt);
             } else {
-                webview.onInjectPrompt(pair.getPairId(), pair.getAgentId(), prompt);
+                webview.onInjectPrompt(pair.getPairId(), pair.getAgentId(), finalPrompt);
             }
         } catch (Exception e) {
             LOG.warn("[ActionRouter] onInjectPrompt(V2) failed: " + e.getMessage());
         }
+    }
+
+    /**
+     * Sentinel that marks an already-appended mandate, so re-pushes / retries
+     * don't stack it. Must stay in sync with the suffix in {@link #REPORT_MANDATE}.
+     */
+    private static final String REPORT_MANDATE_SENTINEL = "[系统要求] 本轮任务完成后必须上报";
+
+    /**
+     * Mandatory tail appended to every supervisor→main-AI dispatched task. Keeps
+     * report_turn_completion reliable even when the model would otherwise treat a
+     * pure analysis/read turn as exempt. The main AI only has this tool when the
+     * pair-context marker mounted mcp__main (see SessionSendService /
+     * ClaudeMessageHandler windowId fallback); when present it must be called.
+     */
+    private static final String REPORT_MANDATE =
+            "\n\n---\n" + REPORT_MANDATE_SENTINEL + ":\n"
+            + "本轮无论是分析 / 读取 / 调研还是编码,完成后你**必须**调用 "
+            + "`mcp__main__report_turn_completion` 工具上报本轮结果"
+            + "(summary 写任务级结论;deliverables 写新增/修改或被分析的文件,没有改文件则给空数组;selfAssessment 必填)。"
+            + "**禁止**仅以纯文本结论结尾而不调用该工具——否则 supervisor 收不到结构化回执,无法 review。";
+
+    /** Idempotently append the report mandate to a dispatched task prompt. */
+    private String withReportMandate(String prompt) {
+        String p = prompt == null ? "" : prompt;
+        if (p.contains(REPORT_MANDATE_SENTINEL)) return p;
+        return p + REPORT_MANDATE;
     }
 
     /**

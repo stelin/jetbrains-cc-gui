@@ -66,6 +66,15 @@ public class PairSession {
      */
     private final String ownerWindowId;
 
+    /**
+     * Session-kind refactor (S2): the persistent container id this Pair belongs
+     * to (supervised / workflow sessions only). Null for legacy {@code pair_start}
+     * / test paths that build a Pair without a container. {@link PairSessionManager}
+     * indexes the Pair by this id ({@code byContainer}) so pair_* routing can
+     * resolve it without the main-session glue.
+     */
+    private final String containerId;
+
     // Snapshot of the parameters that started the daemon-side supervisor runtime.
     // EventBus uses these to lazily re-run supervisor.start after a daemon restart
     // (in remote mode the Node process's in-memory runtime Map is lost on crash).
@@ -194,7 +203,8 @@ public class PairSession {
             String planContent,
             String projectSpec,
             String model,
-            String ownerWindowId
+            String ownerWindowId,
+            String containerId
     ) {
         this.pairId = pairId;
         this.mainSessionId = mainSessionId;
@@ -209,6 +219,7 @@ public class PairSession {
         this.projectSpec = projectSpec;
         this.model = model;
         this.ownerWindowId = ownerWindowId;
+        this.containerId = containerId;
     }
 
     /** Back-compat: legacy callers (synthetic tests) that have no window id. */
@@ -228,7 +239,7 @@ public class PairSession {
     ) {
         this(pairId, mainSessionId, agentId, agentName, pairDir, planSnapshotPath,
                 supervisorBridge, progressManager, agentDescription, planContent,
-                projectSpec, model, null);
+                projectSpec, model, null, null);
     }
 
     public String getPairId() { return pairId; }
@@ -264,6 +275,20 @@ public class PairSession {
     public void setFinishedAt(Long ts) { this.finishedAt = ts; }
     /** Window id of the tab that created this Pair; nullable. See field doc. */
     public String getOwnerWindowId() { return ownerWindowId; }
+    /** Session-kind refactor (S2): persistent container id; nullable. See field doc. */
+    public String getContainerId() { return containerId; }
+
+    /**
+     * Session-kind refactor (S3): the key under which this Pair's L2 durable
+     * state is stored. Prefers the persistent {@link #containerId} (so the L2
+     * survives an IDE restart — the {@link #pairId} is regenerated each start),
+     * falling back to {@code pairId} for legacy / workflow-node pairs that have
+     * no container yet (S6 wires workflow containers). Never null — both ids are
+     * non-null for a live Pair — so L2Store callers never pass a null key.
+     */
+    public String getL2Key() {
+        return (containerId != null && !containerId.isEmpty()) ? containerId : pairId;
+    }
 
     public EventBus getEventBus() { return eventBus; }
     public void setEventBus(EventBus eventBus) { this.eventBus = eventBus; }

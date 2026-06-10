@@ -62,6 +62,16 @@ public class SessionState {
     private volatile String windowId;
 
     /**
+     * Session-kind refactor (S2): persistent container id for supervised /
+     * workflow sessions. Non-null only when this tab was born as a supervised
+     * (or workflow) session via {@code session_create_supervised}; normal
+     * sessions leave it null (zero migration). Volatile for the same reason as
+     * {@link #windowId}: set on the creation/handler thread and read on SDK
+     * callback threads with no other happens-before guarantee.
+     */
+    private volatile String containerId;
+
+    /**
      * Phase 6c (2026-05-24): one-shot system-prompt append staged by
      * {@code ClaudeSession#swapInnerSession} for the next outgoing daemon send.
      * Cleared atomically by {@link #consumePendingSystemPromptAppend} once
@@ -116,6 +126,11 @@ public class SessionState {
     /** Per-tab window id; see field doc. May be null. */
     public String getWindowId() {
         return windowId;
+    }
+
+    /** Session-kind refactor (S2): persistent container id; null for normal sessions. */
+    public String getContainerId() {
+        return containerId;
     }
 
     public boolean isBusy() {
@@ -196,6 +211,16 @@ public class SessionState {
      */
     public void setWindowId(String windowId) {
         this.windowId = windowId;
+    }
+
+    /**
+     * Session-kind refactor (S2): set the persistent container id. Called by
+     * {@code PairHandler} when a supervised session is created so later pair_*
+     * routing can resolve the container from this tab's state. Null for normal
+     * sessions.
+     */
+    public void setContainerId(String containerId) {
+        this.containerId = containerId;
     }
 
     public void setBusy(boolean busy) {

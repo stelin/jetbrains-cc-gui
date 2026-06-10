@@ -322,7 +322,8 @@ public class PairStatusPusher {
         java.util.List<L2State.DecisionEntry> recentDecisions = java.util.Collections.emptyList();
         if (l2Store != null) {
             try {
-                L2State s = l2Store.read(pair.getPairId());
+                // Session-kind refactor (S3): L2 keyed by the persistent container id.
+                L2State s = l2Store.read(pair.getL2Key());
                 if (s != null) {
                     generation = s.generation;
                     supervisorRotationCount = s.rotationCount;
@@ -435,7 +436,7 @@ public class PairStatusPusher {
         // in-memory ring stays the live source for buildSnapshot.
         if (l2Store != null) {
             try {
-                l2Store.update(pair.getPairId(), s -> {
+                l2Store.update(pair.getL2Key(), s -> {
                     s.recentCoordinatorEvents.add(new L2State.PersistedCoordinatorEvent(
                             e.ts, e.source.name(), e.type, e.message, e.detail));
                     while (s.recentCoordinatorEvents.size()

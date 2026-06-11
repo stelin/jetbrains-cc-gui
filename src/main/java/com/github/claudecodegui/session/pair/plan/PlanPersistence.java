@@ -77,6 +77,9 @@ public final class PlanPersistence {
         ps.lastError = step.lastError;
         ps.filesChanged = step.filesChanged == null
                 ? new ArrayList<>() : new ArrayList<>(step.filesChanged);
+        ps.acceptanceCriteria = step.acceptanceCriteria == null
+                ? new ArrayList<>() : new ArrayList<>(step.acceptanceCriteria);
+        ps.reportPath = step.reportPath;
         return ps;
     }
 
@@ -95,6 +98,9 @@ public final class PlanPersistence {
         s.lastError = ps.lastError;
         s.filesChanged = ps.filesChanged == null
                 ? new ArrayList<>() : new ArrayList<>(ps.filesChanged);
+        s.acceptanceCriteria = ps.acceptanceCriteria == null
+                ? new ArrayList<>() : new ArrayList<>(ps.acceptanceCriteria);
+        s.reportPath = ps.reportPath;
         return s;
     }
 

@@ -335,7 +335,15 @@ export default function SupervisorChatInput({ supervisor }: SupervisorChatInputP
         node.setSelectionRange(tail, tail);
       }
     });
-  }, []);
+    // Depend on setDraft: it is rebound whenever supervisor.agentId changes
+    // (switching supervisor type — the input updates IN PLACE, no remount, since
+    // SupervisorPane renders <SupervisorChatInput> without a key). With empty
+    // deps, insertFilePaths kept a STALE setDraft bound to the PREVIOUS agent, so
+    // a dropped file wrote the old agent's draft and the now-switched input never
+    // updated — i.e. drag-and-drop appeared to break after the first switch. The
+    // registration effect below (dep: insertFilePaths) re-runs on this change to
+    // re-register the fresh handler with the drop router.
+  }, [setDraft]);
 
   const handleDrop = useCallback((e: React.DragEvent<HTMLElement>) => {
     e.preventDefault();

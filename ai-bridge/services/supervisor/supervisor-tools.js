@@ -236,9 +236,13 @@ export function normalizeAction(args) {
  * @param {object} sdk - resolved @anthropic-ai/claude-agent-sdk module
  * @param {object} zod - resolved zod module (loaded via sdk-loader.loadZod())
  * @param {(action: object) => void} onCapture
+ * @param {Array<object>} [extraTools] - additional SDK tools to expose on the
+ *   same `supervisor` MCP server (e.g. emit_plan from plan-tools.js). Kept as a
+ *   parameter — rather than importing plan-tools here — so the dependency stays
+ *   one-way (plan-tools → supervisor-tools) and we avoid a circular import.
  * @returns {object} mcp server config compatible with the query() option
  */
-export function buildSupervisorMcpServer(sdk, zod, onCapture) {
+export function buildSupervisorMcpServer(sdk, zod, onCapture, extraTools = []) {
     if (typeof sdk?.createSdkMcpServer !== 'function' || typeof sdk?.tool !== 'function') {
         throw new Error('Claude Agent SDK does not expose createSdkMcpServer/tool — please upgrade to >= 0.2.0');
     }
@@ -285,6 +289,6 @@ export function buildSupervisorMcpServer(sdk, zod, onCapture) {
     return sdk.createSdkMcpServer({
         name: SUPERVISOR_MCP_NAME,
         version: '1.0.0',
-        tools: [emitActionTool],
+        tools: [emitActionTool, ...(Array.isArray(extraTools) ? extraTools : [])],
     });
 }

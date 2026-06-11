@@ -365,6 +365,10 @@ public class L2State {
         public int attempts;
         public String lastError;
         public List<String> filesChanged = new ArrayList<>();
+        /** Plan-time acceptance criteria (see {@code PlanStep.acceptanceCriteria}). */
+        public List<String> acceptanceCriteria = new ArrayList<>();
+        /** Most-recent spilled main-AI turn report path for this step (null = inlined). */
+        public String reportPath;
     }
 
     public static class PersistedContract {

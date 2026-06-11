@@ -70,7 +70,10 @@ public class PairHandler extends BaseMessageHandler {
             // Session-kind refactor (S2): create a supervised session that is
             // "born typed" — registers a container manifest first, then starts
             // the Pair indexed by that container id.
-            "session_create_supervised"
+            "session_create_supervised",
+            // 2026-06-11: rename a supervised container (pane-header inline edit)
+            // — updates the manifest title, shown in the supervised history list.
+            "session_rename_supervised"
     };
 
     private final Gson gson;
@@ -129,6 +132,9 @@ public class PairHandler extends BaseMessageHandler {
                 return true;
             case "session_create_supervised":
                 handleCreateSupervised(content);
+                return true;
+            case "session_rename_supervised":
+                handleRenameSupervised(content);
                 return true;
             default:
                 return false;
@@ -725,6 +731,38 @@ public class PairHandler extends BaseMessageHandler {
                     ? e.getMessage()
                     : "Internal error: " + e.getClass().getSimpleName();
             sendError("session_create_supervised", msg);
+        }
+    }
+
+    /**
+     * 2026-06-11: rename a supervised container. The pane-header inline edit
+     * sends {@code {containerId, title}}; we persist it to the manifest via
+     * {@link SessionRegistry#updateTitle}. A blank title clears the custom name
+     * (→ the supervised list falls back to the agent id). The supervised history
+     * list re-reads the manifest on its next load, so the rename shows there
+     * without an explicit push.
+     */
+    private void handleRenameSupervised(String content) {
+        try {
+            JsonObject data = gson.fromJson(content, JsonObject.class);
+            String containerId = data.has("containerId") && !data.get("containerId").isJsonNull()
+                    ? data.get("containerId").getAsString() : null;
+            String title = data.has("title") && !data.get("title").isJsonNull()
+                    ? data.get("title").getAsString() : null;
+            if (containerId == null || containerId.isEmpty()) {
+                throw new IllegalArgumentException("session_rename_supervised requires containerId");
+            }
+            if (context.getProject() == null) {
+                throw new IllegalStateException("no project context");
+            }
+            String trimmed = title == null ? "" : title.trim();
+            SessionRegistry.getInstance(context.getProject())
+                    .updateTitle(containerId, trimmed.isEmpty() ? null : trimmed);
+        } catch (Exception e) {
+            LOG.warn("[PairHandler] session_rename_supervised failed: "
+                    + (e.getMessage() != null ? e.getMessage() : e.getClass().getName()));
+            sendError("session_rename_supervised", e.getMessage() != null
+                    ? e.getMessage() : "Internal error: " + e.getClass().getSimpleName());
         }
     }
 

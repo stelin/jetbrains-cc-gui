@@ -377,7 +377,7 @@ public class ActionRouter {
                                 + "只有 reason 字段是不够的 —— reason 只用于显示卡片,主 AI 看不到。",
                         "本轮重新 emit_action(" + type + ", payload={inlinePrompt: '<给主 AI 的具体指令>', "
                                 + "objective: '...', expectedDeliverables: [...]})。"
-                                + "注意: save_plan 只是登记 plan 结构,不会自动派单 —— 派单必须靠 emit_action(inject_prompt) 带 inlinePrompt 字段。"
+                                + "注意: emit_plan 只是登记 plan 结构(生成结构化步骤),不会自动派单 —— 派单必须靠 emit_action(inject_prompt) 带 inlinePrompt 字段。"
                                 + "如果是 ping/echo 类轻量任务, inlinePrompt 写出你要主 AI 回复什么即可。");
                 return;
             }
@@ -412,6 +412,31 @@ public class ActionRouter {
                 if (payload.has("mark_step_complete") && !payload.get("mark_step_complete").isJsonNull()) {
                     int step = payload.get("mark_step_complete").getAsInt();
                     pair.getProgressManager().markStepStatus(step, "done");
+                    // 2026-06-11 ESSENTIAL FIX: advance the AUTHORITATIVE plan, not only
+                    // the projection. markStepStatus writes the separate progress.json; it
+                    // does NOT touch the PlanStateMachine. Without this the PlanStep is never
+                    // marked DONE and currentStepIndex never advances, so getCurrentStep()
+                    // stays on the just-finished step and the plan can never reach the next
+                    // TODO step — this is the root reason "approve→dispatch next step" never
+                    // fired. Mark the current in-flight step DONE by its id (robust to any
+                    // 0/1-based drift in mark_step_complete); onStepCompleted advances the
+                    // index and fires the PENDING_DECISION transition that wakes the monitor
+                    // to prompt the next-step dispatch (see SupervisorMonitor.computeNextStepToDispatch).
+                    PlanStateMachine advanceSm = pair.getPlanStateMachine();
+                    if (advanceSm != null && advanceSm.getCurrent() != null) {
+                        PlanStep curStep = advanceSm.getCurrent().getCurrentStep();
+                        if (curStep != null && curStep.status != PlanStep.StepStatus.DONE) {
+                            advanceSm.onStepCompleted(curStep.id);
+                            // Wake the monitor immediately so the next-step DISPATCH
+                            // directive is delivered now, not after the 30s
+                            // PENDING_DECISION debounce — keeps multi-step snappy.
+                            SupervisorMonitor mon = pair.getSupervisorMonitor();
+                            if (mon != null) {
+                                try { mon.wakeForPlanTransition(); }
+                                catch (Exception e) { LOG.debug("[ActionRouter] wake after step complete failed: " + e.getMessage()); }
+                            }
+                        }
+                    }
                     // Protocol v2 (2026-05-24): bump budget step counter so cost
                     // tracking reflects forward progress. Also useful for the
                     // completion report's stats section.
@@ -426,7 +451,8 @@ public class ActionRouter {
                     pair.resetDirectiveFailures();
                     // Phase 6 (2026-05-24): T1 — periodic RE-PLAN nudge. Every
                     // 5 completed steps, hint the supervisor to self-evaluate
-                    // its plan (it may call save_plan(source="replan")).
+                    // its plan (it may call emit_action(request_amendment) if it
+                    // needs changes — the plan is locked after emit_plan).
                     if (stepsCompleted > 0 && stepsCompleted % 5 == 0
                             && pair.getEventBus() != null) {
                         try {
@@ -1306,7 +1332,14 @@ public class ActionRouter {
         }
         Plan plan = sm.getCurrent();
         if (plan == null) {
-            // First inject_prompt: bootstrap a one-step plan.
+            // Fallback only (2026-06-10): the supervisor should have produced a
+            // real plan via emit_plan ([SUPERVISOR_PLAN] → onPlanCreated) before
+            // its first inject_prompt. Landing here means the plan is still null —
+            // the supervisor skipped emit_plan — so we synthesize a single-step
+            // plan to keep PlanStateMachine/DeadlockGuard structured. WARN so the
+            // gap is visible (a high rate signals a planning-prompt/model issue).
+            LOG.warn("[ActionRouter] inject_prompt with no plan — supervisor skipped "
+                    + "emit_plan; synthesizing a single-step fallback plan");
             java.util.List<PlanStep> steps = new java.util.ArrayList<>();
             steps.add(PlanStep.create("auto", 0, summarizeTitle(payload, prompt), PlanStep.StepOwner.MAIN_AI));
             sm.onPlanCreated(steps, null);

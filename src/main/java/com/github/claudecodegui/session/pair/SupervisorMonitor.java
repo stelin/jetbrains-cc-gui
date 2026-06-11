@@ -5,6 +5,7 @@ import com.github.claudecodegui.session.pair.l2.L2Store;
 import com.github.claudecodegui.session.pair.rotation.RotationTriggers;
 import com.github.claudecodegui.settings.CodemossSettingsService;
 import com.github.claudecodegui.settings.RotationConfig;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.intellij.openapi.diagnostic.Logger;
 
@@ -380,8 +381,18 @@ public class SupervisorMonitor {
             long startMs = batchStartMs;
             batchStartMs = endMs;
 
+            // 2026-06-11 ESSENTIAL FIX (next-step dispatch): when the plan is in
+            // PENDING_DECISION with an undispatched next TODO step (the supervisor
+            // just approved the previous step and must now dispatch the next one)
+            // we MUST forward a composite even on an empty batch — otherwise the
+            // empty-batch early-skip below drops the wake and nothing ever tells
+            // the supervisor to dispatch the next step (the "approve→next-step
+            // never fires" wedge). The composite carries nextStepToDispatch so the
+            // daemon renders a "dispatch the next step" directive instead of "wait".
+            JsonObject nextStepToDispatch = computeNextStepToDispatch();
+
             boolean isHealthCheck = (tickNumber % HEALTH_CHECK_EVERY_N_TICKS) == 0;
-            if (batch.isEmpty() && !isHealthCheck) {
+            if (batch.isEmpty() && !isHealthCheck && nextStepToDispatch == null) {
                 LOG.debug("[Monitor] " + pair.getPairId() + " tick #" + tickNumber + " empty skip");
                 return;
             }
@@ -403,7 +414,8 @@ public class SupervisorMonitor {
             if (isHealthCheck
                     && batch.events.isEmpty()
                     && batch.droppedSincePrevious == 0
-                    && pendingGenerationBanner.get() == null) {
+                    && pendingGenerationBanner.get() == null
+                    && nextStepToDispatch == null) {
                 pushHealthCheckNotice(tickNumber, startMs, endMs);
                 return;
             }
@@ -411,6 +423,10 @@ public class SupervisorMonitor {
             String banner = pendingGenerationBanner.getAndSet(null);
             JsonObject composite = CompositeSummaryBuilder.build(
                     batch, startMs, endMs, tickNumber, isHealthCheck, banner);
+            if (nextStepToDispatch != null && composite.has("payload")
+                    && composite.get("payload").isJsonObject()) {
+                composite.getAsJsonObject("payload").add("nextStepToDispatch", nextStepToDispatch);
+            }
 
             // Delegate to EventBus to reuse the existing transport-error +
             // lazy-restart-on-NOT_FOUND logic. forwardComposite blocks until
@@ -424,6 +440,65 @@ public class SupervisorMonitor {
             bus.forwardComposite(composite).get();
         } finally {
             coordinator.exitNormalOp();
+        }
+    }
+
+    /**
+     * 2026-06-11: when the plan sits in PENDING_DECISION (the supervisor just
+     * approved a step) and the next step is an UNDISPATCHED TODO step with
+     * nothing in flight, return a small descriptor so the wake tick prompts the
+     * supervisor to dispatch it instead of rendering the empty-batch "wait".
+     * Returns null unless there is genuinely a next step to dispatch: no plan,
+     * a terminal/non-ACTIVE plan, an open MAIN_AI contract (a step already in
+     * flight), or a next non-terminal step that is already dispatched / IN_PROGRESS
+     * all yield null.
+     */
+    private JsonObject computeNextStepToDispatch() {
+        try {
+            com.github.claudecodegui.session.pair.plan.PlanStateMachine sm = pair.getPlanStateMachine();
+            if (sm == null) return null;
+            com.github.claudecodegui.session.pair.plan.Plan plan = sm.getCurrent();
+            if (plan == null || plan.isTerminal()) return null;
+            if (plan.state != com.github.claudecodegui.session.pair.plan.Plan.PlanState.ACTIVE) return null;
+            // Something already in flight → not a dispatch-next moment.
+            com.github.claudecodegui.session.pair.contract.ContractRegistry reg = pair.getContractRegistry();
+            if (reg != null) {
+                for (com.github.claudecodegui.session.pair.contract.Contract c : reg.getOpenContracts()) {
+                    if (c.assignedTo == com.github.claudecodegui.session.pair.contract.ContractAssignee.MAIN_AI) {
+                        return null;
+                    }
+                }
+            }
+            // First non-terminal step is the decision point: only prompt a dispatch
+            // when it is a TODO step that was never dispatched (empty contractIds).
+            com.github.claudecodegui.session.pair.plan.PlanStep next = null;
+            for (com.github.claudecodegui.session.pair.plan.PlanStep s : plan.steps) {
+                if (s.status == com.github.claudecodegui.session.pair.plan.PlanStep.StepStatus.DONE
+                        || s.status == com.github.claudecodegui.session.pair.plan.PlanStep.StepStatus.SKIPPED) {
+                    continue;
+                }
+                if (s.status == com.github.claudecodegui.session.pair.plan.PlanStep.StepStatus.TODO
+                        && s.contractIds.isEmpty()) {
+                    next = s;
+                }
+                break; // first non-terminal step decides
+            }
+            if (next == null) return null;
+            JsonObject j = new JsonObject();
+            j.addProperty("index", next.index + 1);
+            j.addProperty("total", plan.steps.size());
+            if (next.title != null && !next.title.isEmpty()) j.addProperty("title", next.title);
+            if (next.acceptanceCriteria != null && !next.acceptanceCriteria.isEmpty()) {
+                JsonArray ac = new JsonArray();
+                for (String c : next.acceptanceCriteria) {
+                    if (c != null && !c.isEmpty()) ac.add(c);
+                }
+                if (ac.size() > 0) j.add("acceptanceCriteria", ac);
+            }
+            return j;
+        } catch (Exception e) {
+            LOG.debug("[Monitor] computeNextStepToDispatch failed: " + e.getMessage());
+            return null;
         }
     }
 

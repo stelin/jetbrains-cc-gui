@@ -693,6 +693,62 @@ public final class PairSessionManager implements Disposable {
         session.setPlanStateMachine(planSm);
         session.setContractRegistry(contractRegistry);
 
+        // Plan generation (2026-06-10): route the supervisor's emit_plan output
+        // (a [SUPERVISOR_PLAN] line) into the PlanStateMachine. This replaces the
+        // synthetic one-step bootstrap (ActionRouter.ensurePlanAndStep) with a
+        // real, supervisor-authored multi-step plan carrying acceptance criteria.
+        // Ignored once a plan exists — the plan is LOCKED (later changes go through
+        // request_amendment), which also makes restart safe: a hydrated plan is
+        // never clobbered by a stray late emit_plan. Resolves planSm by capture
+        // (effectively final) and fires on the daemon IPC reader thread.
+        bridge.setPlanHandler(payload -> {
+            try {
+                if (planSm.getCurrent() != null) {
+                    LOG.info("[PairSessionManager] " + pairId
+                            + " ignoring emit_plan — plan already exists (locked)");
+                    return;
+                }
+                if (payload == null || !payload.has("steps") || !payload.get("steps").isJsonArray()) {
+                    return;
+                }
+                com.google.gson.JsonArray arr = payload.getAsJsonArray("steps");
+                java.util.List<com.github.claudecodegui.session.pair.plan.PlanStep> steps =
+                        new java.util.ArrayList<>();
+                for (int i = 0; i < arr.size(); i++) {
+                    if (!arr.get(i).isJsonObject()) continue;
+                    com.google.gson.JsonObject so = arr.get(i).getAsJsonObject();
+                    String title = so.has("title") && !so.get("title").isJsonNull()
+                            ? so.get("title").getAsString() : ("step " + i);
+                    String ownerStr = so.has("owner") && !so.get("owner").isJsonNull()
+                            ? so.get("owner").getAsString() : "MAIN_AI";
+                    com.github.claudecodegui.session.pair.plan.PlanStep.StepOwner owner =
+                            "SUPERVISOR".equals(ownerStr)
+                                    ? com.github.claudecodegui.session.pair.plan.PlanStep.StepOwner.SUPERVISOR
+                                    : com.github.claudecodegui.session.pair.plan.PlanStep.StepOwner.MAIN_AI;
+                    java.util.List<String> ac = new java.util.ArrayList<>();
+                    if (so.has("acceptanceCriteria") && so.get("acceptanceCriteria").isJsonArray()) {
+                        for (com.google.gson.JsonElement el : so.getAsJsonArray("acceptanceCriteria")) {
+                            if (el != null && !el.isJsonNull()) ac.add(el.getAsString());
+                        }
+                    }
+                    int idx = so.has("index") && !so.get("index").isJsonNull()
+                            ? so.get("index").getAsInt() : i;
+                    steps.add(com.github.claudecodegui.session.pair.plan.PlanStep.create(
+                            "plan", idx, title, owner, ac));
+                }
+                if (steps.isEmpty()) return;
+                java.util.Map<String, Object> meta = new java.util.LinkedHashMap<>();
+                if (payload.has("rationale") && !payload.get("rationale").isJsonNull()) {
+                    meta.put("rationale", payload.get("rationale").getAsString());
+                }
+                planSm.onPlanCreated(steps, meta);
+                LOG.info("[PairSessionManager] " + pairId
+                        + " seeded plan from emit_plan: " + steps.size() + " steps");
+            } catch (Exception e) {
+                LOG.warn("[PairSessionManager] emit_plan handling failed: " + e.getMessage());
+            }
+        });
+
         // Hydrate plan + open contracts from L2 if present (IDE restart path).
         try {
             L2State persisted = l2Store.read(l2Key);
@@ -725,6 +781,35 @@ public final class PairSessionManager implements Disposable {
         } catch (Exception e) {
             LOG.warn("[PairSessionManager] L2 hydration of plan/contracts failed for "
                     + pairId + ": " + e.getMessage());
+        }
+
+        // Plan generation (2026-06-10): project the authoritative Plan into L2
+        // anchoredFacts/planProgress + render plan.md on every transition. Single
+        // source of truth = the Plan; these are derived views (the supervisor no
+        // longer writes them). restore() does NOT fire listeners, so project once
+        // now to reflect a freshly-hydrated plan.
+        com.github.claudecodegui.session.pair.plan.PlanProjectionListener planProjection =
+                new com.github.claudecodegui.session.pair.plan.PlanProjectionListener(l2Store, l2Key, pairId);
+        planSm.addListener(planProjection);
+        if (planSm.getCurrent() != null) {
+            com.github.claudecodegui.session.pair.plan.Plan restored = planSm.getCurrent();
+            planProjection.project(restored);
+            // P5 resume: if a non-terminal plan with an in-progress step was
+            // restored, arm a one-shot resume note so the supervisor reconciles
+            // that step against reality on its next event (it may have partially
+            // completed before the restart).
+            boolean anyInProgress = false;
+            if (restored.steps != null) {
+                for (com.github.claudecodegui.session.pair.plan.PlanStep st : restored.steps) {
+                    if (st.status == com.github.claudecodegui.session.pair.plan.PlanStep.StepStatus.IN_PROGRESS) {
+                        anyInProgress = true;
+                        break;
+                    }
+                }
+            }
+            if (!restored.isTerminal() && anyInProgress && session.getEventBus() != null) {
+                session.getEventBus().armResumeReconcile();
+            }
         }
 
         planSm.start();

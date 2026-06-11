@@ -101,6 +101,15 @@ public class SupervisorBridge {
     public static final String RESUME_MISS_PREFIX = "[SUPERVISOR_RESUME_MISS]";
 
     /**
+     * Plan generation (2026-06-10): emitted once per task when the supervisor
+     * calls the {@code emit_plan} MCP tool to produce its structured plan. Java
+     * converts the steps into {@code PlanStep[]} and seeds
+     * {@code PlanStateMachine.onPlanCreated}. Envelope:
+     * {@code { pairId, supervisorId, turnId, steps:[{index,title,owner,acceptanceCriteria}], rationale }}.
+     */
+    public static final String PLAN_LINE_PREFIX = "[SUPERVISOR_PLAN]";
+
+    /**
      * Phase 4 (2026-05-24): response payload for {@link #produceHandoff}. The
      * daemon turns the LLM's prose JSON output into an envelope of the form
      * {@code { "json": "...", "raw": "..." }} so Java can both validate the
@@ -197,6 +206,13 @@ public class SupervisorBridge {
     /** Session resume (SR5): consumer of {@code [SUPERVISOR_RESUME_MISS]} lines. */
     private volatile Consumer<JsonObject> resumeMissHandler;
 
+    /**
+     * Plan generation (2026-06-10): consumer of {@code [SUPERVISOR_PLAN]} lines.
+     * PairSessionManager wires this to seed the PlanStateMachine from the
+     * supervisor's emit_plan output. Null means the line is dropped (e.g. tests).
+     */
+    private volatile Consumer<JsonObject> planHandler;
+
     public SupervisorBridge(ClaudeSDKBridge sdkBridge, String pairId, String supervisorId) {
         this.sdkBridge = sdkBridge;
         this.pairId = pairId;
@@ -291,6 +307,11 @@ public class SupervisorBridge {
     /** Session resume (SR5): register a callback for {@code [SUPERVISOR_RESUME_MISS]} lines. */
     public void setResumeMissHandler(Consumer<JsonObject> handler) {
         this.resumeMissHandler = handler;
+    }
+
+    /** Plan generation: register a callback for {@code [SUPERVISOR_PLAN]} lines. See field doc. */
+    public void setPlanHandler(Consumer<JsonObject> handler) {
+        this.planHandler = handler;
     }
 
     /**
@@ -549,6 +570,29 @@ public class SupervisorBridge {
                                 }
                             } catch (Exception e) {
                                 LOG.warn("[SupervisorBridge] Failed to parse STATE_UPDATE line: "
+                                        + e.getMessage() + " | line=" + trimmed);
+                            }
+                            return;
+                        }
+
+                        // Plan generation (2026-06-10): SUPERVISOR_PLAN — the
+                        // supervisor emitted its structured plan via emit_plan.
+                        // Peek-first like the other side channels so a plan line
+                        // interleaved with stream messages is never swallowed.
+                        int planIdx = trimmed.indexOf(PLAN_LINE_PREFIX);
+                        if (planIdx >= 0) {
+                            String jsonText = trimmed.substring(planIdx + PLAN_LINE_PREFIX.length()).trim();
+                            try {
+                                JsonObject parsed = JsonParser.parseString(jsonText).getAsJsonObject();
+                                Consumer<JsonObject> planConsumer = planHandler;
+                                if (planConsumer != null) {
+                                    try { planConsumer.accept(parsed); }
+                                    catch (Exception e) {
+                                        LOG.warn("[SupervisorBridge] plan handler failed: " + e.getMessage());
+                                    }
+                                }
+                            } catch (Exception e) {
+                                LOG.warn("[SupervisorBridge] Failed to parse SUPERVISOR_PLAN line: "
                                         + e.getMessage() + " | line=" + trimmed);
                             }
                             return;

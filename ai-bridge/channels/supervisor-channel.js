@@ -24,7 +24,8 @@
  */
 
 import { loadClaudeSdk, loadZod, isClaudeSdkAvailable } from '../utils/sdk-loader.js';
-import { setupApiKey, buildCliEnv } from '../config/api-config.js';
+import { setupSupervisorAuth, buildCliEnv, loadClaudeSettings } from '../config/api-config.js';
+import { mapModelIdToSdkName, resolveModelFromSettings, setModelEnvironmentVariables } from '../utils/model-utils.js';
 import { AsyncStream } from '../utils/async-stream.js';
 import { estimateTokensFromChars } from '../utils/usage-utils.js';
 import { summarizeEvent } from '../services/supervisor/event-summarizer.js';
@@ -34,6 +35,14 @@ import {
     SUPERVISOR_MCP_NAME,
     EMIT_ACTION_TOOL_NAME,
 } from '../services/supervisor/supervisor-tools.js';
+import {
+    buildEmitPlanTool,
+    QUALIFIED_EMIT_PLAN,
+} from '../services/supervisor/plan-tools.js';
+import {
+    buildUpdateStateTool,
+    QUALIFIED_UPDATE_STATE,
+} from '../services/supervisor/update-state-tool.js';
 // 2026-06-01: MCP self-check for test/bug supervisors. Reused as-is from the
 // main-AI MCP status module — same ~/.claude.json source the main AI reads,
 // so the supervisor sees exactly the servers added via `claude mcp add`.
@@ -44,6 +53,19 @@ import {
 } from '../services/claude/mcp-status/index.js';
 
 const DEFAULT_MODEL = 'claude-haiku-4-5-20251001';
+
+// Transient API-error retry (2026-06-10): the supervisor's model API can return
+// an empty/malformed HTTP 200 (a proxy/gateway hiccup) that the SDK surfaces as
+// "API Error: ..." assistant content with no captured action/plan. The main AI
+// already retries these (message-sender.js AUTO_RETRY, maxRetries:2); the
+// supervisor did not, so a transient blip surfaced a raw error and stalled the
+// turn. Mirror the main AI: re-prompt a couple of times before downgrading.
+const MAX_TURN_RETRIES = 2;
+const RETRY_BASE_DELAY_MS = 800;
+function isTransientApiError(text) {
+    if (typeof text !== 'string' || !text) return false;
+    return /API Error:|empty or malformed response|proxy or gateway intercepting/i.test(text);
+}
 
 // v3: read-only file tools granted to the supervisor so it can perform
 // in-turn review (Glob to locate produced files, Read to inspect contents,
@@ -253,6 +275,14 @@ class SupervisorRuntime {
          */
         this.lastCapturedAction = null;
         /**
+         * Filled by the emit_plan tool handler when the supervisor produces its
+         * (one-time) structured plan this turn. Reset at the start of each
+         * postEvent; read after the turn to emit a [SUPERVISOR_PLAN] line. Null
+         * on every non-planning turn (which is almost all of them).
+         * @type {{steps: Array, rationale: string} | null}
+         */
+        this.lastCapturedPlan = null;
+        /**
          * v4 unified pipeline: turnId assigned at the start of postEvent. Used by
          * streamSdkMessage so each `[SUPERVISOR_MSG]` line carries the same id
          * as the wrapper's terminating `[SUPERVISOR_ACTION]`. null between
@@ -322,8 +352,46 @@ function buildSystemPrompt({ name, description, planContent, specContent }) {
 
     sections.push(
         '',
+        '# 规划协议（新任务第一步，最优先）',
+        '处理一个新任务时，你的**第一个动作**是调用 `emit_plan` 产出结构化计划：',
+        '- 把任务（上面的「当前任务方案」，或用户在输入框给出的任务）拆成有序步骤；',
+        '- 每步写明 owner（默认 MAIN_AI）与**验收标准** acceptanceCriteria——你之后据此 Read 真实产物逐条核验，'
+            + '**不是**听主 AI 自述说做了就算；',
+        '- **只做结构化，不发明目标**：目标以外部任务/方案为准。',
+        '收到带 `[PLANNING_REQUIRED]` 的事件时，**必须先 emit_plan**，之后可在同一轮 `emit_action(inject_prompt)` 派发第 1 步。',
+        '计划一旦 emit 即**锁定**：要调整走 `emit_action(request_amendment)`，**不要再次 emit_plan**。',
+        '若你已为当前任务产出过 plan（对话历史里有），**不要重复 emit_plan**，直接按计划监督。',
+        '',
+        '# 续跑核验（恢复已有进度的计划时）',
+        '当你在恢复一个已有进度的计划（事件里带恢复提示，或 plan.md 显示已有进度）：',
+        '- **已完成(DONE)步**：信任，不复查；**未开始(TODO)步**：不查；',
+        '- **正在执行(IN_PROGRESS)步：必须对账**——先 Read 现场、对照该步验收标准判断它实际做到哪了'
+            + '（崩溃前可能已部分完成），再决定：续做剩余 / 已达标则 approve_and_continue(mark_step_complete) / 偏差大则 inject_prompt 重做。',
+        '- 计划与进度可 Read `plan.md`（系统按你的计划自动渲染），不要凭记忆臆断。',
+        '',
+        '# 推进前置条件（铁律，任何时候都成立）',
+        '推进下一步 / `approve_and_continue` 标完成 / `complete_plan` 收尾，前提是：',
+        '**当前步已经收到主 AI 对该步的回复（该步的 turn_report / turn_end 事件），且你已 Read 真实产物核验通过。**',
+        '把每一步钉成三态，禁止凭记忆把"派过"当成"做完了"：',
+        '- 已派发(dispatched)：你调了 `inject_prompt` 派单，但**还没**看到该步的 turn_report；',
+        '- 已回复(replied)：你已收到该步的 turn_report / turn_end；',
+        '- 已完成(done)：已回复 + 你据验收标准 Read 真实产物核验通过。',
+        '每次准备推进前，先就**当前步**自问：它的 turn_report 到了吗？',
+        '- 当前步 = TODO / 未开始（从未派发过）→ 这是"首次派单(dispatch)"，不是"推进(advance)"：'
+            + '**直接正常派发它**（`emit_action(inject_prompt)`，带 objective + acceptanceCriteria），'
+            + '**不需要、也等不到它的 turn_report 才派**。上面的 turn_report 前置校验只适用于"已派发、等待复核/标完成"的步骤。'
+            + '（系统也会在该派下一步时给你 [DISPATCH_NEXT_STEP] 提示——照它派，别 wait。）',
+        '- 到了 → 走 review 协议（Read 核验）→ `approve_and_continue` / `complete_plan`；',
+        '- **没到（派了但主 AI 没回复）→ 禁止推进下一步、禁止标完成 / 收尾**。改用 `inject_prompt` '
+            + '**重新下发当前步**，指令里要求主 AI **先自查这一步已做了哪些、还差哪些（可能已部分完成），'
+            + '把剩余补完，再 report_turn_completion**；收到该步回复并核验通过后，才进入下一步。',
+        '绝不凭"我记得派过 / 我以为做完了"推进——唯一的推进依据是"收到了该步的回复事件"。'
+            + '这条与上面「续跑核验」同源，只是它在任何时候都成立，不限于恢复场景。',
+        '',
         '# 你可用的只读工具（必读）',
-        '除 `emit_action` 外，你拥有 **只读** 文件工具：`Read`、`Glob`、`Grep`。',
+        '除 `emit_action` / `emit_plan` / `update_state` 外，你拥有 **只读** 文件工具：`Read`、`Glob`、`Grep`。',
+        '- `update_state`：把 A/B 级自决或新发现的硬约束记进记忆（decisionAppend / constraintAdd）；'
+            + '**计划进度不用你写**，系统按你的 plan 自动投影到 plan.md。',
         '- 你**没有**写工具——不能调用 Edit / Write / Bash。修改代码靠 inject_prompt 让主 AI 做。',
         '- 一个 turn 内可以多次调用文件工具，最后调用 **一次** `emit_action` 收尾。',
         '',
@@ -460,17 +528,30 @@ export async function startSupervisorSession(params) {
     runtime.requestedResumeId = (typeof resumeSessionId === 'string' && resumeSessionId.trim())
         ? resumeSessionId.trim() : null;
 
-    // Build the in-process MCP server. The handler captures the validated
-    // action onto the runtime; collectAssistantTurn reads it after the turn.
-    const supervisorMcpServer = buildSupervisorMcpServer(sdk, zod, (action) => {
-        runtime.lastCapturedAction = action;
+    // Build the in-process MCP server. The handlers capture the validated
+    // action / plan onto the runtime; collectAssistantTurn + postEvent read them
+    // after the turn. emit_plan is built here (not inside buildSupervisorMcpServer)
+    // and passed in as an extra tool, keeping the plan-tools → supervisor-tools
+    // dependency one-way (no circular import).
+    const z = zod?.z ?? zod?.default?.z ?? zod;
+    const emitPlanTool = buildEmitPlanTool(sdk, z, (plan) => {
+        runtime.lastCapturedPlan = plan;
     });
+    const updateStateTool = buildUpdateStateTool(sdk, z);
+    const supervisorMcpServer = buildSupervisorMcpServer(
+        sdk,
+        zod,
+        (action) => { runtime.lastCapturedAction = action; },
+        [emitPlanTool, updateStateTool]
+    );
 
     // Allow emit_action + read-only file tools by default; callers may opt-in
     // to extra tools. Read/Glob/Grep are required by the v3 supervisor prompt
     // to perform in-turn code review (see SUPERVISOR_READ_TOOLS comment).
     const allowedToolList = [
         QUALIFIED_EMIT_ACTION,
+        QUALIFIED_EMIT_PLAN,
+        QUALIFIED_UPDATE_STATE,
         ...SUPERVISOR_READ_TOOLS,
         ...runtime.allowedTools,
         // 2026-06-01: attached `claude mcp add` servers (empty unless mcpAccess).
@@ -482,15 +563,33 @@ export async function startSupervisorSession(params) {
     // it never set up auth. So when a supervisor turn runs BEFORE any main-AI
     // request (composer mode: the user talks to the supervisor directly), the
     // global process.env has no ANTHROPIC_* creds and the SDK 403s ("Request not
-    // allowed"). Mirror the main AI: populate the current provider's creds into
-    // process.env via setupApiKey(), then snapshot them + the CLI identity into
-    // the SDK child via options.env (buildCliEnv). Best-effort — a genuinely
-    // missing key still surfaces the same 403, but a configured one now works.
+    // allowed"). setupSupervisorAuth() populates process.env: a configured Claude
+    // provider when present, ELSE the active Codex provider's base_url+key (when
+    // it's a unified / Anthropic-compatible proxy) so local-mode supervisor + main
+    // AI can share ONE provider config. Then buildCliEnv() snapshots the creds +
+    // CLI identity into the SDK child. Best-effort — if nothing resolves, the same
+    // 403 surfaces (no regression).
     try {
-        setupApiKey();
+        setupSupervisorAuth();
     } catch (e) {
-        process.stderr.write(`[supervisor] setupApiKey failed (relying on existing env): ${e?.message || e}\n`);
+        process.stderr.write(`[supervisor] setupSupervisorAuth failed (relying on existing env): ${e?.message || e}\n`);
     }
+
+    // Model resolution — mirror the main-AI channel (message-sender.js:446-450).
+    // The supervisor's configured model is a Claude tier id (e.g. claude-opus-4-8),
+    // but a unified proxy only knows the user's mapped name (settings.env
+    // ANTHROPIC_DEFAULT_OPUS_MODEL = gpt-5.5). Passing the raw id makes the SDK send
+    // "claude-opus-4-8" verbatim → the proxy 422s "model not found". So:
+    //   1) mapModelIdToSdkName → the SDK tier selector ('opus'/'sonnet'/'haiku');
+    //   2) setModelEnvironmentVariables stages the mapped concrete model into
+    //      ANTHROPIC_DEFAULT_*_MODEL (snapshotted below by buildCliEnv).
+    // The SDK then substitutes the tier → the proxy's real model. No-op when the
+    // model id isn't an Anthropic tier or no mapping is configured.
+    const supSettings = loadClaudeSettings();
+    const sdkModelName = mapModelIdToSdkName(runtime.model);
+    const resolvedSupModel = resolveModelFromSettings(runtime.model, supSettings?.env);
+    setModelEnvironmentVariables(resolvedSupModel, runtime.model);
+    process.stdout.write(`[supervisor] model ${runtime.model} → sdk='${sdkModelName}' api='${resolvedSupModel}'\n`);
 
     // SDK options. Supervisor judgment-only: no project-scoped settings, no
     // file checkpointing. We do still pass a cwd because the SDK requires one.
@@ -499,10 +598,13 @@ export async function startSupervisorSession(params) {
         prompt: runtime.inputStream,
         options: {
             cwd,
-            // Snapshot the provider creds (set by setupApiKey above) + CLI identity
-            // into the supervisor's SDK child process — same as the main-AI channel.
+            // Snapshot the provider creds (setupSupervisorAuth) + the model-alias
+            // env (setModelEnvironmentVariables) + CLI identity into the SDK child —
+            // same as the main-AI channel.
             env: buildCliEnv(),
-            model: runtime.model,
+            // SDK tier selector ('opus'/'sonnet'/'haiku'); the concrete model is
+            // resolved from ANTHROPIC_DEFAULT_*_MODEL staged above.
+            model: sdkModelName,
             maxTurns: 100,
             // 2026-05-28: emit partial-message stream_event frames so the
             // supervisor's WaitingIndicator can show a live "↓ N tokens" counter
@@ -541,7 +643,8 @@ export async function startSupervisorSession(params) {
             // Defensive allowlist: pre-approve emit_action, deny everything else
             // even if it slips into allowedTools by mistake.
             canUseTool: async (toolName) => {
-                if (toolName === QUALIFIED_EMIT_ACTION) {
+                if (toolName === QUALIFIED_EMIT_ACTION || toolName === QUALIFIED_EMIT_PLAN
+                        || toolName === QUALIFIED_UPDATE_STATE) {
                     return { behavior: 'allow' };
                 }
                 if (SUPERVISOR_READ_TOOLS.includes(toolName)) {
@@ -611,6 +714,7 @@ export async function postEventToSupervisor(params) {
 
         // Reset per-turn capture before enqueueing the next user message.
         runtime.lastCapturedAction = null;
+        runtime.lastCapturedPlan = null;
 
         // v4 unified pipeline: assign a turnId so streamed SDK messages and the
         // closing [SUPERVISOR_ACTION] wrapper can be correlated on the webview
@@ -620,17 +724,62 @@ export async function postEventToSupervisor(params) {
 
         // Enqueue the summarized event as a user message in the SDK input stream.
         // Schema must match what the Claude Agent SDK expects (see persistent-query-service.js).
-        runtime.inputStream.enqueue({
-            type: 'user',
-            session_id: '',
-            parent_tool_use_id: null,
-            message: {
-                role: 'user',
-                content: [{ type: 'text', text: summary }],
-            },
-        });
+        const enqueueUserText = (text) => {
+            runtime.inputStream.enqueue({
+                type: 'user',
+                session_id: '',
+                parent_tool_use_id: null,
+                message: {
+                    role: 'user',
+                    content: [{ type: 'text', text }],
+                },
+            });
+        };
+        enqueueUserText(summary);
 
-        const turn = await collectAssistantTurn(runtime);
+        let turn = await collectAssistantTurn(runtime);
+
+        // Transient API-error retry: an empty/malformed HTTP 200 from the model
+        // endpoint surfaces as "API Error: ..." assistant text with no captured
+        // action/plan. Re-prompt up to MAX_TURN_RETRIES before falling through to
+        // the downgrade — mirrors the main AI's AUTO_RETRY so a proxy/gateway blip
+        // doesn't show a raw error or stall the supervisor.
+        for (let attempt = 1;
+             attempt <= MAX_TURN_RETRIES
+                 && !runtime.lastCapturedAction && !runtime.lastCapturedPlan
+                 && isTransientApiError(turn.assistantText);
+             attempt++) {
+            console.error(
+                `[supervisor] transient API error (retry ${attempt}/${MAX_TURN_RETRIES}) `
+                + `pair=${pairId}: ${(turn.assistantText || '').slice(0, 140).replace(/\n/g, ' ')}`
+            );
+            await new Promise((r) => setTimeout(r, RETRY_BASE_DELAY_MS * attempt));
+            if (runtime.disposed) break;
+            enqueueUserText(
+                '上一次响应为空或异常（API/网关返回空 200）。请忽略该错误，重新对上面的事件做出决策并调用相应工具收尾。'
+            );
+            turn = await collectAssistantTurn(runtime);
+        }
+
+        // emit_plan side channel: if the supervisor produced its structured plan
+        // this turn, forward it to Java FIRST (before [SUPERVISOR_ACTION]) so
+        // PlanStateMachine.onPlanCreated runs before any same-turn inject_prompt
+        // is routed — step-0 dispatch then lands on the real plan, not a synthetic
+        // one. Tagged with the same turnId as the closing action wrapper.
+        if (runtime.lastCapturedPlan) {
+            try {
+                process.stdout.write('[SUPERVISOR_PLAN] ' + JSON.stringify({
+                    pairId,
+                    supervisorId,
+                    turnId,
+                    steps: runtime.lastCapturedPlan.steps,
+                    rationale: runtime.lastCapturedPlan.rationale || '',
+                }) + '\n');
+            } catch (e) {
+                console.error('[supervisor] failed to emit [SUPERVISOR_PLAN]: '
+                    + (e?.message || String(e)));
+            }
+        }
 
         const wrapper = buildActionWrapper({
             pairId,
@@ -640,6 +789,13 @@ export async function postEventToSupervisor(params) {
             capturedAction: runtime.lastCapturedAction,
         });
         wrapper.turnId = turnId;
+        // A planning turn that emitted a plan but no action is valid — don't
+        // surface the "(downgraded) no emit_action" parse error; convert to a
+        // clean wait so the UI shows no spurious error card.
+        if (wrapper.parseError === 'no_tool_use' && runtime.lastCapturedPlan) {
+            wrapper.action = { action: 'wait', reason: 'plan emitted; awaiting first dispatch', payload: {} };
+            wrapper.parseError = null;
+        }
         // v3 side-channel data: only `usage` remains on the wrapper. tool_use
         // and compaction blocks now flow live via [SUPERVISOR_MSG] streaming so
         // the webview can render them as they happen (and so we no longer

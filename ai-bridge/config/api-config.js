@@ -5,7 +5,7 @@
 
 import { readFileSync, existsSync } from 'fs';
 import { join } from 'path';
-import { getClaudeDir, getCodemossDir, getManagedSettingsPath } from '../utils/path-utils.js';
+import { getClaudeDir, getCodemossDir, getManagedSettingsPath, getRealHomeDir } from '../utils/path-utils.js';
 
 // Conditional debug logging: set CLAUDE_DEBUG=1 to enable verbose diagnostics
 const DEBUG = process.env.CLAUDE_DEBUG === '1' || process.env.CLAUDE_DEBUG === 'true';
@@ -450,6 +450,94 @@ export function setupApiKey() {
   debugLog('[DIAG-CONFIG] apiKey configured:', apiKey ? 'YES' : 'NO');
 
   return { apiKey, baseUrl, authType, apiKeySource, baseUrlSource };
+}
+
+/**
+ * Resolve the Supervisor's Anthropic auth. The supervisor always runs on the
+ * Claude Agent SDK (Anthropic protocol), so it needs ANTHROPIC_BASE_URL/KEY.
+ *
+ *  1) Prefer a configured Claude provider — {@link setupApiKey} (the normal path).
+ *  2) Zero-config fallback (2026-06-10): when NO Claude provider is configured
+ *     but the user drives the MAIN AI through a key-based Codex provider that is
+ *     actually a UNIFIED / Anthropic-compatible proxy, reuse that provider's
+ *     base_url + api_key (from ~/.codex/{config.toml,auth.json}) as the
+ *     supervisor's Anthropic creds. This lets local-mode supervisor + main AI
+ *     share ONE provider config without the user registering a second (Claude)
+ *     provider. Skipped for Codex CLI-login (OAuth) — those tokens are not a
+ *     reusable API key for the Anthropic SDK.
+ *
+ * Best-effort: if neither resolves, ANTHROPIC_* stays unset and the supervisor
+ * surfaces the same 403 as before — no regression.
+ *
+ * @returns {{apiKey: ?string, baseUrl: ?string, authType: string, apiKeySource: string}|null}
+ */
+export function setupSupervisorAuth() {
+  // 1) Claude provider — the canonical path.
+  try {
+    const result = setupApiKey();
+    if (process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN
+        || result?.authType === 'cli_login' || result?.authType === 'api_key_helper') {
+      return result;
+    }
+  } catch (e) {
+    debugLog('[supervisor-auth] no Claude provider (' + (e?.message || e) + '); trying Codex unified-proxy fallback');
+  }
+
+  // 2) Codex unified-proxy fallback — reuse the active Codex provider's creds.
+  const codex = readActiveCodexCreds();
+  if (codex && codex.apiKey && codex.baseUrl) {
+    process.env.ANTHROPIC_BASE_URL = codex.baseUrl;
+    process.env.ANTHROPIC_API_KEY = codex.apiKey;
+    console.log('[supervisor-auth] using active Codex provider creds as Anthropic auth (unified proxy) — baseUrl=' + codex.baseUrl);
+    return { apiKey: codex.apiKey, baseUrl: codex.baseUrl, authType: 'api_key', apiKeySource: 'codex-unified-fallback' };
+  }
+  console.warn('[supervisor-auth] no Claude provider and no reusable Codex API key — supervisor may 403 (configure a Claude provider, or use a key-based Codex provider).');
+  return null;
+}
+
+/**
+ * Read the active Codex provider's reusable API key + base_url from
+ * ~/.codex/{auth.json,config.toml}. Returns null for CLI-login (OAuth) mode
+ * (no API key) or when either piece is missing.
+ */
+function readActiveCodexCreds() {
+  try {
+    const codexDir = join(getRealHomeDir(), '.codex');
+    const authPath = join(codexDir, 'auth.json');
+    const cfgPath = join(codexDir, 'config.toml');
+    if (!existsSync(authPath) || !existsSync(cfgPath)) return null;
+
+    const auth = JSON.parse(readFileSync(authPath, 'utf8'));
+    // CLI-login (ChatGPT OAuth) carries no reusable API key → handled by the
+    // apiKey == null check below (its OPENAI_API_KEY is null in that mode).
+    const apiKey = auth && (auth.OPENAI_API_KEY || auth.openai_api_key || auth.api_key || auth.apiKey);
+    if (!apiKey || typeof apiKey !== 'string') return null;
+
+    const baseUrl = extractCodexBaseUrl(readFileSync(cfgPath, 'utf8'));
+    if (!baseUrl) return null;
+    return { apiKey, baseUrl };
+  } catch (e) {
+    debugLog('[supervisor-auth] readActiveCodexCreds failed: ' + (e?.message || e));
+    return null;
+  }
+}
+
+/**
+ * Extract the active model provider's base_url from a Codex config.toml. Prefers
+ * the section named by `model_provider = "X"`; falls back to the first base_url.
+ * Minimal regex parse — avoids adding a TOML dependency to the daemon.
+ */
+function extractCodexBaseUrl(toml) {
+  if (!toml) return null;
+  const mp = /^\s*model_provider\s*=\s*["']([^"']+)["']/m.exec(toml);
+  if (mp) {
+    const name = mp[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const sec = new RegExp(`\\[model_providers\\.${name}\\]([\\s\\S]*?)(?:\\n\\s*\\[|$)`).exec(toml);
+    const inSection = sec ? /base_url\s*=\s*["']([^"']+)["']/.exec(sec[1]) : null;
+    if (inSection) return inSection[1];
+  }
+  const any = /base_url\s*=\s*["']([^"']+)["']/.exec(toml);
+  return any ? any[1] : null;
 }
 
 /**

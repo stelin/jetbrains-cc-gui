@@ -1,3 +1,4 @@
+import { useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { ClaudeMessage } from '../../types';
 import SupervisorSubPanel from './SupervisorSubPanel';
@@ -48,7 +49,16 @@ export default function SupervisorPane({
   status,
 }: SupervisorPaneProps) {
   const { t } = useTranslation();
-  const { selected, thinkingByAgentId, streamingByAgentId, pairId, pairStatus } = usePairContext();
+  const {
+    selected, thinkingByAgentId, streamingByAgentId, pairId, pairStatus,
+    supervisorTitle, renameSupervisor, containerId,
+  } = usePairContext();
+
+  // Inline rename of the supervised session (pane-header pencil). These hooks
+  // must run BEFORE the early return below (rules of hooks).
+  const [editingName, setEditingName] = useState(false);
+  const [nameDraft, setNameDraft] = useState('');
+  const cancelRenameRef = useRef(false);
 
   if (selected.length === 0) return null;
 
@@ -84,12 +94,74 @@ export default function SupervisorPane({
     requestAnimationFrame(() => focusChatInput('supervisor'));
   };
 
+  const startRename = () => {
+    setNameDraft(supervisorTitle);
+    cancelRenameRef.current = false;
+    setEditingName(true);
+  };
+  // Enter and blur both commit; Esc sets the cancel flag then blurs (→ skip),
+  // so there is exactly one commit/cancel path (no double IPC).
+  const finishRename = () => {
+    if (cancelRenameRef.current) {
+      cancelRenameRef.current = false;
+      setEditingName(false);
+      return;
+    }
+    setEditingName(false);
+    renameSupervisor(nameDraft);
+  };
+
   return (
     <div className={styles.rightPane}>
       <div className={styles.paneHeader}>
         <div className={styles.headerTitle}>
           <span className={styles.statusDot} />
           <span>{t('pairLayout.paneTitle')}</span>
+          {editingName ? (
+            <input
+              autoFocus
+              type="text"
+              value={nameDraft}
+              maxLength={60}
+              onChange={(e) => setNameDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') { e.preventDefault(); (e.target as HTMLInputElement).blur(); }
+                else if (e.key === 'Escape') {
+                  e.preventDefault();
+                  cancelRenameRef.current = true;
+                  (e.target as HTMLInputElement).blur();
+                }
+              }}
+              onBlur={finishRename}
+              placeholder={t('pairLayout.renamePlaceholder', { defaultValue: '监督者名称' })}
+              style={{
+                marginLeft: 6,
+                maxWidth: 160,
+                padding: '1px 6px',
+                fontSize: 12,
+                background: 'var(--vscode-input-background, rgba(255,255,255,0.08))',
+                color: 'var(--vscode-input-foreground, inherit)',
+                border: '1px solid var(--vscode-focusBorder, rgba(255,255,255,0.3))',
+                borderRadius: 3,
+                outline: 'none',
+              }}
+            />
+          ) : (
+            <>
+              {supervisorTitle && (
+                <span style={{ marginLeft: 6, opacity: 0.8, fontWeight: 400 }}>· {supervisorTitle}</span>
+              )}
+              <button
+                className={styles.iconButton}
+                title={t('pairLayout.renameSupervisor', { defaultValue: '重命名监督者' })}
+                onClick={startRename}
+                disabled={!containerId}
+                style={{ marginLeft: 4 }}
+              >
+                <span className="codicon codicon-edit" />
+              </button>
+            </>
+          )}
         </div>
         <div className={styles.headerActions}>
           {/* 2026-05-25 (FUNDAMENTAL FIX): manual interrupt. 2026-05-28: gated on

@@ -104,6 +104,21 @@ public class EventBus {
         if (!EventFilter.shouldForward(event)) {
             return CompletableFuture.completedFuture(null);
         }
+        // P5 resume: decorate the first forwarded event after a restart that
+        // restored a non-terminal plan, so the supervisor reconciles its
+        // IN_PROGRESS step against reality. One-shot — consumed here.
+        if (resumeReconcileArmed) {
+            resumeReconcileArmed = false;
+            try {
+                if (event.has("payload") && event.get("payload").isJsonObject()) {
+                    event.getAsJsonObject("payload").addProperty("resuming", true);
+                } else {
+                    JsonObject pl = new JsonObject();
+                    pl.addProperty("resuming", true);
+                    event.add("payload", pl);
+                }
+            } catch (Exception ignored) { /* best-effort */ }
+        }
         if (isMonitorPathEnabled()) {
             // 2026-05-25: for user-initiated events (the user just typed a
             // message), eagerly signal "thinking" so the UI shows feedback
@@ -234,11 +249,35 @@ public class EventBus {
         return publish(makeEvent("off_plan_detected", payload));
     }
 
+    /**
+     * P5 resume (2026-06-10): one-shot flag. When armed (by PairSessionManager
+     * after restoring a non-terminal plan with an in-progress step), the next
+     * forwarded event is decorated with {@code payload.resuming=true} so the
+     * supervisor reconciles its IN_PROGRESS step against reality. Consumed once.
+     */
+    private volatile boolean resumeReconcileArmed = false;
+
+    /** P5 resume: arm the one-shot resume-reconcile note. See field doc. */
+    public void armResumeReconcile() {
+        this.resumeReconcileArmed = true;
+    }
+
     public CompletableFuture<Void> publishStart(int currentStep, int totalSteps, String stepTitle) {
         JsonObject payload = new JsonObject();
         payload.addProperty("currentStep", currentStep);
         payload.addProperty("totalSteps", totalSteps);
         if (stepTitle != null) payload.addProperty("currentStepTitle", stepTitle);
+        // Plan generation (2026-06-10): a workflow node carries its task in
+        // planContent (system prompt) and is driven by this start event — so when
+        // no plan exists yet AND the pair has plan content, start is the planning
+        // trigger. A single-tab supervisor has empty planContent here and instead
+        // plans on its first user_input (see publishUserInput).
+        com.github.claudecodegui.session.pair.plan.PlanStateMachine startSm = pair.getPlanStateMachine();
+        String planContent = pair.getPlanContent();
+        if (startSm != null && startSm.getCurrent() == null
+                && planContent != null && !planContent.trim().isEmpty()) {
+            payload.addProperty("planningRequired", true);
+        }
         return publish(makeEvent("start", payload));
     }
 
@@ -288,6 +327,13 @@ public class EventBus {
         }
         JsonObject payload = new JsonObject();
         if (text != null) payload.addProperty("text", text);
+        // Plan generation (2026-06-10): when no plan exists yet, this user message
+        // is the task that should trigger the supervisor's emit_plan planning turn.
+        // The daemon's event-summarizer renders a [PLANNING_REQUIRED] directive
+        // when this flag is set. (sm resolved above.)
+        if (sm != null && sm.getCurrent() == null) {
+            payload.addProperty("planningRequired", true);
+        }
         return publish(makeEvent("user_input", payload));
     }
 
@@ -387,8 +433,8 @@ public class EventBus {
     //               approve_and_continue. Supervisor should mark step blocked +
     //               continue to next step rather than keep retrying.
     // replan_due:   T1 — periodic (every 5 approved steps) OR after a
-    //               record_alert. Hints supervisor to call save_plan(source=replan)
-    //               and refresh its working plan before continuing.
+    //               record_alert. Hints supervisor to request_amendment and
+    //               refresh its working plan before continuing.
     // ============================================================================
 
     /**
@@ -409,7 +455,7 @@ public class EventBus {
      * T1: tell the supervisor it is time to self-evaluate its plan. {@code trigger}
      * is "periodic" (every N approved steps) or "after_alert" (right after a
      * record_alert). Supervisor typically responds by dispatching a planner
-     * subagent and calling save_plan(source="replan") if changes are needed.
+     * subagent and calling emit_action(request_amendment) if changes are needed.
      */
     public CompletableFuture<Void> publishReplanDue(String trigger, int stepsCompleted) {
         JsonObject payload = new JsonObject();

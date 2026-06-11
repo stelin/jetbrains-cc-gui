@@ -267,11 +267,32 @@ class HistoryLoadService {
      * or none of their legs appear in this list. Fail-soft: on any parse error the
      * unfiltered JSON is returned (better a stray entry than an empty normal tab).
      */
-    /** Daemon-assembled supervisor user frames all start with this (ai-bridge
-     *  {@code event-summarizer.js}: {@code ## USER MESSAGE [${elapsed}]}). A
-     *  supervisor session's default title (its first user frame) therefore carries
-     *  this signature — used to drop legacy supervisor leaks that have no manifest. */
-    private static final String SUPERVISOR_TITLE_SIGNATURE = "## USER MESSAGE [";
+    /**
+     * Daemon-assembled supervisor event frames (ai-bridge {@code event-summarizer.js})
+     * all start with one of these markers, so a supervisor session's default title
+     * (its first frame) carries one of these signatures — used to drop supervisor
+     * leaks that have no manifest claim.
+     *
+     * <p>Plan A (2026-06-10) prepends a {@code ## [PLANNING_REQUIRED]} / {@code ## [RESUME]}
+     * directive AHEAD of the {@code ## USER MESSAGE [} frame on the first / resume
+     * event — which shifted the title's leading signature and let those sessions
+     * leak into the normal tab. Hence the extra entries.
+     */
+    private static final String[] SUPERVISOR_TITLE_SIGNATURES = {
+        "## USER MESSAGE [",
+        "## [PLANNING_REQUIRED]",
+        "## [RESUME]",
+    };
+
+    /** True when {@code title} begins with any supervisor event-frame signature. */
+    private static boolean matchesSupervisorSignature(String title) {
+        if (title == null) return false;
+        String t = title.trim();
+        for (String sig : SUPERVISOR_TITLE_SIGNATURES) {
+            if (t.startsWith(sig)) return true;
+        }
+        return false;
+    }
 
     private String filterClaimedMainSessions(String historyJson) {
         try {
@@ -304,7 +325,7 @@ class HistoryLoadService {
                 // first-message text (not a user custom title) — the signature holds.
                 String title = s.has("title") && !s.get("title").isJsonNull()
                         ? s.get("title").getAsString() : null;
-                if (title != null && title.trim().startsWith(SUPERVISOR_TITLE_SIGNATURE)) {
+                if (matchesSupervisorSignature(title)) {
                     removedSignature++;
                     continue;
                 }

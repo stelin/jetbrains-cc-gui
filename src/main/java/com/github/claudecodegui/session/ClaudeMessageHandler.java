@@ -1598,6 +1598,34 @@ public class ClaudeMessageHandler implements MessageCallback {
             if (envelope.has("turnId") && !envelope.get("turnId").isJsonNull()) {
                 reportPayload.add("turnId", envelope.get("turnId"));
             }
+            // Plan generation (2026-06-10): attach this report to its plan step so
+            // resume can point the supervisor at per-step evidence, and fold the
+            // reported deliverable paths into the step's filesChanged (the plan
+            // projection picks them up on the next transition). Best-effort.
+            try {
+                com.github.claudecodegui.session.pair.plan.PlanStateMachine planSm = pair.getPlanStateMachine();
+                com.github.claudecodegui.session.pair.plan.Plan plan = planSm == null ? null : planSm.getCurrent();
+                com.github.claudecodegui.session.pair.plan.PlanStep step = plan == null ? null : plan.getCurrentStep();
+                if (step != null) {
+                    if (reportPayload.has("spilledPath") && !reportPayload.get("spilledPath").isJsonNull()) {
+                        step.reportPath = reportPayload.get("spilledPath").getAsString();
+                    }
+                    if (reportPayload.has("deliverables") && reportPayload.get("deliverables").isJsonArray()) {
+                        for (com.google.gson.JsonElement d : reportPayload.getAsJsonArray("deliverables")) {
+                            if (!d.isJsonObject()) continue;
+                            com.google.gson.JsonObject dObj = d.getAsJsonObject();
+                            if (dObj.has("path") && !dObj.get("path").isJsonNull()) {
+                                String pth = dObj.get("path").getAsString();
+                                if (pth != null && !pth.isEmpty() && !step.filesChanged.contains(pth)) {
+                                    step.filesChanged.add(pth);
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (Exception ex) {
+                LOG.warn("[Supervisor] turn_report → plan step attach failed: " + ex.getMessage());
+            }
             pair.getEventBus().publishTurnReport(reportPayload);
             // Mark turnEndPublished so the legacy publishTurnEndIfPair path doesn't
             // double-publish for the same turn (the report is the authoritative signal).

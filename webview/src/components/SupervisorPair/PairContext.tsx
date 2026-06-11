@@ -214,6 +214,11 @@ interface PairContextValue {
    * pair_* IPC; mainSessionId/pairId are internal. Null for normal sessions.
    */
   containerId: string | null;
+  /** Custom display name of the active supervised session (container title);
+   *  '' when unnamed. Shown + editable in the supervisor pane header. */
+  supervisorTitle: string;
+  /** Persist a new name for the active supervised container (Java updateTitle). */
+  renameSupervisor: (title: string) => void;
   pendingEscalate: EscalateRequest | null;
   thinkingByAgentId: Record<string, boolean>;
   /**
@@ -366,6 +371,68 @@ function isRenderableUserBlock(block: unknown): boolean {
 }
 
 /**
+ * True when a content block is a framework-injected supervisor event prompt
+ * (the `## EVENT [...]` / `## BATCH [...]` text that event-summarizer.js
+ * assembles from main-AI activity and enqueues into the supervisor's SDK input
+ * stream). The live pane never renders these: the daemon streams back only the
+ * supervisor's OUTPUT via [SUPERVISOR_MSG], so a live run shows just the
+ * supervisor's reaction. The SDK transcript .jsonl, however, persists the input
+ * frames, so a naive history replay surfaces them as raw blue bubbles the live
+ * view never had — the figure-1 vs figure-2 mismatch. Filtering them out makes
+ * a reopened pane match live.
+ *
+ * The operator's own typed messages (## USER MESSAGE) are deliberately NOT
+ * matched — they are the operator's half of the conversation and belong in both
+ * views. Markers are matched anywhere in the text (not anchored) because a
+ * planning-directive preamble can precede the header (see event-summarizer.js
+ * formatStart/formatUserInput).
+ */
+function isInjectedSupervisorEventText(block: unknown): boolean {
+  if (!block || typeof block !== 'object') return false;
+  const b = block as { type?: string; text?: string };
+  if (b.type !== 'text' || typeof b.text !== 'string') return false;
+  const t = b.text;
+  if (t.includes('## USER MESSAGE [')) return false; // operator input — always keep
+  return t.includes('## EVENT [') || t.includes('## BATCH [');
+}
+
+/**
+ * Build the supervisor `emit_action` card block. Single-sourced so the live
+ * action channel ({@link onPairActionEvent}) and the history replay
+ * ({@link framesToSupervisorMessages}) emit identical cards — the id scheme and
+ * block shape can no longer drift between the two paths. Rendered by
+ * ContentBlockRenderer → SupervisorActionBlock.
+ */
+function makeSupervisorActionBlock(
+  turnStr: string,
+  action: string,
+  reason: string,
+  payload: Record<string, unknown>,
+  id?: string,
+): ClaudeContentOrResultBlock {
+  return {
+    type: 'tool_use',
+    id: id ?? `act_${turnStr}`,
+    name: 'mcp__supervisor__emit_action',
+    input: { action, reason, payload },
+  } as ClaudeContentOrResultBlock;
+}
+
+/** Build one supervisor `decision_record` card block. See {@link makeSupervisorActionBlock}. */
+function makeSupervisorDecisionBlock(
+  turnStr: string,
+  decision: Record<string, unknown>,
+  key: string | number,
+): ClaudeContentOrResultBlock {
+  return {
+    type: 'tool_use',
+    id: `dec_${turnStr}_${key}`,
+    name: 'mcp__supervisor__decision_record',
+    input: decision,
+  } as ClaudeContentOrResultBlock;
+}
+
+/**
  * Top-level provider for the Supervisor Pair UI.
  */
 export function PairProvider({ children }: PairProviderProps) {
@@ -378,6 +445,9 @@ export function PairProvider({ children }: PairProviderProps) {
   // supervised session. Routing key for pair_* IPC (mirrors pairId, but stable
   // across reload/restart). Null for normal sessions.
   const [containerId, setContainerId] = useState<string | null>(null);
+  // Custom name of the active supervised container (manifest title). '' when
+  // unnamed. Seeded from onSessionCreated (create/restore); edited via renameSupervisor.
+  const [supervisorTitle, setSupervisorTitle] = useState('');
   const [pendingEscalate, setPendingEscalate] = useState<EscalateRequest | null>(null);
   const [thinkingByAgentId, setThinkingByAgentId] = useState<Record<string, boolean>>({});
   // 2026-05-28: live per-turn output-token count per supervisor (CLI-style ticker).
@@ -612,6 +682,20 @@ export function PairProvider({ children }: PairProviderProps) {
       sendToJava(`session_create_supervised:${JSON.stringify(payload)}`);
     } catch { /* ignore — handler is best-effort */ }
   }, [setSelected, reasoningByAgentId]);
+
+  // Rename the active supervised container: optimistic local update + persist
+  // via session_rename_supervised → Java SessionRegistry.updateTitle(containerId,
+  // title), which also re-pushes the supervised history list so the rename
+  // reflects there too. Routed by containerId (the stable id; pairId is internal).
+  const renameSupervisor = useCallback((title: string) => {
+    const trimmed = (title ?? '').trim();
+    setSupervisorTitle(trimmed);
+    const cid = containerIdRef.current;
+    if (!cid) return;
+    try {
+      sendToJava(`session_rename_supervised:${JSON.stringify({ containerId: cid, title: trimmed })}`);
+    } catch { /* best-effort */ }
+  }, []);
 
   const openManager = useCallback(() => {
     openManagerRef.current();
@@ -1068,12 +1152,10 @@ export function PairProvider({ children }: PairProviderProps) {
 
         // Decision record card.
         if (evt?.kind === 'decision_record' && evt.decision && typeof evt.decision === 'object') {
-          appendAssistantBlocks(agentId, turnId, [{
-            type: 'tool_use',
-            id: `dec_${turnStr}_${evt.decision.step ?? Math.random().toString(36).slice(2, 5)}`,
-            name: 'mcp__supervisor__decision_record',
-            input: evt.decision,
-          }]);
+          const key = evt.decision.step ?? Math.random().toString(36).slice(2, 5);
+          appendAssistantBlocks(agentId, turnId, [
+            makeSupervisorDecisionBlock(turnStr, evt.decision as Record<string, unknown>, key),
+          ]);
           return;
         }
 
@@ -1100,14 +1182,11 @@ export function PairProvider({ children }: PairProviderProps) {
         // summary — the card is responsible for collapse/expand.
         const actionType: string | undefined = evt?.action?.action;
         if (actionType) {
-          const payload = evt.action.payload ?? {};
+          const payload = (evt.action.payload ?? {}) as Record<string, unknown>;
           const reason: string = evt.action.reason ?? '';
-          appendAssistantBlocks(agentId, turnId, [{
-            type: 'tool_use',
-            id: `act_${turnStr}`,
-            name: 'mcp__supervisor__emit_action',
-            input: { action: actionType, reason, payload },
-          }]);
+          appendAssistantBlocks(agentId, turnId, [
+            makeSupervisorActionBlock(turnStr, actionType, reason, payload),
+          ]);
         }
 
         endStreaming(agentId, turnId);
@@ -1193,7 +1272,10 @@ export function PairProvider({ children }: PairProviderProps) {
           const b = block as { type?: string };
           if (b.type === 'tool_result') {
             toolResults.push(block as ToolResultBlock);
-          } else if (isRenderableUserBlock(block)) {
+          } else if (isRenderableUserBlock(block) && !isInjectedSupervisorEventText(block)) {
+            // Live never streams the framework-injected `## EVENT` prompts (they
+            // are SDK *input*, not output) — this guard keeps the live path
+            // consistent with the history filter below should one ever arrive.
             userBlocks.push(block as ClaudeContentOrResultBlock);
           }
         }
@@ -1286,8 +1368,7 @@ export function PairProvider({ children }: PairProviderProps) {
               for (const k of Object.keys(input)) {
                 if (k !== 'action' && k !== 'reason') payload[k] = input[k];
               }
-              blocks.push({ type: 'tool_use', id: b.id ?? `act_${turnStr}`,
-                name: 'mcp__supervisor__emit_action', input: { action, reason, payload } } as ClaudeContentOrResultBlock);
+              blocks.push(makeSupervisorActionBlock(turnStr, action, reason, payload, b.id));
               // Parity with the live daemon's dispatchDecisions (ActionRouter):
               // a `decisions[]` array riding on the emit_action is expanded into
               // individual decision cards — the SAME mcp__supervisor__decision_record
@@ -1301,8 +1382,7 @@ export function PairProvider({ children }: PairProviderProps) {
                 const d = dec as Record<string, unknown>;
                 const step = (typeof d.step === 'string' || typeof d.step === 'number')
                   ? String(d.step) : String(di);
-                blocks.push({ type: 'tool_use', id: `dec_${turnStr}_${step}`,
-                  name: 'mcp__supervisor__decision_record', input: d } as ClaudeContentOrResultBlock);
+                blocks.push(makeSupervisorDecisionBlock(turnStr, d, step));
               });
               continue;
             }
@@ -1341,7 +1421,12 @@ export function PairProvider({ children }: PairProviderProps) {
                   break;
                 }
               }
-            } else if (isRenderableUserBlock(block)) {
+            } else if (isRenderableUserBlock(block) && !isInjectedSupervisorEventText(block)) {
+              // Drop the framework-injected `## EVENT` / `## BATCH` prompts: the
+              // SDK persists them to the transcript but the live pane never shows
+              // them (they are input, not streamed output). Operator messages
+              // (## USER MESSAGE) and any other renderable user content are kept,
+              // so a reopened pane matches the live view (figure-1).
               userBlocks.push(block as ClaudeContentOrResultBlock);
             }
           }
@@ -1443,9 +1528,14 @@ export function PairProvider({ children }: PairProviderProps) {
           model?: string;
           defaultLongContext?: boolean;
           defaultReasoning?: string;
+          title?: string;
         };
         if (o.containerId) setContainerId(o.containerId);
         if (o.pairId) setPairId(o.pairId);
+        // Seed the pane-header name. Create is usually empty; a restored
+        // container carries its saved title. Always set so switching sessions
+        // resets cleanly (no stale name bleeding across sessions).
+        setSupervisorTitle(typeof o.title === 'string' ? o.title : '');
         if (o.agentId) {
           const agentId = o.agentId;
           setSelectedState((prev) =>
@@ -1690,6 +1780,8 @@ export function PairProvider({ children }: PairProviderProps) {
       messagesByAgentId,
       pairId,
       containerId,
+      supervisorTitle,
+      renameSupervisor,
       pendingEscalate,
       thinkingByAgentId,
       streamingByAgentId,
@@ -1727,6 +1819,8 @@ export function PairProvider({ children }: PairProviderProps) {
       messagesByAgentId,
       pairId,
       containerId,
+      supervisorTitle,
+      renameSupervisor,
       pendingEscalate,
       thinkingByAgentId,
       streamingByAgentId,
@@ -1776,6 +1870,8 @@ export function usePairContext(): PairContextValue {
     messagesByAgentId: {},
     pairId: null,
     containerId: null,
+    supervisorTitle: '',
+    renameSupervisor: () => { /* no-op */ },
     pendingEscalate: null,
     thinkingByAgentId: {},
     streamingByAgentId: {},

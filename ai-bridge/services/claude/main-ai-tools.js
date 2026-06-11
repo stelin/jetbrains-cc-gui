@@ -13,12 +13,44 @@
  */
 
 import { loadClaudeSdk, loadZod } from '../../utils/sdk-loader.js';
+import { writeFileSync, mkdirSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 export const MAIN_MCP_NAME = 'main';
 export const REPORT_TURN_COMPLETION_TOOL_NAME = 'report_turn_completion';
 
+// Spill the report to a daemon-managed file once the serialized payload exceeds
+// this size, so the IPC line stays small and the supervisor can Read it on
+// demand. 8KB matches the inject_prompt directive-spill threshold (the reverse
+// direction). See docs/supervisor/supervisor-plan-generation-and-report-spill-design.md.
+const REPORT_SPILL_THRESHOLD = 8 * 1024;
+
 function generateTurnId() {
   return `t_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * Write a large turn report to a managed scratch file (NOT the project tree) and
+ * return its absolute path, or null on failure (caller falls back to inline).
+ * The main AI has no pairId, only a sessionId — key the path by sessionId+turnId.
+ */
+function writeManagedReport(sessionId, turnId, json) {
+  try {
+    const base = join(homedir(), '.codemoss', 'turn-reports', sessionId || 'anon');
+    mkdirSync(base, { recursive: true });
+    const p = join(base, `turn-${turnId}.json`);
+    writeFileSync(p, json, 'utf8');
+    return p;
+  } catch (_) {
+    try {
+      const p = join(tmpdir(), `codemoss-turn-${turnId}.json`);
+      writeFileSync(p, json, 'utf8');
+      return p;
+    } catch (__) {
+      return null;
+    }
+  }
 }
 
 function buildSchema(z) {
@@ -65,6 +97,45 @@ export async function buildMainAiMcpServer(runtimeRef) {
     buildSchema(z),
     async (args) => {
       const turnId = generateTurnId();
+      const durationMs = typeof args.durationMs === 'number' && args.durationMs >= 0
+        ? args.durationMs : 0;
+
+      // Full payload, then decide inline-vs-spill by serialized size. When spilled,
+      // the IPC line keeps only the small navigation fields (summary, deliverable
+      // paths, selfAssessment) + spilledPath; the supervisor Reads the file for the
+      // rest. Treated as navigation only — the supervisor still verifies real files.
+      const fullPayload = {
+        summary: args.summary,
+        deliverables: args.deliverables || [],
+        verifications: args.verifications || [],
+        selfAssessment: args.selfAssessment,
+        subagentSummary: null,
+        // Main AI may pass its own measurement; otherwise emit 0 and let
+        // the Java side compute from turn boundaries (turnStartedAt).
+        durationMs,
+        spilledPath: null,
+      };
+
+      let linePayload = fullPayload;
+      try {
+        const probe = JSON.stringify(fullPayload);
+        if (probe.length > REPORT_SPILL_THRESHOLD) {
+          const spilledPath = writeManagedReport(runtimeRef.sessionId, turnId, probe);
+          if (spilledPath) {
+            linePayload = {
+              summary: args.summary,
+              // Keep deliverable paths inline — small and used by the supervisor
+              // to know which real files to Read (verifications spill with the file).
+              deliverables: args.deliverables || [],
+              verifications: [],
+              selfAssessment: args.selfAssessment,
+              subagentSummary: null,
+              durationMs,
+              spilledPath,
+            };
+          }
+        }
+      } catch (_) { /* fall back to inline on any spill/serialize error */ }
 
       try {
         process.stdout.write('[TURN_REPORT] ' + JSON.stringify({
@@ -73,18 +144,7 @@ export async function buildMainAiMcpServer(runtimeRef) {
           turnId,
           directiveId: runtimeRef.activeDirectiveId || null,
           ts: Date.now(),
-          payload: {
-            summary: args.summary,
-            deliverables: args.deliverables || [],
-            verifications: args.verifications || [],
-            selfAssessment: args.selfAssessment,
-            subagentSummary: null,
-            // Main AI may pass its own measurement; otherwise emit 0 and let
-            // the Java side compute from turn boundaries (turnStartedAt).
-            durationMs: typeof args.durationMs === 'number' && args.durationMs >= 0
-              ? args.durationMs : 0,
-            spilledPath: null,
-          },
+          payload: linePayload,
         }) + '\n');
       } catch (_) { /* stdout closed */ }
 

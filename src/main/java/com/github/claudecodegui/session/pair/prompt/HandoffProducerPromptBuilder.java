@@ -21,7 +21,11 @@ public final class HandoffProducerPromptBuilder {
                 + "\n"
                 + "REQUIRED FIELDS:\n"
                 + "- anchoredFacts.* 必须填写, 未知字段填 null (**不要瞎编**)\n"
-                + "- planProgress 至少包含所有已开始的 step\n"
+                // 2026-06-10: planProgress is now a PROJECTION of the authoritative
+                // Plan (persisted independently in PersistedPlan and restored by the
+                // successor on its own), so the producer no longer needs to re-report
+                // it. Kept optional for back-compat; focus effort on the soft context.
+                + "- planProgress 可省略/简述：计划进度已由系统从权威 plan 自动投影并独立持久化, 继任会自行从 plan 恢复\n"
                 + "- fileState 列出本会话期间所有 touch 过的文件 (路径 + 最后操作)\n"
                 + "- recentDecisions 取最近 30 条 (按时间倒序)\n"
                 + "- knownConstraints 继承前序 + 加新发现的硬约束\n"

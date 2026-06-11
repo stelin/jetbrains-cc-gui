@@ -51,7 +51,10 @@ public class ClaudeSDKBridgeRefactorTest {
                 openedFiles,
                 "system prompt",
                 Boolean.TRUE,
-                Boolean.TRUE
+                Boolean.TRUE,
+                null,
+                null,
+                null
         );
 
         assertEquals("hello", params.get("message").getAsString());
@@ -83,6 +86,9 @@ public class ClaudeSDKBridgeRefactorTest {
                 null,
                 null,
                 attachments,
+                null,
+                null,
+                null,
                 null,
                 null,
                 null,
@@ -145,6 +151,28 @@ public class ClaudeSDKBridgeRefactorTest {
         String json = extractor.extractLastJsonLine("debug line\nanother log\n{\"success\":true,\"value\":1}");
 
         assertEquals("{\"success\":true,\"value\":1}", json);
+    }
+
+    @Test
+    public void jsonOutputExtractorIgnoresTrailingLogsAfterJson() {
+        ClaudeJsonOutputExtractor extractor = new ClaudeJsonOutputExtractor();
+
+        String json = extractor.extractLastJsonLine(
+                "debug {not json}\n{\"success\":true,\"messages\":[{\"type\":\"user\",\"text\":\"hello\"}]}\ntrailing log"
+        );
+
+        assertEquals("{\"success\":true,\"messages\":[{\"type\":\"user\",\"text\":\"hello\"}]}", json);
+    }
+
+    @Test
+    public void jsonOutputExtractorSkipsJsonlAndReturnsFinalResultObject() {
+        ClaudeJsonOutputExtractor extractor = new ClaudeJsonOutputExtractor();
+
+        String json = extractor.extractLastJsonLine(
+                "{\"type\":\"user\"}\n{\"type\":\"assistant\"}\n{\"success\":true,\"messages\":[]}"
+        );
+
+        assertEquals("{\"success\":true,\"messages\":[]}", json);
     }
 
     @Test

@@ -8,6 +8,8 @@ import com.intellij.openapi.application.ApplicationManager;
 import com.intellij.openapi.actionSystem.ActionGroup;
 import com.intellij.openapi.actionSystem.ActionManager;
 import com.intellij.openapi.actionSystem.AnAction;
+import com.intellij.openapi.actionSystem.Constraints;
+import com.intellij.openapi.actionSystem.DefaultActionGroup;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.progress.ProcessCanceledException;
 import com.intellij.openapi.project.Project;
@@ -75,6 +77,7 @@ public class TerminalMonitorService implements ProjectActivity {
             Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
     private static final Set<Object> legacyActionInstalledWidgets =
             Collections.synchronizedSet(Collections.newSetFromMap(new WeakHashMap<>()));
+    private static volatile boolean terminalPopupActionsRegistered;
 
     /**
      * Buffer storage for terminal output using WeakHashMap.
@@ -124,6 +127,8 @@ public class TerminalMonitorService implements ProjectActivity {
 
             ToolWindow terminalWindow = ToolWindowManager.getInstance(project).getToolWindow("Terminal");
             if (terminalWindow == null) return;
+
+            registerTerminalPopupActions();
 
             ContentManager contentManager = terminalWindow.getContentManager();
             if (contentManager.isDisposed()) return;
@@ -647,6 +652,51 @@ public class TerminalMonitorService implements ProjectActivity {
             return list;
         }
         return Collections.emptyList();
+    }
+
+    private static void registerTerminalPopupActions() {
+        if (terminalPopupActionsRegistered) {
+            return;
+        }
+        terminalPopupActionsRegistered = true;
+
+        try {
+            ActionManager actionManager = ActionManager.getInstance();
+            AnAction action = actionManager.getAction(SendTerminalSelectionToInputAction.ACTION_ID);
+            if (action == null) {
+                LOG.warn("[TerminalSend] Cannot register terminal popup action; action missing: "
+                        + SendTerminalSelectionToInputAction.ACTION_ID);
+                return;
+            }
+
+            addActionToGroupIfPresent(actionManager, action, SendTerminalSelectionToInputAction.TERMINAL_OUTPUT_CONTEXT_MENU);
+            addActionToGroupIfPresent(actionManager, action, SendTerminalSelectionToInputAction.TERMINAL_PROMPT_CONTEXT_MENU);
+            addActionToGroupIfPresent(actionManager, action, SendTerminalSelectionToInputAction.TERMINAL_REWORKED_CONTEXT_MENU);
+        } catch (Exception e) {
+            LOG.warn("[TerminalSend] Failed to register terminal popup actions dynamically", e);
+        }
+    }
+
+    private static void addActionToGroupIfPresent(
+            @NotNull ActionManager actionManager,
+            @NotNull AnAction action,
+            @NotNull String groupId
+    ) {
+        AnAction groupAction = actionManager.getAction(groupId);
+        if (!(groupAction instanceof DefaultActionGroup)) {
+            LOG.debug("[TerminalSend] skip dynamic popup registration; group missing or immutable: " + groupId);
+            return;
+        }
+
+        DefaultActionGroup group = (DefaultActionGroup) groupAction;
+        boolean alreadyPresent = Arrays.stream(group.getChildren(actionManager))
+                .anyMatch(child -> SendTerminalSelectionToInputAction.ACTION_ID.equals(actionManager.getId(child)));
+        if (alreadyPresent) {
+            return;
+        }
+
+        group.add(action, Constraints.LAST);
+        LOG.info("[TerminalSend] Dynamically registered send action in group: " + groupId);
     }
 
     private static void logTerminalActionRegistration() {

@@ -76,6 +76,7 @@ export default function NewSupervisedDialog({
       agents={agents}
       defaultId={defaultId}
       initialSelectedId={null}
+      requiredChoice
       onCancel={onClose}
       onConfirm={handleConfirm}
       onOpenManager={onOpenManager}

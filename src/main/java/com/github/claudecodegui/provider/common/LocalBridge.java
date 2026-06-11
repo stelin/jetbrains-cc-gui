@@ -316,24 +316,14 @@ public class LocalBridge implements IBridge {
 
     /**
      * Whether the most recently-started daemon is fresh enough to handle all
-     * features. Treats a daemon as stale if either:
-     * <ul>
-     *   <li>{@code supervisorSupport} is null (field absent — old protocol) or false</li>
-     *   <li>{@code version} doesn't contain "supervisor" (sanity check)</li>
-     * </ul>
+     * features. Treats a daemon as stale if it does not advertise
+     * {@code supervisorSupport=true}; the exact version string can describe any
+     * newer bridge feature set (for example "session-resume"), so capability is
+     * the source of truth.
      */
     private boolean isDaemonHealthy() {
         Boolean supSupport = reportedSupervisorSupport.get();
-        if (supSupport == null || !supSupport) {
-            return false;
-        }
-        String version = reportedDaemonVersion.get();
-        // If version is reported, it must mention supervisor. (Old daemons may not
-        // emit version at all, in which case we trust supSupport above.)
-        if (version != null && !version.contains("supervisor")) {
-            return false;
-        }
-        return true;
+        return supSupport != null && supSupport;
     }
 
     /**

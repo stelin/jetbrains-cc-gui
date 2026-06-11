@@ -90,11 +90,14 @@ public class SendTerminalSelectionToInputActionTest {
     }
 
     @Test
-    public void terminalFeaturesRegisterActionForReworkedTerminalContextMenu() throws IOException {
+    public void terminalFeaturesDoesNotStaticallyRegisterInternalTerminalGroups() throws IOException {
         try (InputStream stream = getClass().getClassLoader().getResourceAsStream("META-INF/terminal-features.xml")) {
             Assert.assertNotNull("terminal-features.xml should be on the test classpath", stream);
             String xml = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
-            Assert.assertTrue(xml.contains("group-id=\"Terminal.ReworkedTerminalContextMenu\""));
+            Assert.assertTrue(xml.contains("id=\"ClaudeCodeGUI.SendTerminalSelectionToInputAction\""));
+            Assert.assertFalse(xml.contains("group-id=\"Terminal.ReworkedTerminalContextMenu\""));
+            Assert.assertFalse(xml.contains("group-id=\"Terminal.OutputContextMenu\""));
+            Assert.assertFalse(xml.contains("group-id=\"Terminal.PromptContextMenu\""));
         }
     }
 

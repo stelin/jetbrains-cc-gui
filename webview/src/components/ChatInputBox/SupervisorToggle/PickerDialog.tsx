@@ -9,6 +9,8 @@ interface PickerDialogProps {
   defaultId: string | null;
   /** Currently active supervisor id (for re-open). null = none active. */
   initialSelectedId?: string | null;
+  /** When true, the dialog cannot be dismissed without choosing an agent. */
+  requiredChoice?: boolean;
   onCancel: () => void;
   onConfirm: (agent: SupervisorAgent) => void;
   onOpenManager?: () => void;
@@ -19,6 +21,7 @@ export default function PickerDialog({
   agents,
   defaultId,
   initialSelectedId,
+  requiredChoice = false,
   onCancel,
   onConfirm,
   onOpenManager,
@@ -41,15 +44,15 @@ export default function PickerDialog({
     }
   }, [open, defaultId, initialSelectedId, agents]);
 
-  // Esc to close
+  // Esc to close when the picker is optional.
   useEffect(() => {
-    if (!open) return;
+    if (!open || requiredChoice) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onCancel();
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [open, onCancel]);
+  }, [open, requiredChoice, onCancel]);
 
   const handleConfirm = () => {
     if (!selectedId) return;
@@ -60,15 +63,17 @@ export default function PickerDialog({
   if (!open) return null;
 
   return (
-    <div className={styles.backdrop} onClick={onCancel}>
+    <div className={styles.backdrop} onClick={requiredChoice ? undefined : onCancel}>
       <div className={styles.dialog} onClick={(e) => e.stopPropagation()}>
         <div className={styles.dialogHeader}>
           <h3 className={styles.dialogTitle}>
             {t('chatInput.supervisor.pickerTitle')}
           </h3>
-          <button className={styles.iconButton} onClick={onCancel} title={t('common.close')}>
-            <span className="codicon codicon-close" />
-          </button>
+          {!requiredChoice && (
+            <button className={styles.iconButton} onClick={onCancel} title={t('common.close')}>
+              <span className="codicon codicon-close" />
+            </button>
+          )}
         </div>
 
         <div className={styles.dialogBody}>
@@ -118,9 +123,11 @@ export default function PickerDialog({
             </button>
           )}
           <div className={styles.footerActions}>
-            <button className={styles.secondaryButton} onClick={onCancel}>
-              {t('common.cancel')}
-            </button>
+            {!requiredChoice && (
+              <button className={styles.secondaryButton} onClick={onCancel}>
+                {t('common.cancel')}
+              </button>
+            )}
             <button
               className={styles.primaryButton}
               onClick={handleConfirm}

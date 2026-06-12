@@ -28,6 +28,8 @@ export interface YunxiaoBug {
   serialNumber?: string | number;
   subject?: string;
   status?: string | { id?: string; displayName?: string; name?: string } | null;
+  /** 负责人 — may be a userId string, a {displayName|name} object, or an array of either. */
+  assignedTo?: string | { id?: string; userId?: string; displayName?: string; name?: string } | unknown[] | null;
   /** Workitem type ({id} needed to fetch the status workflow for in-list status change). */
   workitemType?: { id?: string; name?: string } | null;
   [key: string]: unknown;
@@ -65,6 +67,8 @@ export interface UseYunxiaoBugsResult {
   appendPrompt: string;
   /** Patch a bug's status in-place after a successful status change. */
   updateBugStatus: (bugId: string, status: { id?: string; name?: string }) => void;
+  /** Patch a bug's 负责人 in-place after a successful reassign. */
+  updateBugAssignee: (bugId: string, assignee: { userId?: string; name?: string }) => void;
 }
 
 function normalizeProject(p: Record<string, unknown>): YunxiaoProject {
@@ -172,6 +176,10 @@ export function useYunxiaoBugs(): UseYunxiaoBugsResult {
     setBugs((prev) => prev.map((b) => ((b.id === bugId || b.identifier === bugId) ? { ...b, status } : b)));
   }, []);
 
+  const updateBugAssignee = useCallback((bugId: string, assignee: { userId?: string; name?: string }) => {
+    setBugs((prev) => prev.map((b) => ((b.id === bugId || b.identifier === bugId) ? { ...b, assignedTo: assignee } : b)));
+  }, []);
+
   const loadMore = useCallback(() => {
     if (!hasMore || loading || !selectedProjectId) return;
     const next = page + 1;
@@ -191,5 +199,6 @@ export function useYunxiaoBugs(): UseYunxiaoBugsResult {
     loadMore,
     appendPrompt,
     updateBugStatus,
+    updateBugAssignee,
   };
 }

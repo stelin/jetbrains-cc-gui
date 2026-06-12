@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import VirtualList from '../history/VirtualList';
 import { sendBridgeEvent } from '../../utils/bridge';
@@ -51,6 +51,27 @@ interface StatusOption {
   color?: string;
 }
 
+/** A member option for the 改负责人 picker. */
+interface MemberOption {
+  userId: string;
+  name: string;
+}
+
+/** Coerce 云效 assignedTo (string | {displayName|name} | array) into a display name; '' when id-like/empty. */
+const assigneeText = (assignee: YunxiaoBug['assignedTo']): string => {
+  const one = Array.isArray(assignee) ? assignee[0] : assignee;
+  if (!one) return '';
+  if (typeof one === 'string') {
+    // A bare userId (hex/numeric) isn't a readable name — don't surface it.
+    return /^[0-9a-f]{16,}$/i.test(one) || /^\d+$/.test(one) ? '' : one;
+  }
+  if (typeof one === 'object') {
+    const o = one as { displayName?: string; name?: string };
+    return o.displayName || o.name || '';
+  }
+  return '';
+};
+
 /** Status filter defaults — checked every time the view opens (per requirement). */
 const DEFAULT_STATUSES = ['处理中', '再次打开', '待确认'];
 
@@ -71,6 +92,7 @@ export function BugListView({ onBack, onOpenYunxiaoSettings }: BugListViewProps)
     loadMore,
     appendPrompt,
     updateBugStatus,
+    updateBugAssignee,
   } = useYunxiaoBugs();
 
   // Status multi-select filter. Resets to DEFAULT_STATUSES every time the view
@@ -104,6 +126,17 @@ export function BugListView({ onBack, onOpenYunxiaoSettings }: BugListViewProps)
   // Whether the current statusError came from the update PUT (vs the initial load),
   // so the menu shows "failed to change" instead of "failed to load". Reset on each open.
   const [statusErrorFromUpdate, setStatusErrorFromUpdate] = useState(false);
+
+  // In-list 改负责人 (reassign). Fixed-positioned picker at the clicked chip with a
+  // search box + member list (reuses the member search, callback onYunxiaoAssigneeMembers).
+  const [assigneeMenu, setAssigneeMenu] = useState<{ bugId: string; top: number; left: number } | null>(null);
+  const [assigneeQuery, setAssigneeQuery] = useState('');
+  const [assigneeMembers, setAssigneeMembers] = useState<MemberOption[]>([]);
+  const [assigneeLoading, setAssigneeLoading] = useState(false);
+  const [assigneeUpdating, setAssigneeUpdating] = useState(false);
+  const [assigneeError, setAssigneeError] = useState<string | null>(null);
+  const assigneeQueryRef = useRef(''); // latest query, for race-guarding async responses
+  const assigneeSearchRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     window.onYunxiaoStatuses = (json: string) => {
@@ -149,11 +182,66 @@ export function BugListView({ onBack, onOpenYunxiaoSettings }: BugListViewProps)
         setStatusError('更新失败');
       }
     };
+    window.onYunxiaoAssigneeMembers = (json: string) => {
+      try {
+        const r = JSON.parse(json) as { ok: boolean; query?: string; members?: MemberOption[]; error?: string };
+        if ((r.query ?? '') !== assigneeQueryRef.current) return; // stale response for an older query
+        setAssigneeLoading(false);
+        if (r.ok) {
+          setAssigneeError(null);
+          setAssigneeMembers(Array.isArray(r.members) ? r.members : []);
+        } else {
+          setAssigneeError(r.error || '加载失败');
+          setAssigneeMembers([]);
+        }
+      } catch {
+        setAssigneeLoading(false);
+      }
+    };
+    window.onYunxiaoAssigneeUpdated = (json: string) => {
+      try {
+        const r = JSON.parse(json) as { ok: boolean; bugId?: string; userId?: string; name?: string; error?: string };
+        setAssigneeUpdating(false);
+        if (r.ok && r.bugId) {
+          updateBugAssignee(r.bugId, { userId: r.userId, name: r.name });
+          setAssigneeMenu(null);
+        } else if (!r.ok) {
+          setAssigneeError(r.error || '转交失败');
+        }
+      } catch {
+        setAssigneeUpdating(false);
+        setAssigneeError('转交失败');
+      }
+    };
     return () => {
       delete window.onYunxiaoStatuses;
       delete window.onYunxiaoStatusUpdated;
+      delete window.onYunxiaoAssigneeMembers;
+      delete window.onYunxiaoAssigneeUpdated;
     };
-  }, [updateBugStatus]);
+  }, [updateBugStatus, updateBugAssignee]);
+
+  // Debounced member fetch while the 改负责人 picker is open (empty query = all members).
+  useEffect(() => {
+    if (!assigneeMenu) return;
+    assigneeQueryRef.current = assigneeQuery;
+    setAssigneeLoading(true);
+    const id = setTimeout(() => {
+      sendBridgeEvent('load_yunxiao_members', JSON.stringify({ query: assigneeQuery, callback: 'onYunxiaoAssigneeMembers' }));
+    }, 180);
+    return () => clearTimeout(id);
+  }, [assigneeMenu, assigneeQuery]);
+
+  // JCEF: focus the search box a frame after the picker opens (autoFocus is unreliable).
+  useEffect(() => {
+    if (!assigneeMenu) return;
+    const raf = requestAnimationFrame(() => assigneeSearchRef.current?.focus());
+    const fb = setTimeout(() => assigneeSearchRef.current?.focus(), 80);
+    return () => {
+      cancelAnimationFrame(raf);
+      clearTimeout(fb);
+    };
+  }, [assigneeMenu]);
 
   // The bug set is replaced when the project changes → drop any stale selection
   // so the batch count never reflects bugs from another project.
@@ -208,6 +296,30 @@ export function BugListView({ onBack, onOpenYunxiaoSettings }: BugListViewProps)
     sendBridgeEvent(
       'update_yunxiao_status',
       JSON.stringify({ bugId: statusMenu.bugId, statusId: opt.id, statusName: opt.name }),
+    );
+  };
+
+  // 改负责人: open the fixed-positioned member picker at the clicked chip. The initial
+  // fetch (and every query change) is driven by the debounced effect above.
+  const openAssigneeMenu = (e: React.MouseEvent, bug: YunxiaoBug) => {
+    e.stopPropagation();
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setAssigneeMenu({ bugId: bugKey(bug), top: rect.bottom + 4, left: rect.left });
+    setAssigneeQuery('');
+    assigneeQueryRef.current = '';
+    setAssigneeMembers([]);
+    setAssigneeError(null);
+    setAssigneeUpdating(false);
+    setAssigneeLoading(true);
+  };
+
+  const pickAssignee = (mem: MemberOption) => {
+    if (!assigneeMenu || assigneeUpdating) return;
+    setAssigneeUpdating(true);
+    setAssigneeError(null);
+    sendBridgeEvent(
+      'update_yunxiao_assignee',
+      JSON.stringify({ bugId: assigneeMenu.bugId, userId: mem.userId, name: mem.name }),
     );
   };
 
@@ -345,6 +457,7 @@ export function BugListView({ onBack, onOpenYunxiaoSettings }: BugListViewProps)
   const renderBugItem = (bug: YunxiaoBug) => {
     const serial = serialText(bug);
     const status = statusText(bug.status);
+    const assignee = assigneeText(bug.assignedTo);
     const selected = selectedIds.has(bugKey(bug));
     return (
       <div className={`${styles.bugItem} ${batchMode && selected ? styles.bugItemSelected : ''}`}>
@@ -375,6 +488,15 @@ export function BugListView({ onBack, onOpenYunxiaoSettings }: BugListViewProps)
                 {bug.workitemType?.id && <span className={styles.statusCaret}> ▾</span>}
               </span>
             )}
+            <span
+              className={styles.bugAssignee}
+              onClick={(e) => openAssigneeMenu(e, bug)}
+              title={t('bugList.reassign')}
+            >
+              <span className="codicon codicon-account" />
+              {assignee || t('bugList.assigneeUnset')}
+              <span className={styles.statusCaret}> ▾</span>
+            </span>
           </div>
           <div className={styles.bugSubject} title={bug.subject || ''}>
             {bug.subject || t('bugList.untitled')}
@@ -622,6 +744,48 @@ export function BugListView({ onBack, onOpenYunxiaoSettings }: BugListViewProps)
                   </button>
                 );
               })}
+          </div>
+        </>
+      )}
+
+      {assigneeMenu && (
+        <>
+          <div className={styles.statusBackdrop} onClick={() => setAssigneeMenu(null)} />
+          <div className={styles.assigneeMenu} style={{ top: assigneeMenu.top, left: assigneeMenu.left }}>
+            <input
+              ref={assigneeSearchRef}
+              type="text"
+              className={styles.assigneeSearch}
+              value={assigneeQuery}
+              onChange={(e) => setAssigneeQuery(e.target.value)}
+              placeholder={t('bugList.assigneeSearch')}
+              disabled={assigneeUpdating}
+            />
+            <div className={styles.assigneeList}>
+              {assigneeLoading && assigneeMembers.length === 0 && (
+                <div className={styles.statusMenuHint}>{t('bugList.loading')}</div>
+              )}
+              {!assigneeLoading && assigneeError && (
+                <div className={styles.statusMenuHint} title={assigneeError}>
+                  {t('bugList.reassignFailed', { error: assigneeError })}
+                </div>
+              )}
+              {!assigneeLoading && !assigneeError && assigneeMembers.length === 0 && (
+                <div className={styles.statusMenuHint}>{t('bugList.assigneeEmpty')}</div>
+              )}
+              {assigneeMembers.map((m) => (
+                <button
+                  key={m.userId || m.name}
+                  type="button"
+                  className={styles.statusOption}
+                  disabled={assigneeUpdating}
+                  onClick={() => pickAssignee(m)}
+                >
+                  <span className="codicon codicon-account" />
+                  {m.name}
+                </button>
+              ))}
+            </div>
           </div>
         </>
       )}

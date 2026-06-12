@@ -222,6 +222,7 @@
 }
 
 .statusOption {
+  flex: 0 0 auto; // don't let many items shrink to slivers in a bounded flex-column list
   display: flex;
   align-items: center;
   gap: 8px;
@@ -264,6 +265,73 @@
   width: 10px;
   height: 10px;
   border-radius: 50%;
+}
+
+// 改负责人 chip (row title row) — purple, clickable like the status chip.
+.bugAssignee {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: rgba(192, 132, 252, 0.12);
+  color: #c084fc;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.bugAssignee:hover {
+  background: rgba(192, 132, 252, 0.22);
+}
+
+.bugAssignee :global(.codicon) {
+  font-size: 12px;
+}
+
+// 改负责人 picker — fixed popover (over the virtual list) with a search box + member list.
+.assigneeMenu {
+  position: fixed;
+  z-index: 51;
+  width: 240px;
+  max-height: 320px;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+  gap: 6px;
+  background: var(--vscode-dropdown-background, #252526);
+  border: 1px solid var(--vscode-input-border, #3c3c3c);
+  border-radius: 4px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+}
+
+.assigneeSearch {
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  font-size: 12px;
+  background: var(--vscode-input-background, #2a2a2a);
+  color: var(--vscode-input-foreground, #d4d4d4);
+  border: 1px solid var(--vscode-input-border, #3c3c3c);
+  border-radius: 3px;
+}
+
+.assigneeSearch:focus {
+  outline: none;
+  border-color: var(--vscode-focusBorder, #c084fc);
+}
+
+.assigneeList {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.assigneeList :global(.codicon) {
+  font-size: 13px;
+  opacity: 0.8;
 }
 
 .bugSubject {

@@ -1111,6 +1111,11 @@
     "selectAll": "Select all",
     "batchSelected": "{{count}}/{{max}} selected",
     "batchCapHint": "Select at most {{max}} bugs",
+    "reassign": "Change assignee",
+    "assigneeUnset": "Assignee",
+    "assigneeSearch": "Search members",
+    "assigneeEmpty": "No matching members",
+    "reassignFailed": "Reassign failed: {{error}}",
     "detail": {
       "untitled": "(untitled)",
       "loading": "Loading details…",
@@ -1128,10 +1133,13 @@
       "comments": "Comments",
       "noComments": "(no comments)",
       "commentPlaceholder": "Click to add a comment…",
-      "commentEditorPlaceholder": "Write a comment. Ctrl+V to paste a screenshot. Markdown supported.",
+      "commentEditorPlaceholder": "Write a comment. Type @ to mention a member. Ctrl+V to paste a screenshot. Markdown supported.",
       "submit": "Submit",
       "submitting": "Submitting…",
-      "uploading": "Uploading image…"
+      "uploading": "Uploading image…",
+      "mentionLoading": "Loading members…",
+      "mentionEmpty": "No matching members",
+      "mentionSearch": "Search members"
     },
     "loading": "Loading…",
     "loadMore": "Load more",

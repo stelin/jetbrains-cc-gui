@@ -1010,4 +1010,13 @@ interface Window {
 
   /** Yunxiao pasted-image upload result. Payload: { ok, markdown?, error? }. */
   onYunxiaoCommentImage?: (json: string) => void;
+
+  /** Yunxiao org members for the comment「@」picker. Payload: { ok, query?, members?: {userId,name}[], error? }. */
+  onYunxiaoMembers?: (json: string) => void;
+
+  /** Yunxiao org members for the list 改负责人 picker (separate callback to avoid clobber). */
+  onYunxiaoAssigneeMembers?: (json: string) => void;
+
+  /** Yunxiao reassign result. Payload: { ok, bugId?, userId?, name?, error? }. */
+  onYunxiaoAssigneeUpdated?: (json: string) => void;
 }

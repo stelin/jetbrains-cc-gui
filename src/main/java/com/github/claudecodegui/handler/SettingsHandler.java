@@ -80,6 +80,8 @@ public class SettingsHandler extends BaseMessageHandler {
         "download_yunxiao_attachment",
         "load_yunxiao_statuses",
         "update_yunxiao_status",
+        "load_yunxiao_members",
+        "update_yunxiao_assignee",
         "submit_yunxiao_comment",
         "upload_yunxiao_comment_image",
         // Path mapping (per-project, remote mode only)
@@ -287,6 +289,12 @@ public class SettingsHandler extends BaseMessageHandler {
                 return true;
             case "update_yunxiao_status":
                 projectConfigHandler.handleUpdateYunxiaoStatus(content);
+                return true;
+            case "load_yunxiao_members":
+                projectConfigHandler.handleLoadYunxiaoMembers(content);
+                return true;
+            case "update_yunxiao_assignee":
+                projectConfigHandler.handleUpdateYunxiaoAssignee(content);
                 return true;
             case "submit_yunxiao_comment":
                 projectConfigHandler.handleSubmitYunxiaoComment(content);

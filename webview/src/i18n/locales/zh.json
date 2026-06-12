@@ -1116,6 +1116,11 @@
     "selectAll": "全选",
     "batchSelected": "已选 {{count}}/{{max}}",
     "batchCapHint": "最多选择 {{max}} 个缺陷",
+    "reassign": "改负责人",
+    "assigneeUnset": "负责人",
+    "assigneeSearch": "搜索成员",
+    "assigneeEmpty": "无匹配成员",
+    "reassignFailed": "转交失败：{{error}}",
     "detail": {
       "untitled": "(无标题)",
       "loading": "加载详情中…",
@@ -1133,10 +1138,13 @@
       "comments": "评论",
       "noComments": "(无评论)",
       "commentPlaceholder": "点击输入评论…",
-      "commentEditorPlaceholder": "输入评论，Ctrl+V 可直接粘贴截图，支持 Markdown",
+      "commentEditorPlaceholder": "输入评论，@ 提及成员，Ctrl+V 可直接粘贴截图，支持 Markdown",
       "submit": "提交",
       "submitting": "提交中…",
-      "uploading": "图片上传中…"
+      "uploading": "图片上传中…",
+      "mentionLoading": "加载成员…",
+      "mentionEmpty": "无匹配成员",
+      "mentionSearch": "搜索成员"
     },
     "loading": "加载中…",
     "loadMore": "加载更多",

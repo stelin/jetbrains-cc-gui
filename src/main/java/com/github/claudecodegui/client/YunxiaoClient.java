@@ -304,6 +304,87 @@ public class YunxiaoClient {
         execute(authed(url, token).PUT(HttpRequest.BodyPublishers.ofString(body.toString())).build());
     }
 
+    /**
+     * Reassign a bug's 负责人 (PUT UpdateWorkItem with {@code {assignedTo: <userId>}}).
+     * {@code assignedToUserId} is the platform userId (= MemberInfoSchema.userId,亦即
+     * UpdateWorkItemFieldSchema.assignedTo "指派人userId",单值字符串非数组,已对照官方确认)。
+     */
+    public void updateWorkItemAssignee(String workItemId, String assignedToUserId) throws IOException {
+        if (workItemId == null || workItemId.isBlank() || assignedToUserId == null || assignedToUserId.isBlank()) {
+            throw new IOException("workItemId/assignedTo required");
+        }
+        String token = requireToken();
+        String orgId = requireOrgId();
+        String domain = settings.getYunxiaoDomain();
+        String url = "https://" + domain + "/oapi/v1/projex/organizations/" + orgId
+                + "/workitems/" + workItemId.trim();
+        JsonObject body = new JsonObject();
+        body.addProperty("assignedTo", assignedToUserId.trim());
+        LOG.info("[Yunxiao] update assignee workitem=" + workItemId.trim() + " assignedTo=" + assignedToUserId.trim());
+        execute(authed(url, token).PUT(HttpRequest.BodyPublishers.ofString(body.toString())).build());
+    }
+
+    // =========================================================================
+    // Members (评论 @ 人:列出/搜索企业成员)
+    // =========================================================================
+
+    /**
+     * Search organization members for the comment「@」picker. Uses
+     * {@code POST .../platform/organizations/{orgId}/members:search}(已对照官方
+     * {@code searchOrganizationMembersFunc} 确认);空 {@code query} 返回全部(分页首页)。
+     * 每条归一为 {@code {userId, name}}(userId 取 MemberInfoSchema.userId,缺则兜 id;
+     * name 取 name,缺则兜 userId)。
+     */
+    public List<JsonObject> searchMembers(String query, int page, int perPage) throws IOException {
+        String token = requireToken();
+        String orgId = requireOrgId();
+        String domain = settings.getYunxiaoDomain();
+        int safePage = Math.max(1, page);
+        int safePerPage = perPage <= 0 ? 100 : Math.min(perPage, MAX_PER_PAGE);
+        String url = "https://" + domain + "/oapi/v1/platform/organizations/" + orgId + "/members:search";
+
+        JsonObject body = new JsonObject();
+        body.addProperty("page", safePage);
+        body.addProperty("perPage", safePerPage);
+        if (query != null && !query.isBlank()) {
+            body.addProperty("query", query.trim());
+        }
+        JsonElement resp = execute(authed(url, token)
+                .POST(HttpRequest.BodyPublishers.ofString(body.toString()))
+                .build());
+
+        JsonArray arr = firstArray(resp, "members", "result", "data", "items");
+        List<JsonObject> members = new ArrayList<>();
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        if (arr != null) {
+            for (JsonElement el : arr) {
+                if (!el.isJsonObject()) {
+                    continue;
+                }
+                JsonObject m = el.getAsJsonObject();
+                String userId = strField(m, "userId");
+                if (userId.isEmpty()) {
+                    userId = strField(m, "id");
+                }
+                String name = strField(m, "name");
+                if (name.isEmpty()) {
+                    name = strField(m, "displayName");
+                }
+                if (name.isEmpty()) {
+                    name = userId;
+                }
+                if (name.isEmpty() || !seen.add(userId.isEmpty() ? name : userId)) {
+                    continue;
+                }
+                JsonObject out = new JsonObject();
+                out.addProperty("userId", userId);
+                out.addProperty("name", name);
+                members.add(out);
+            }
+        }
+        return members;
+    }
+
     // =========================================================================
     // Comments (详情弹窗底部发评论 + 图片粘贴上传)
     // =========================================================================

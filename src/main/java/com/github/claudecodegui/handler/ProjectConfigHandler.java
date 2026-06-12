@@ -957,6 +957,67 @@ public class ProjectConfigHandler {
         });
     }
 
+    /**
+     * Search org members. Shared by the comment「@」picker (callback {@code onYunxiaoMembers})
+     * and the list's 改负责人 picker (callback {@code onYunxiaoAssigneeMembers}) — the caller
+     * names the callback so the two pickers don't clobber a single shared global. Callback is
+     * whitelisted to those two names to avoid arbitrary {@code window.*} invocation. Echoes
+     * query for race-safety.
+     */
+    public void handleLoadYunxiaoMembers(String content) {
+        CompletableFuture.runAsync(() -> {
+            JsonObject r = new JsonObject();
+            JsonObject json = null;
+            try {
+                json = gson.fromJson(content, JsonObject.class);
+            } catch (Exception ignore) {
+                // malformed payload → treat as empty query, default callback
+            }
+            String query = strOf(json, "query");
+            final String cb = "onYunxiaoAssigneeMembers".equals(strOf(json, "callback"))
+                    ? "onYunxiaoAssigneeMembers" : "onYunxiaoMembers";
+            try {
+                java.util.List<JsonObject> members = new YunxiaoClient(settingsService).searchMembers(query, 1, 100);
+                com.google.gson.JsonArray arr = new com.google.gson.JsonArray();
+                for (JsonObject m : members) arr.add(m);
+                r.addProperty("ok", true);
+                r.addProperty("query", query);
+                r.add("members", arr);
+            } catch (Exception e) {
+                r.addProperty("ok", false);
+                r.addProperty("query", query);
+                r.addProperty("error", e.getMessage() == null ? "未知错误" : e.getMessage());
+            }
+            ApplicationManager.getApplication().invokeLater(() ->
+                context.callJavaScript("window." + cb, context.escapeJs(gson.toJson(r))));
+        });
+    }
+
+    /** Reassign a bug's 负责人 (UpdateWorkItem assignedTo). Replies to {@code window.onYunxiaoAssigneeUpdated}. */
+    public void handleUpdateYunxiaoAssignee(String content) {
+        CompletableFuture.runAsync(() -> {
+            JsonObject r = new JsonObject();
+            String bugId = "";
+            try {
+                JsonObject json = gson.fromJson(content, JsonObject.class);
+                bugId = strOf(json, "bugId");
+                String userId = strOf(json, "userId");
+                String name = strOf(json, "name");
+                new YunxiaoClient(settingsService).updateWorkItemAssignee(bugId, userId);
+                r.addProperty("ok", true);
+                r.addProperty("bugId", bugId);
+                r.addProperty("userId", userId);
+                r.addProperty("name", name);
+            } catch (Exception e) {
+                r.addProperty("ok", false);
+                r.addProperty("bugId", bugId);
+                r.addProperty("error", e.getMessage() == null ? "未知错误" : e.getMessage());
+            }
+            ApplicationManager.getApplication().invokeLater(() ->
+                context.callJavaScript("window.onYunxiaoAssigneeUpdated", context.escapeJs(gson.toJson(r))));
+        });
+    }
+
     private static String strOf(JsonObject json, String key) {
         return (json != null && json.has(key) && !json.get(key).isJsonNull()) ? json.get(key).getAsString() : "";
     }

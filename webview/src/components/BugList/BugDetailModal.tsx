@@ -29,6 +29,12 @@ interface Comment {
   gmtCreate?: number;
 }
 
+/** An org member option for the comment「@」picker. */
+interface Member {
+  userId: string;
+  name: string;
+}
+
 interface BugDetail {
   basic?: {
     identifier?: string;
@@ -68,6 +74,22 @@ const fmtTime = (ms?: number): string => {
   }
 };
 
+/**
+ * If the caret sits inside an「@token」(= `@` followed by a run with no whitespace,
+ * and the `@` is at the start or right after whitespace), return the token's start
+ * index and the query typed after it. Otherwise null (no active mention).
+ */
+function detectMention(value: string, caret: number): { start: number; query: string } | null {
+  const upto = value.slice(0, caret);
+  const at = upto.lastIndexOf('@');
+  if (at < 0) return null;
+  const prev = at > 0 ? value[at - 1] : '';
+  if (prev && !/\s/.test(prev)) return null; // '@' must follow start or whitespace
+  const query = upto.slice(at + 1);
+  if (/\s/.test(query)) return null; // whitespace ends the mention
+  return { start: at, query };
+}
+
 export function BugDetailModal({ bugId, onClose }: BugDetailModalProps) {
   const { t } = useTranslation();
   const [loading, setLoading] = useState(true);
@@ -80,6 +102,20 @@ export function BugDetailModal({ bugId, onClose }: BugDetailModalProps) {
   const [submitting, setSubmitting] = useState(false);
   const [uploading, setUploading] = useState(false);
   const commentInputRef = useRef<HTMLTextAreaElement>(null);
+
+  // 「@」mention picker (org members). mentionStart = index of the '@' in commentText;
+  // mentionQuery = text typed after it. members = last fetched options for the query.
+  const [mentionOpen, setMentionOpen] = useState(false);
+  // mentionQuery = the filter (the popup search box's value); mentionTaQuery = the run typed
+  // after '@' in the textarea (the replace anchor). They differ once the user types in the box.
+  const [mentionQuery, setMentionQuery] = useState('');
+  const [mentionTaQuery, setMentionTaQuery] = useState('');
+  const [mentionStart, setMentionStart] = useState(-1);
+  const [mentionActive, setMentionActive] = useState(0);
+  const [members, setMembers] = useState<Member[]>([]);
+  const [mentionLoading, setMentionLoading] = useState(false);
+  const mentionQueryRef = useRef(''); // latest query, for race-guarding async responses
+  const mentionSearchRef = useRef<HTMLInputElement>(null);
 
   // JCEF webview: a textarea's `autoFocus` fires too early (during mount, before the
   // embedded browser is ready to focus it) and click-focus can also be flaky on a
@@ -167,6 +203,48 @@ export function BugDetailModal({ bugId, onClose }: BugDetailModalProps) {
     };
   }, [bugId]);
 
+  // 「@」picker: receive org members. Race-guarded by the echoed query so a slow
+  // earlier response can't overwrite the list for a newer query.
+  useEffect(() => {
+    window.onYunxiaoMembers = (json: string) => {
+      try {
+        const r = JSON.parse(json) as { ok: boolean; query?: string; members?: Member[] };
+        if ((r.query ?? '') !== mentionQueryRef.current) return; // stale
+        setMentionLoading(false);
+        setMembers(r.ok && Array.isArray(r.members) ? r.members : []);
+        setMentionActive(0);
+      } catch {
+        setMentionLoading(false);
+      }
+    };
+    return () => {
+      delete window.onYunxiaoMembers;
+    };
+  }, []);
+
+  // Debounced member fetch while the「@」picker is open (empty query = all members).
+  useEffect(() => {
+    if (!mentionOpen) return;
+    mentionQueryRef.current = mentionQuery;
+    setMentionLoading(true);
+    const id = setTimeout(() => {
+      sendBridgeEvent('load_yunxiao_members', JSON.stringify({ query: mentionQuery }));
+    }, 180);
+    return () => clearTimeout(id);
+  }, [mentionOpen, mentionQuery]);
+
+  // JCEF: focus the popup search box a frame after it opens (autoFocus is unreliable),
+  // so the user can immediately type to filter when there are many members.
+  useEffect(() => {
+    if (!mentionOpen) return;
+    const raf = requestAnimationFrame(() => mentionSearchRef.current?.focus());
+    const fb = setTimeout(() => mentionSearchRef.current?.focus(), 80);
+    return () => {
+      cancelAnimationFrame(raf);
+      clearTimeout(fb);
+    };
+  }, [mentionOpen]);
+
   // ESC closes the modal.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -226,9 +304,72 @@ export function BugDetailModal({ bugId, onClose }: BugDetailModalProps) {
     }
   };
 
+  const closeMention = () => {
+    setMentionOpen(false);
+    setMentionQuery('');
+    setMentionTaQuery('');
+    setMentionStart(-1);
+  };
+
+  const onCommentChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const value = e.target.value;
+    setCommentText(value);
+    const caret = e.target.selectionStart ?? value.length;
+    const m = detectMention(value, caret);
+    if (m) {
+      setMentionStart(m.start);
+      setMentionTaQuery(m.query); // replace anchor (text in the textarea after '@')
+      setMentionQuery(m.query); // mirror into the box filter
+      setMentionOpen(true);
+    } else if (mentionOpen) {
+      closeMention();
+    }
+  };
+
+  // Replace the「@」token (= '@' + whatever was typed after it in the textarea) with「@name 」.
+  const pickMention = (mem: Member) => {
+    if (mentionStart < 0) return;
+    const before = commentText.slice(0, mentionStart);
+    const after = commentText.slice(mentionStart + 1 + mentionTaQuery.length);
+    const insert = `@${mem.name} `;
+    setCommentText(before + insert + after);
+    closeMention();
+    const caret = (before + insert).length;
+    requestAnimationFrame(() => {
+      const ta = commentInputRef.current;
+      if (ta) {
+        ta.focus();
+        ta.setSelectionRange(caret, caret);
+      }
+    });
+  };
+
+  // Shared by the textarea and the popup search box (whichever has focus).
+  const onCommentKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement | HTMLInputElement>) => {
+    if (!mentionOpen) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation(); // close the picker, not the modal (modal ESC is window-level)
+      closeMention();
+      return;
+    }
+    if (members.length === 0) return;
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setMentionActive((i) => (i + 1) % members.length);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setMentionActive((i) => (i - 1 + members.length) % members.length);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      pickMention(members[Math.min(mentionActive, members.length - 1)]);
+    }
+  };
+
   const submitComment = () => {
     const text = commentText.trim();
     if (!text || submitting) return;
+    closeMention();
     setSubmitting(true);
     sendBridgeEvent('submit_yunxiao_comment', JSON.stringify({ bugId, content: text }));
   };
@@ -346,11 +487,55 @@ export function BugDetailModal({ bugId, onClose }: BugDetailModalProps) {
             </button>
           ) : (
             <div className={styles.commentEditor}>
+              {mentionOpen && (
+                <>
+                  <div
+                    className={styles.mentionBackdrop}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      closeMention();
+                    }}
+                  />
+                  <div className={styles.mentionPopup}>
+                    <input
+                      ref={mentionSearchRef}
+                      type="text"
+                      className={styles.mentionSearch}
+                      value={mentionQuery}
+                      onChange={(e) => setMentionQuery(e.target.value)}
+                      onKeyDown={onCommentKeyDown}
+                      onMouseDown={(e) => e.stopPropagation()}
+                      placeholder={t('bugList.detail.mentionSearch')}
+                    />
+                    <div className={styles.mentionList}>
+                      {mentionLoading && members.length === 0 && (
+                        <div className={styles.mentionHint}>{t('bugList.detail.mentionLoading')}</div>
+                      )}
+                      {!mentionLoading && members.length === 0 && (
+                        <div className={styles.mentionHint}>{t('bugList.detail.mentionEmpty')}</div>
+                      )}
+                      {members.map((mem, i) => (
+                        <button
+                          key={mem.userId || mem.name || i}
+                          type="button"
+                          className={`${styles.mentionItem} ${i === mentionActive ? styles.mentionItemActive : ''}`}
+                          onMouseDown={(e) => e.preventDefault()} // keep focus on click
+                          onMouseEnter={() => setMentionActive(i)}
+                          onClick={() => pickMention(mem)}
+                        >
+                          {mem.name}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
               <textarea
                 ref={commentInputRef}
                 className={styles.commentInput}
                 value={commentText}
-                onChange={(e) => setCommentText(e.target.value)}
+                onChange={onCommentChange}
+                onKeyDown={onCommentKeyDown}
                 onPaste={onPasteComment}
                 onMouseDown={(e) => e.stopPropagation()}
                 placeholder={t('bugList.detail.commentEditorPlaceholder')}
@@ -364,6 +549,7 @@ export function BugDetailModal({ bugId, onClose }: BugDetailModalProps) {
                   onClick={() => {
                     setCommentOpen(false);
                     setCommentText('');
+                    closeMention();
                   }}
                 >
                   {t('common.cancel')}

@@ -111,11 +111,24 @@ public class ChatWindowDelegate {
          */
         boolean consumePendingSupervised();
         /**
+         * Read-and-clear the directed supervised-tab payload JSON
+         * ({@code {agentId, initialComposerText}}). Non-null exactly once when the
+         * "新监督者标签页" was created WITH a payload (需求3); null for a plain
+         * supervised tab (legacy picker path).
+         */
+        String consumePendingSupervisedPayload();
+        /**
          * Read-and-clear the staged history-load JSON ({@code {sessionId,
          * containerId, kind}}). Non-null exactly once, on the first
          * {@code frontend_ready} of a tab opened via {@code open_history_in_new_tab}.
          */
         String consumePendingHistoryLoad();
+        /**
+         * Read-and-clear staged composer prefill text. Non-null exactly once, on the
+         * first {@code frontend_ready} of a normal tab created with prefill (云效
+         * 「建会话」). Seeds the composer (unsent) via {@code onRequestComposerPrefill}.
+         */
+        String consumePendingComposerText();
     }
 
     private final DelegateHost host;
@@ -563,8 +576,20 @@ public class ChatWindowDelegate {
         // webview is up, auto-open the supervisor agent picker. Consumed once so a
         // later webview reload won't re-prompt over an active session.
         if (host.consumePendingSupervised()) {
-            LOG.info("[ChatWindowDelegate] Pending supervisor tab — opening agent picker");
-            host.callJavaScript("onRequestNewSupervised");
+            // 需求3: a directed payload ({agentId, initialComposerText}) routes to
+            // onRequestNewSupervisedWith (skip picker + prefill); a plain supervised
+            // tab (null payload) keeps the legacy onRequestNewSupervised (picker).
+            String supervisedPayload = host.consumePendingSupervisedPayload();
+            if (supervisedPayload != null && payloadHasAgentId(supervisedPayload)) {
+                LOG.info("[ChatWindowDelegate] Pending supervisor tab with payload — directed create");
+                // escapeJs: the payload carries arbitrary prefill text (newlines /
+                // quotes); callJavaScript wraps args in single quotes WITHOUT escaping.
+                host.callJavaScript("onRequestNewSupervisedWith",
+                        com.github.claudecodegui.util.JsUtils.escapeJs(supervisedPayload));
+            } else {
+                LOG.info("[ChatWindowDelegate] Pending supervisor tab — opening agent picker");
+                host.callJavaScript("onRequestNewSupervised");
+            }
         }
 
         // Tab opened to load a history session (normal or supervised): now that
@@ -575,6 +600,17 @@ public class ChatWindowDelegate {
         if (pendingHistoryLoad != null && !pendingHistoryLoad.isEmpty()) {
             LOG.info("[ChatWindowDelegate] Pending history load — " + pendingHistoryLoad);
             host.callJavaScript("onRequestLoadHistory", pendingHistoryLoad);
+        }
+
+        // Normal tab created with a prefilled composer (云效「建会话」): seed the
+        // input once the webview is up. Consumed once so a reload won't re-seed.
+        String pendingComposerText = host.consumePendingComposerText();
+        if (pendingComposerText != null && !pendingComposerText.isEmpty()) {
+            LOG.info("[ChatWindowDelegate] Pending composer prefill — len=" + pendingComposerText.length());
+            // escapeJs: prefill carries arbitrary text (newlines / quotes); callJavaScript
+            // wraps args in single quotes WITHOUT escaping.
+            host.callJavaScript("onRequestComposerPrefill",
+                    com.github.claudecodegui.util.JsUtils.escapeJs(pendingComposerText));
         }
 
         if (pendingQuickFixPrompt != null && pendingQuickFixCallback != null) {
@@ -589,6 +625,18 @@ public class ChatWindowDelegate {
         }
 
         host.getStreamCoalescer().flush(null);
+    }
+
+    /** True when the supervised-tab payload JSON carries a non-empty {@code agentId}. */
+    private static boolean payloadHasAgentId(String json) {
+        try {
+            com.google.gson.JsonObject o =
+                    com.google.gson.JsonParser.parseString(json).getAsJsonObject();
+            return o.has("agentId") && !o.get("agentId").isJsonNull()
+                    && !o.get("agentId").getAsString().trim().isEmpty();
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     private void replayCurrentSessionStateToFrontend() {

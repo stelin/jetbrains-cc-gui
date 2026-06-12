@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import HistoryView from './components/history/HistoryView';
+import BugListView from './components/BugList/BugListView';
 import SettingsView from './components/settings';
 import type { SettingsTab } from './components/settings/SettingsSidebar';
 import { sendBridgeEvent } from './utils/bridge';
@@ -53,6 +54,7 @@ import type { RewindableMessage } from './components/RewindSelectDialog';
 import { AppDialogs } from './components/AppDialogs';
 import { PairProvider, PairLayout, usePairContext } from './components/SupervisorPair';
 import NewSupervisedDialog from './components/SupervisorPair/NewSupervisedDialog';
+import type { SupervisorAgent } from './types/supervisorAgent';
 import { WorkflowProvider, WorkflowView, RunStatusBar, EscalationToast } from './components/WorkflowOrchestration';
 import { APP_VERSION } from './version/version';
 import type {
@@ -91,9 +93,60 @@ const PairAppBridge = ({
   handleSubmit: (content: string, attachments?: Attachment[]) => void;
   loading: boolean;
 }) => {
-  const { registerOpenManager, registerInjectPromptHandler } = usePairContext();
+  const { registerOpenManager, registerInjectPromptHandler, createSupervisedSession } = usePairContext();
   // pendingDirective: directiveId whose "applied" ack is owed once loading→false.
   const pendingDirectiveRef = useRef<{ pairId: string; directiveId: string } | null>(null);
+
+  // 需求3: directed "新监督者标签页 + 预填" entry. Java pushes this once on the
+  // fresh tab's frontend_ready when create_new_supervised_tab carried a payload
+  // ({agentId, initialComposerText}). Unlike onRequestNewSupervised (picker), we
+  // skip the dialog: look up the named agent, then createSupervisedSession with
+  // the prefill text (which lands as a composer draft via onSessionCreated — never
+  // auto-sent). Backward-compatible: the no-payload path still fires
+  // onRequestNewSupervised (the picker) and is untouched.
+  useEffect(() => {
+    window.onRequestNewSupervisedWith = (json: string) => {
+      let payload: { agentId?: string; initialComposerText?: string };
+      try {
+        payload = JSON.parse(json) as { agentId?: string; initialComposerText?: string };
+      } catch {
+        return;
+      }
+      const agentId = payload.agentId;
+      if (!agentId) return; // Java only calls this WITH an agentId; ignore otherwise.
+      const draft = payload.initialComposerText;
+
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const prev = window.updateSupervisorAgents;
+      const finish = (agent?: SupervisorAgent) => {
+        if (settled) return;
+        settled = true;
+        window.updateSupervisorAgents = prev;
+        if (timer) clearTimeout(timer);
+        // Found the real agent → its model/defaults; else minimal fallback
+        // (Java fills model/defaults from supervisor-agents.json when omitted).
+        createSupervisedSession(agent ?? ({ id: agentId, name: agentId } as SupervisorAgent), draft);
+      };
+      // Chain a one-shot agents-list listener, then request the list.
+      window.updateSupervisorAgents = (jsonStr: string) => {
+        prev?.(jsonStr);
+        if (settled) return;
+        try {
+          const list = (JSON.parse(jsonStr).agents ?? []) as SupervisorAgent[];
+          const agent = list.find((a) => a.id === agentId);
+          if (agent) finish(agent);
+        } catch {
+          /* ignore malformed */
+        }
+      };
+      timer = setTimeout(() => finish(undefined), 4000);
+      sendBridgeEvent('get_supervisor_agents', '');
+    };
+    return () => {
+      delete window.onRequestNewSupervisedWith;
+    };
+  }, [createSupervisedSession]);
 
   useEffect(() => {
     registerOpenManager(() => {
@@ -539,6 +592,33 @@ const App = () => {
     };
   }, []);
 
+  // Bridge callback: a normal tab created with prefill (云效「建会话」) is told, once
+  // its webview is ready, what to seed the composer with (unsent). We set the draft
+  // input and focus so the user can review/edit before sending.
+  useEffect(() => {
+    window.onRequestComposerPrefill = (text: string) => {
+      if (typeof text !== 'string' || !text) return;
+      // ChatInputBox is uncontrolled — useControlledValueSync skips writing the
+      // `value` prop into the editor while it's focused/composing, so a plain
+      // setDraftInput won't show after mount. Write straight to the editor via the
+      // imperative handle (bypasses that guard), and also keep parent state in sync.
+      setDraftInput(text);
+      const apply = () => {
+        if (chatInputRef.current) {
+          chatInputRef.current.setValue(text);
+          chatInputRef.current.focus();
+        } else {
+          // ref not attached yet on this fresh tab — retry next frame
+          requestAnimationFrame(apply);
+        }
+      };
+      requestAnimationFrame(apply);
+    };
+    return () => {
+      delete window.onRequestComposerPrefill;
+    };
+  }, []);
+
   // Bridge callback: a tab opened via `open_history_in_new_tab` is told, once its
   // webview is ready, which session to load. We run the in-place loadHistorySession
   // here so the session loads into THIS (fresh) tab — normal or supervised alike.
@@ -748,6 +828,7 @@ const App = () => {
           }
         }}
         onOpenWorkflow={() => setCurrentView('workflow')}
+        onBugList={() => setCurrentView('bug-list')}
         onNewSupervised={() => sendBridgeEvent('create_new_supervised_tab')}
         hasMessages={messages.length > 0}
       />
@@ -900,6 +981,14 @@ const App = () => {
           onClose={() => setCurrentView('chat')}
           onOpenSupervisorManager={() => {
             setSettingsInitialTab('supervisor');
+            setCurrentView('settings');
+          }}
+        />
+      ) : currentView === 'bug-list' ? (
+        <BugListView
+          onBack={() => setCurrentView('chat')}
+          onOpenYunxiaoSettings={() => {
+            setSettingsInitialTab('yunxiao');
             setCurrentView('settings');
           }}
         />

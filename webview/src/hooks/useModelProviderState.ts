@@ -7,7 +7,7 @@ import type { ProviderConfig } from '../types/provider';
 import { isSpecialProviderId } from '../types/provider';
 import { writeClaudeModelMapping } from '../utils/claudeModelMapping';
 
-export type ViewMode = 'chat' | 'history' | 'settings' | 'workflow';
+export type ViewMode = 'chat' | 'history' | 'settings' | 'workflow' | 'bug-list';
 
 const getCustomModels = (key: string): { id: string }[] => {
   try {

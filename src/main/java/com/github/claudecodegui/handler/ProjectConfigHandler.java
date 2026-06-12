@@ -2,6 +2,7 @@ package com.github.claudecodegui.handler;
 
 import com.github.claudecodegui.handler.core.HandlerContext;
 
+import com.github.claudecodegui.client.YunxiaoClient;
 import com.github.claudecodegui.settings.CodemossSettingsService;
 import com.github.claudecodegui.action.SendShortcutSync;
 import com.github.claudecodegui.provider.claude.ClaudeHistoryReader;
@@ -671,6 +672,338 @@ public class ProjectConfigHandler {
             }
             ApplicationManager.getApplication().invokeLater(() ->
                 context.callJavaScript("window.updateRemoteConnectionTest", context.escapeJs(gson.toJson(r))));
+        });
+    }
+
+    // ──────────────── Yunxiao (Alibaba Cloud DevOps) Bug Integration ────────────────
+
+    /** Read the saved yunxiao config and push it to the settings page. */
+    public void handleGetYunxiaoConfig() {
+        try {
+            String token = settingsService.getYunxiaoToken();
+            String orgId = settingsService.getYunxiaoOrgId();
+            String domain = settingsService.getYunxiaoDomain();
+            String userId = settingsService.getYunxiaoUserId();
+            String defaultProjectId = settingsService.getYunxiaoDefaultProjectId();
+            String defaultProjectName = settingsService.getYunxiaoDefaultProjectName();
+            String appendPrompt = settingsService.getYunxiaoAppendPrompt();
+            ApplicationManager.getApplication().invokeLater(() -> {
+                JsonObject r = new JsonObject();
+                r.addProperty("token", token);
+                r.addProperty("organizationId", orgId);
+                r.addProperty("domain", domain);
+                r.addProperty("userId", userId);
+                r.addProperty("defaultProjectId", defaultProjectId);
+                r.addProperty("defaultProjectName", defaultProjectName);
+                r.addProperty("appendPrompt", appendPrompt);
+                context.callJavaScript("window.updateYunxiaoConfig", context.escapeJs(gson.toJson(r)));
+            });
+        } catch (Exception e) {
+            LOG.error("[ProjectConfigHandler] handleGetYunxiaoConfig failed: " + e.getMessage(), e);
+        }
+    }
+
+    /** Persist token/organizationId/domain, then echo the normalised state back. */
+    public void handleSetYunxiaoConfig(String content) {
+        try {
+            JsonObject json = gson.fromJson(content, JsonObject.class);
+            String token = (json != null && json.has("token") && !json.get("token").isJsonNull())
+                    ? json.get("token").getAsString() : settingsService.getYunxiaoToken();
+            String orgId = (json != null && json.has("organizationId") && !json.get("organizationId").isJsonNull())
+                    ? json.get("organizationId").getAsString() : settingsService.getYunxiaoOrgId();
+            String domain = (json != null && json.has("domain") && !json.get("domain").isJsonNull())
+                    ? json.get("domain").getAsString() : settingsService.getYunxiaoDomain();
+
+            // setYunxiaoToken/setYunxiaoOrgId clear derived state (userId, default project)
+            // only when the value actually changes — a plain re-save keeps them.
+            settingsService.setYunxiaoToken(token);
+            settingsService.setYunxiaoOrgId(orgId);
+            settingsService.setYunxiaoDomain(domain);
+            // Default project is persisted AFTER the credential setters so it survives an
+            // unchanged-credential save (and a credential change correctly drops it first).
+            if (json != null && json.has("defaultProjectId") && !json.get("defaultProjectId").isJsonNull()) {
+                settingsService.setYunxiaoDefaultProjectId(json.get("defaultProjectId").getAsString());
+                String pName = (json.has("defaultProjectName") && !json.get("defaultProjectName").isJsonNull())
+                        ? json.get("defaultProjectName").getAsString() : "";
+                settingsService.setYunxiaoDefaultProjectName(pName);
+            }
+            // Append prompt is a preference (not credential-derived); persist whenever present.
+            if (json != null && json.has("appendPrompt") && !json.get("appendPrompt").isJsonNull()) {
+                settingsService.setYunxiaoAppendPrompt(json.get("appendPrompt").getAsString());
+            }
+            LOG.info("[ProjectConfigHandler] Saved yunxiao config orgId=" + settingsService.getYunxiaoOrgId()
+                    + " domain=" + settingsService.getYunxiaoDomain()
+                    + " tokenLen=" + (token == null ? 0 : token.trim().length())
+                    + " defaultProjectId=" + settingsService.getYunxiaoDefaultProjectId());
+
+            ApplicationManager.getApplication().invokeLater(() -> {
+                JsonObject r = new JsonObject();
+                r.addProperty("token", settingsService.getYunxiaoToken());
+                r.addProperty("organizationId", settingsService.getYunxiaoOrgId());
+                r.addProperty("domain", settingsService.getYunxiaoDomain());
+                // userId survives an unchanged-credential save; hidden only after a real change.
+                r.addProperty("userId", settingsService.getYunxiaoUserId());
+                r.addProperty("defaultProjectId", settingsService.getYunxiaoDefaultProjectId());
+                r.addProperty("defaultProjectName", settingsService.getYunxiaoDefaultProjectName());
+                r.addProperty("appendPrompt", settingsService.getYunxiaoAppendPrompt());
+                context.callJavaScript("window.updateYunxiaoConfig", context.escapeJs(gson.toJson(r)));
+                context.callJavaScript("window.showSuccessI18n", "toast.saveSuccess");
+            });
+        } catch (Exception e) {
+            LOG.error("[ProjectConfigHandler] handleSetYunxiaoConfig failed: " + e.getMessage(), e);
+            ApplicationManager.getApplication().invokeLater(() ->
+                context.callJavaScript("window.showError", context.escapeJs("保存云效配置失败")));
+        }
+    }
+
+    /**
+     * Validate the entered credentials by resolving the current user id (§4).
+     * {@link YunxiaoClient#getCurrentUserId()} reads token/orgId/domain from
+     * settings, and §2.3 specifies the userId cache is primed at「测试连接」time —
+     * so we persist the entered values first (which also drops any stale cached
+     * id), then fetch. Success returns the numeric id; failure returns the error.
+     */
+    public void handleYunxiaoTestConnection(String content) {
+        CompletableFuture.runAsync(() -> {
+            JsonObject r = new JsonObject();
+            try {
+                JsonObject json = gson.fromJson(content, JsonObject.class);
+                if (json != null) {
+                    if (json.has("token") && !json.get("token").isJsonNull()) {
+                        settingsService.setYunxiaoToken(json.get("token").getAsString());
+                    }
+                    if (json.has("organizationId") && !json.get("organizationId").isJsonNull()) {
+                        settingsService.setYunxiaoOrgId(json.get("organizationId").getAsString());
+                    }
+                    if (json.has("domain") && !json.get("domain").isJsonNull()) {
+                        settingsService.setYunxiaoDomain(json.get("domain").getAsString());
+                    }
+                }
+                String userId = new YunxiaoClient(settingsService).getCurrentUserId();
+                r.addProperty("ok", true);
+                r.addProperty("userId", userId);
+            } catch (Exception e) {
+                r.addProperty("ok", false);
+                r.addProperty("error", e.getMessage() == null ? "未知错误" : e.getMessage());
+            }
+            ApplicationManager.getApplication().invokeLater(() ->
+                context.callJavaScript("window.onYunxiaoTestResult", context.escapeJs(gson.toJson(r))));
+        });
+    }
+
+    /** Load the project list for the缺陷 dropdown (需求2). */
+    public void handleLoadYunxiaoProjects() {
+        CompletableFuture.runAsync(() -> {
+            JsonObject r = new JsonObject();
+            try {
+                java.util.List<JsonObject> projects = new YunxiaoClient(settingsService).listProjects();
+                com.google.gson.JsonArray arr = new com.google.gson.JsonArray();
+                for (JsonObject p : projects) arr.add(p);
+                r.addProperty("ok", true);
+                r.add("projects", arr);
+                // Carry the configured default so the list / settings dropdown can auto-select it.
+                r.addProperty("defaultProjectId", settingsService.getYunxiaoDefaultProjectId());
+                // Carry the append prompt so the list's「建会话」/「建监督者」can suffix it.
+                r.addProperty("appendPrompt", settingsService.getYunxiaoAppendPrompt());
+            } catch (Exception e) {
+                r.addProperty("ok", false);
+                r.addProperty("error", e.getMessage() == null ? "未知错误" : e.getMessage());
+            }
+            ApplicationManager.getApplication().invokeLater(() ->
+                context.callJavaScript("window.onYunxiaoProjects", context.escapeJs(gson.toJson(r))));
+        });
+    }
+
+    /**
+     * Search缺陷 assigned to the current user within a project (需求2). The
+     * response echoes the requested {@code page} + {@code hasMore} so the
+     * frontend can page1=replace / page>1=append monotonically.
+     */
+    public void handleLoadYunxiaoBugs(String content) {
+        CompletableFuture.runAsync(() -> {
+            JsonObject r = new JsonObject();
+            int page = 1;
+            try {
+                JsonObject json = gson.fromJson(content, JsonObject.class);
+                String projectId = (json != null && json.has("projectId") && !json.get("projectId").isJsonNull())
+                        ? json.get("projectId").getAsString() : "";
+                page = (json != null && json.has("page") && !json.get("page").isJsonNull())
+                        ? json.get("page").getAsInt() : 1;
+                int perPage = (json != null && json.has("perPage") && !json.get("perPage").isJsonNull())
+                        ? json.get("perPage").getAsInt() : 50;
+
+                YunxiaoClient.BugPage bugPage = new YunxiaoClient(settingsService).searchMyBugs(projectId, page, perPage);
+                com.google.gson.JsonArray arr = new com.google.gson.JsonArray();
+                for (JsonObject b : bugPage.bugs) arr.add(b);
+                r.addProperty("ok", true);
+                r.addProperty("page", bugPage.page);
+                r.addProperty("hasMore", bugPage.hasMore);
+                r.add("bugs", arr);
+            } catch (Exception e) {
+                r.addProperty("ok", false);
+                r.addProperty("page", page);
+                r.addProperty("error", e.getMessage() == null ? "未知错误" : e.getMessage());
+            }
+            ApplicationManager.getApplication().invokeLater(() ->
+                context.callJavaScript("window.onYunxiaoBugs", context.escapeJs(gson.toJson(r))));
+        });
+    }
+
+    /**
+     * Load a single bug's detail for the「查看详情」modal: basic info + description
+     * (images inlined) + attachments. Replies to {@code window.onYunxiaoBugDetail}.
+     */
+    public void handleLoadYunxiaoBugDetail(String content) {
+        CompletableFuture.runAsync(() -> {
+            JsonObject r = new JsonObject();
+            String bugId = "";
+            try {
+                JsonObject json = gson.fromJson(content, JsonObject.class);
+                bugId = (json != null && json.has("bugId") && !json.get("bugId").isJsonNull())
+                        ? json.get("bugId").getAsString() : "";
+                JsonObject detail = new YunxiaoClient(settingsService).getBugDetail(bugId);
+                r.addProperty("ok", true);
+                r.addProperty("bugId", bugId);
+                r.add("detail", detail);
+            } catch (Exception e) {
+                r.addProperty("ok", false);
+                r.addProperty("bugId", bugId);
+                r.addProperty("error", e.getMessage() == null ? "未知错误" : e.getMessage());
+            }
+            ApplicationManager.getApplication().invokeLater(() ->
+                context.callJavaScript("window.onYunxiaoBugDetail", context.escapeJs(gson.toJson(r))));
+        });
+    }
+
+    /**
+     * Resolve a fresh download URL for a bug attachment and hand it back to the
+     * frontend (which opens it in the system browser). Replies to
+     * {@code window.onYunxiaoAttachmentUrl}.
+     */
+    public void handleDownloadYunxiaoAttachment(String content) {
+        CompletableFuture.runAsync(() -> {
+            JsonObject r = new JsonObject();
+            try {
+                JsonObject json = gson.fromJson(content, JsonObject.class);
+                String bugId = (json != null && json.has("bugId") && !json.get("bugId").isJsonNull())
+                        ? json.get("bugId").getAsString() : "";
+                String attachmentId = (json != null && json.has("attachmentId") && !json.get("attachmentId").isJsonNull())
+                        ? json.get("attachmentId").getAsString() : "";
+                String fileName = (json != null && json.has("name") && !json.get("name").isJsonNull())
+                        ? json.get("name").getAsString() : "";
+                String url = new YunxiaoClient(settingsService).getAttachmentDownloadUrl(bugId, attachmentId);
+                r.addProperty("ok", true);
+                r.addProperty("url", url);
+                r.addProperty("name", fileName);
+            } catch (Exception e) {
+                r.addProperty("ok", false);
+                r.addProperty("error", e.getMessage() == null ? "未知错误" : e.getMessage());
+            }
+            ApplicationManager.getApplication().invokeLater(() ->
+                context.callJavaScript("window.onYunxiaoAttachmentUrl", context.escapeJs(gson.toJson(r))));
+        });
+    }
+
+    /** Load the selectable target statuses for a bug (workitem-type workflow). Replies to {@code window.onYunxiaoStatuses}. */
+    public void handleLoadYunxiaoStatuses(String content) {
+        CompletableFuture.runAsync(() -> {
+            JsonObject r = new JsonObject();
+            String bugId = "";
+            try {
+                JsonObject json = gson.fromJson(content, JsonObject.class);
+                bugId = strOf(json, "bugId");
+                String projectId = strOf(json, "projectId");
+                String workItemTypeId = strOf(json, "workItemTypeId");
+                String currentStatusId = strOf(json, "currentStatusId");
+                java.util.List<JsonObject> statuses = new YunxiaoClient(settingsService)
+                        .getWorkItemStatuses(projectId, workItemTypeId, currentStatusId);
+                com.google.gson.JsonArray arr = new com.google.gson.JsonArray();
+                for (JsonObject s : statuses) arr.add(s);
+                r.addProperty("ok", true);
+                r.addProperty("bugId", bugId);
+                r.add("statuses", arr);
+            } catch (Exception e) {
+                r.addProperty("ok", false);
+                r.addProperty("bugId", bugId);
+                r.addProperty("error", e.getMessage() == null ? "未知错误" : e.getMessage());
+            }
+            ApplicationManager.getApplication().invokeLater(() ->
+                context.callJavaScript("window.onYunxiaoStatuses", context.escapeJs(gson.toJson(r))));
+        });
+    }
+
+    /** Change a bug's status. Replies to {@code window.onYunxiaoStatusUpdated} with the applied status. */
+    public void handleUpdateYunxiaoStatus(String content) {
+        CompletableFuture.runAsync(() -> {
+            JsonObject r = new JsonObject();
+            String bugId = "";
+            try {
+                JsonObject json = gson.fromJson(content, JsonObject.class);
+                bugId = strOf(json, "bugId");
+                String statusId = strOf(json, "statusId");
+                String statusName = strOf(json, "statusName");
+                new YunxiaoClient(settingsService).updateWorkItemStatus(bugId, statusId);
+                r.addProperty("ok", true);
+                r.addProperty("bugId", bugId);
+                r.addProperty("statusId", statusId);
+                r.addProperty("statusName", statusName);
+            } catch (Exception e) {
+                r.addProperty("ok", false);
+                r.addProperty("bugId", bugId);
+                r.addProperty("error", e.getMessage() == null ? "未知错误" : e.getMessage());
+            }
+            ApplicationManager.getApplication().invokeLater(() ->
+                context.callJavaScript("window.onYunxiaoStatusUpdated", context.escapeJs(gson.toJson(r))));
+        });
+    }
+
+    private static String strOf(JsonObject json, String key) {
+        return (json != null && json.has(key) && !json.get(key).isJsonNull()) ? json.get(key).getAsString() : "";
+    }
+
+    /** Post a comment on a bug. Replies to {@code window.onYunxiaoCommentAdded}. */
+    public void handleSubmitYunxiaoComment(String content) {
+        CompletableFuture.runAsync(() -> {
+            JsonObject r = new JsonObject();
+            String bugId = "";
+            try {
+                JsonObject json = gson.fromJson(content, JsonObject.class);
+                bugId = strOf(json, "bugId");
+                String text = strOf(json, "content");
+                new YunxiaoClient(settingsService).createComment(bugId, text);
+                r.addProperty("ok", true);
+                r.addProperty("bugId", bugId);
+            } catch (Exception e) {
+                r.addProperty("ok", false);
+                r.addProperty("bugId", bugId);
+                r.addProperty("error", e.getMessage() == null ? "未知错误" : e.getMessage());
+            }
+            ApplicationManager.getApplication().invokeLater(() ->
+                context.callJavaScript("window.onYunxiaoCommentAdded", context.escapeJs(gson.toJson(r))));
+        });
+    }
+
+    /** Upload a pasted image and return a markdown embed tag. Replies to {@code window.onYunxiaoCommentImage}. */
+    public void handleUploadYunxiaoCommentImage(String content) {
+        CompletableFuture.runAsync(() -> {
+            JsonObject r = new JsonObject();
+            try {
+                JsonObject json = gson.fromJson(content, JsonObject.class);
+                String bugId = strOf(json, "bugId");
+                String fileName = strOf(json, "fileName");
+                String contentType = strOf(json, "contentType");
+                String dataBase64 = strOf(json, "dataBase64");
+                byte[] data = java.util.Base64.getDecoder().decode(dataBase64);
+                String markdown = new YunxiaoClient(settingsService)
+                        .uploadCommentImage(bugId, data, fileName, contentType);
+                r.addProperty("ok", true);
+                r.addProperty("markdown", markdown);
+            } catch (Exception e) {
+                r.addProperty("ok", false);
+                r.addProperty("error", e.getMessage() == null ? "未知错误" : e.getMessage());
+            }
+            ApplicationManager.getApplication().invokeLater(() ->
+                context.callJavaScript("window.onYunxiaoCommentImage", context.escapeJs(gson.toJson(r))));
         });
     }
 

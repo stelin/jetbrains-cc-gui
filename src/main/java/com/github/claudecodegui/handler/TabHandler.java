@@ -42,12 +42,12 @@ public class TabHandler extends BaseMessageHandler {
     public boolean handle(String type, String content) {
         if ("create_new_tab".equals(type)) {
             LOG.debug("[TabHandler] Processing create_new_tab");
-            handleCreateNewTab(false);
+            handleCreateNewTab(false, content);
             return true;
         }
         if ("create_new_supervised_tab".equals(type)) {
             LOG.debug("[TabHandler] Processing create_new_supervised_tab");
-            handleCreateNewTab(true);
+            handleCreateNewTab(true, content);
             return true;
         }
         if ("open_history_in_new_tab".equals(type)) {
@@ -66,11 +66,47 @@ public class TabHandler extends BaseMessageHandler {
      *                   agent picker auto-opens on first {@code frontend_ready}).
      *                   Keeps the born-at-birth session-kind contract: supervised
      *                   sessions only ever live in their own dedicated tab.
+     * @param payload    optional JSON payload. For a <b>supervised</b> tab:
+     *                   {@code {agentId, initialComposerText}} — staged via
+     *                   {@code setPendingSupervisedPayload} (skip picker + prefilled
+     *                   draft); null/blank/{@code {}} falls back to the legacy plain
+     *                   supervised tab ({@code setPendingSupervised(true)} → picker).
+     *                   For a <b>normal</b> tab: {@code {initialComposerText}} — seeds
+     *                   the composer (unsent) via {@code setPendingComposerText} (云效
+     *                   「建会话」); absent → plain empty tab.
      */
-    private void handleCreateNewTab(boolean supervised) {
-        java.util.function.Consumer<ClaudeChatWindow> preMount =
-                supervised ? (win -> win.setPendingSupervised(true)) : (win -> { });
+    private void handleCreateNewTab(boolean supervised, String payload) {
+        final String tabPayload = (payload != null && !payload.trim().isEmpty()
+                && !"{}".equals(payload.trim())) ? payload.trim() : null;
+        java.util.function.Consumer<ClaudeChatWindow> preMount;
+        if (!supervised) {
+            final String composerText = extractInitialComposerText(tabPayload);
+            preMount = (composerText != null)
+                    ? (win -> win.setPendingComposerText(composerText))
+                    : (win -> { });
+        } else if (tabPayload != null) {
+            preMount = (win -> win.setPendingSupervisedPayload(tabPayload));
+        } else {
+            preMount = (win -> win.setPendingSupervised(true));
+        }
         createTab(preMount, null);
+    }
+
+    /** Pull {@code initialComposerText} from a normal-tab payload, or null when absent/empty/invalid. */
+    private static String extractInitialComposerText(String payload) {
+        if (payload == null) {
+            return null;
+        }
+        try {
+            com.google.gson.JsonObject o = com.google.gson.JsonParser.parseString(payload).getAsJsonObject();
+            if (o.has("initialComposerText") && !o.get("initialComposerText").isJsonNull()) {
+                String t = o.get("initialComposerText").getAsString();
+                return (t != null && !t.isEmpty()) ? t : null;
+            }
+        } catch (Exception e) {
+            LOG.warn("[TabHandler] create_new_tab: bad payload: " + e.getMessage());
+        }
+        return null;
     }
 
     /**

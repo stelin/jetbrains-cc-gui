@@ -5,7 +5,7 @@ import { BackIcon } from '../Icons';
 import { usePairContext } from '../SupervisorPair/PairContext';
 
 export interface ChatHeaderProps {
-  currentView: 'chat' | 'history' | 'settings' | 'workflow';
+  currentView: 'chat' | 'history' | 'settings' | 'workflow' | 'bug-list';
   sessionTitle: string;
   t: TFunction;
   onBack: () => void;
@@ -17,6 +17,8 @@ export interface ChatHeaderProps {
   titleEditable?: boolean;
   /** Open the supervisor workflow orchestration dialog (header toolbar button). */
   onOpenWorkflow?: () => void;
+  /** Open the「我的缺陷」(Yunxiao bug) full-page list (header toolbar button). */
+  onBugList?: () => void;
   /**
    * Open a brand-new tab that is born as a supervisor session ("新监督者标签页").
    * Supervised sessions only ever live in their own dedicated tab — a normal
@@ -44,6 +46,7 @@ export function ChatHeader({
   onTitleChange,
   titleEditable = false,
   onOpenWorkflow,
+  onBugList,
   onNewSupervised,
 }: ChatHeaderProps): React.ReactElement | null {
   // Session-kind refactor: this webview is one tab; isPairActive tells whether
@@ -120,7 +123,7 @@ export function ChatHeader({
     onNewSession();
   }, [isPairActive, onNewSession, t]);
 
-  if (currentView === 'settings' || currentView === 'workflow') {
+  if (currentView === 'settings' || currentView === 'workflow' || currentView === 'bug-list') {
     return null;
   }
 
@@ -200,6 +203,15 @@ export function ChatHeader({
             >
               <span className="codicon codicon-history" />
             </button>
+            {onBugList && (
+              <button
+                className="icon-button"
+                onClick={onBugList}
+                data-tooltip={t('bugList.entryTooltip', '查看指派给我的云效缺陷')}
+              >
+                <span className="codicon codicon-bug" />
+              </button>
+            )}
             {onOpenWorkflow && (
               <button
                 className="icon-button"

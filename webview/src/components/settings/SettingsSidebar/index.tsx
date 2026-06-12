@@ -1,7 +1,7 @@
 import styles from './style.module.less';
 import { useTranslation } from 'react-i18next';
 
-export type SettingsTab = 'basic' | 'providers' | 'dependencies' | 'usage' | 'permissions' | 'commit' | 'mcp' | 'agents' | 'prompts' | 'skills' | 'remote' | 'remoteSync' | 'supervisor' | 'other' | 'community';
+export type SettingsTab = 'basic' | 'providers' | 'dependencies' | 'usage' | 'permissions' | 'commit' | 'mcp' | 'agents' | 'prompts' | 'skills' | 'yunxiao' | 'remote' | 'remoteSync' | 'supervisor' | 'other' | 'community';
 
 interface SidebarItem {
   key: SettingsTab;
@@ -20,6 +20,7 @@ const sidebarItems: SidebarItem[] = [
   { key: 'agents', icon: 'codicon-robot', labelKey: 'settings.agents' },
   { key: 'prompts', icon: 'codicon-notebook', labelKey: 'settings.prompts' },
   { key: 'skills', icon: 'codicon-book', labelKey: 'settings.skills' },
+  { key: 'yunxiao', icon: 'codicon-cloud-download', labelKey: 'settings.yunxiao.title' },
   { key: 'remote', icon: 'codicon-cloud', labelKey: 'settings.remote.title' },
   { key: 'remoteSync', icon: 'codicon-sync', labelKey: 'settings.remoteSync.title' },
   { key: 'supervisor', icon: 'codicon-eye', labelKey: 'settings.supervisor.title' },

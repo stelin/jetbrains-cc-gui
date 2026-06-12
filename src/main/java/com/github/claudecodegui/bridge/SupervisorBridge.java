@@ -2,6 +2,7 @@ package com.github.claudecodegui.bridge;
 
 import com.github.claudecodegui.provider.claude.ClaudeSDKBridge;
 import com.github.claudecodegui.provider.common.IBridge;
+import com.github.claudecodegui.settings.CodemossSettingsService;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.intellij.openapi.diagnostic.Logger;
@@ -340,6 +341,31 @@ public class SupervisorBridge {
     }
 
     /**
+     * Merge 云效 credentials into the daemon command's {@code params.env} so the
+     * {@code query_bug_details} tool can read {@code process.env.YUNXIAO_*}. Read
+     * fresh from settings each call — a token change propagates to the next
+     * supervisor.start / supervisor.postEvent without a session restart. No-op when
+     * token/orgId aren't both configured.
+     */
+    private void applyYunxiaoEnv(JsonObject params) {
+        try {
+            JsonObject yunxiao = new CodemossSettingsService().buildYunxiaoEnv();
+            if (yunxiao.size() == 0) {
+                return;
+            }
+            JsonObject env = (params.has("env") && params.get("env").isJsonObject())
+                    ? params.getAsJsonObject("env")
+                    : new JsonObject();
+            for (String key : yunxiao.keySet()) {
+                env.add(key, yunxiao.get(key));
+            }
+            params.add("env", env);
+        } catch (Exception e) {
+            LOG.warn("[SupervisorBridge] applyYunxiaoEnv failed: " + e.getMessage());
+        }
+    }
+
+    /**
      * Start the supervisor session on the daemon. Returns a future that
      * completes once the daemon acks {@code done}.
      *
@@ -385,6 +411,7 @@ public class SupervisorBridge {
         if (reasoningEffort != null && !reasoningEffort.isEmpty()) {
             params.addProperty("reasoningEffort", reasoningEffort);
         }
+        applyYunxiaoEnv(params);
         return sdkBridge.sendDaemonCommand("supervisor.start", params, sinkCallback("start"));
     }
 
@@ -473,6 +500,7 @@ public class SupervisorBridge {
         if (resumeSessionId != null && !resumeSessionId.isEmpty()) {
             params.addProperty("resumeSessionId", resumeSessionId);
         }
+        applyYunxiaoEnv(params);
         return sdkBridge.sendDaemonCommand("supervisor.start", params, sinkCallback("startWithHandoff"));
     }
 
@@ -505,6 +533,11 @@ public class SupervisorBridge {
         if (role != null && !role.isEmpty() && !"user".equals(role)) {
             params.addProperty("role", role);
         }
+        // 云效 env MUST ride on postEvent (not just start): the daemon restores
+        // params.env after each command (daemon.js finally block), so start-time
+        // env is gone by the time a postEvent turn runs query_bug_details — an
+        // in-process daemon tool that reads process.env at tool-call time.
+        applyYunxiaoEnv(params);
 
         AtomicReference<JsonObject> captured = new AtomicReference<>();
         AtomicReference<String> capturedError = new AtomicReference<>();

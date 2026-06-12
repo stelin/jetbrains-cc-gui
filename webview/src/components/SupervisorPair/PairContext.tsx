@@ -196,7 +196,7 @@ interface PairContextValue {
    * starts the pair atomically at creation. Used by the "new supervised
    * session" entry; the runtime SupervisorToggle is removed.
    */
-  createSupervisedSession: (agent: SupervisorAgent) => void;
+  createSupervisedSession: (agent: SupervisorAgent, initialComposerText?: string) => void;
   isPairActive: boolean;
   openManager: () => void;
   registerOpenManager: (fn: () => void) => void;
@@ -643,7 +643,7 @@ export function PairProvider({ children }: PairProviderProps) {
   // optimistically, then ships a single `session_create_supervised` so Java
   // registers a container + starts the pair at creation. The container's
   // pairId/containerId come back via onSessionCreated / onPairStarted.
-  const createSupervisedSession = useCallback((agent: SupervisorAgent) => {
+  const createSupervisedSession = useCallback((agent: SupervisorAgent, initialComposerText?: string) => {
     const next: SelectedSupervisor[] = [{
       agentId: agent.id,
       name: agent.name,
@@ -677,6 +677,9 @@ export function PairProvider({ children }: PairProviderProps) {
     if (effectiveModel) payload.model = effectiveModel;
     payload.longContextEnabled = resolvedLongContext;
     payload.reasoningEffort = effectiveReasoning;
+    // Prefill (需求3): round-trips through Java and comes back via onSessionCreated
+    // → setSupervisorDraft. Never auto-sent — only seeded into the composer draft.
+    if (initialComposerText) payload.initialComposerText = initialComposerText;
 
     try {
       sendToJava(`session_create_supervised:${JSON.stringify(payload)}`);
@@ -1529,6 +1532,7 @@ export function PairProvider({ children }: PairProviderProps) {
           defaultLongContext?: boolean;
           defaultReasoning?: string;
           title?: string;
+          initialComposerText?: string;
         };
         if (o.containerId) setContainerId(o.containerId);
         if (o.pairId) setPairId(o.pairId);
@@ -1550,6 +1554,11 @@ export function PairProvider({ children }: PairProviderProps) {
                   defaultReasoning: o.defaultReasoning,
                 }]
           );
+          // Prefill (需求3): seed the composer draft (keyed by agentId) so it
+          // shows on composer mount. Never auto-sent — user confirms + sends.
+          if (o.initialComposerText) {
+            setSupervisorDraft(agentId, o.initialComposerText);
+          }
         }
       } catch { /* ignore malformed */ }
     };

@@ -681,6 +681,11 @@ public class PairHandler extends BaseMessageHandler {
                     ? data.get("longContextEnabled").getAsBoolean() : null;
             String reasoningOverride = data.has("reasoningEffort") && !data.get("reasoningEffort").isJsonNull()
                     ? data.get("reasoningEffort").getAsString() : null;
+            // Prefill (需求3): echoed back on created → onSessionCreated seeds the
+            // composer draft. Never auto-sent.
+            String initialComposerText = data.has("initialComposerText")
+                    && !data.get("initialComposerText").isJsonNull()
+                    ? data.get("initialComposerText").getAsString() : null;
 
             if (agentId == null) {
                 throw new IllegalArgumentException("session_create_supervised requires agentId");
@@ -723,6 +728,9 @@ public class PairHandler extends BaseMessageHandler {
             created.addProperty("agentId", agentId);
             created.addProperty("pairId", session.getPairId());
             if (title != null) created.addProperty("title", title);
+            if (initialComposerText != null && !initialComposerText.isEmpty()) {
+                created.addProperty("initialComposerText", initialComposerText);
+            }
             pushToWebview("window.onSessionCreated", gson.toJson(created));
         } catch (Exception e) {
             LOG.warn("[PairHandler] session_create_supervised failed: "

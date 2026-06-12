@@ -35,6 +35,7 @@ import {
     SUPERVISOR_MCP_NAME,
     EMIT_ACTION_TOOL_NAME,
 } from '../services/supervisor/supervisor-tools.js';
+import { buildQueryBugDetailsTool, QUALIFIED_QUERY_BUG } from '../services/supervisor/yunxiao-tools.js';
 import {
     buildEmitPlanTool,
     QUALIFIED_EMIT_PLAN,
@@ -559,7 +560,7 @@ export async function startSupervisorSession(params) {
         sdk,
         zod,
         (action) => { runtime.lastCapturedAction = action; },
-        [emitPlanTool, updateStateTool]
+        [emitPlanTool, updateStateTool, buildQueryBugDetailsTool(sdk, zod)]
     );
 
     // Allow emit_action + read-only file tools by default; callers may opt-in
@@ -569,6 +570,7 @@ export async function startSupervisorSession(params) {
         QUALIFIED_EMIT_ACTION,
         QUALIFIED_EMIT_PLAN,
         QUALIFIED_UPDATE_STATE,
+        QUALIFIED_QUERY_BUG,
         ...SUPERVISOR_READ_TOOLS,
         ...runtime.allowedTools,
         // 2026-06-01: attached `claude mcp add` servers (empty unless mcpAccess).
@@ -662,6 +664,9 @@ export async function startSupervisorSession(params) {
             canUseTool: async (toolName) => {
                 if (toolName === QUALIFIED_EMIT_ACTION || toolName === QUALIFIED_EMIT_PLAN
                         || toolName === QUALIFIED_UPDATE_STATE) {
+                    return { behavior: 'allow' };
+                }
+                if (toolName === QUALIFIED_QUERY_BUG) {
                     return { behavior: 'allow' };
                 }
                 if (SUPERVISOR_READ_TOOLS.includes(toolName)) {

@@ -70,6 +70,18 @@ public class SettingsHandler extends BaseMessageHandler {
         "get_remote_mode",
         "set_remote_mode",
         "test_remote_connection",
+        // Yunxiao (Alibaba Cloud DevOps) bug integration
+        "get_yunxiao_config",
+        "set_yunxiao_config",
+        "yunxiao_test_connection",
+        "load_yunxiao_projects",
+        "load_yunxiao_bugs",
+        "load_yunxiao_bug_detail",
+        "download_yunxiao_attachment",
+        "load_yunxiao_statuses",
+        "update_yunxiao_status",
+        "submit_yunxiao_comment",
+        "upload_yunxiao_comment_image",
         // Path mapping (per-project, remote mode only)
         "get_path_mapping",
         "set_path_mapping",
@@ -247,6 +259,40 @@ public class SettingsHandler extends BaseMessageHandler {
                 return true;
             case "test_remote_connection":
                 projectConfigHandler.handleTestRemoteConnection(content);
+                return true;
+            // Yunxiao (Alibaba Cloud DevOps) bug integration
+            case "get_yunxiao_config":
+                projectConfigHandler.handleGetYunxiaoConfig();
+                return true;
+            case "set_yunxiao_config":
+                projectConfigHandler.handleSetYunxiaoConfig(content);
+                return true;
+            case "yunxiao_test_connection":
+                projectConfigHandler.handleYunxiaoTestConnection(content);
+                return true;
+            case "load_yunxiao_projects":
+                projectConfigHandler.handleLoadYunxiaoProjects();
+                return true;
+            case "load_yunxiao_bugs":
+                projectConfigHandler.handleLoadYunxiaoBugs(content);
+                return true;
+            case "load_yunxiao_bug_detail":
+                projectConfigHandler.handleLoadYunxiaoBugDetail(content);
+                return true;
+            case "download_yunxiao_attachment":
+                projectConfigHandler.handleDownloadYunxiaoAttachment(content);
+                return true;
+            case "load_yunxiao_statuses":
+                projectConfigHandler.handleLoadYunxiaoStatuses(content);
+                return true;
+            case "update_yunxiao_status":
+                projectConfigHandler.handleUpdateYunxiaoStatus(content);
+                return true;
+            case "submit_yunxiao_comment":
+                projectConfigHandler.handleSubmitYunxiaoComment(content);
+                return true;
+            case "upload_yunxiao_comment_image":
+                projectConfigHandler.handleUploadYunxiaoCommentImage(content);
                 return true;
             // Path mapping
             case "get_path_mapping":

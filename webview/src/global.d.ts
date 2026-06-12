@@ -594,11 +594,26 @@ interface Window {
   onRequestNewSupervised?: () => void;
 
   /**
+   * Directed variant of {@link onRequestNewSupervised}: pushed once by Java on
+   * the first `frontend_ready` of a tab created via `create_new_supervised_tab`
+   * WITH a payload. Carries a JSON string `{ agentId, initialComposerText? }` so
+   * the fresh tab skips the picker, creates the named supervised session, and
+   * prefills (but does not send) the composer draft.
+   */
+  onRequestNewSupervisedWith?: (json: string) => void;
+
+  /**
    * History-in-new-tab: pushed once by Java on the first `frontend_ready` of a
    * tab created via `open_history_in_new_tab`. Carries JSON `{sessionId,
    * containerId?, kind}` so the fresh tab loads that session in-place.
    */
   onRequestLoadHistory?: (json: string) => void;
+
+  /**
+   * Composer prefill: pushed once by Java on the first `frontend_ready` of a
+   * normal tab created with prefill text (云效「建会话」). Seeds the input (unsent).
+   */
+  onRequestComposerPrefill?: (text: string) => void;
 
   /**
    * Session-kind refactor: supervised-session history list (read from the
@@ -940,4 +955,59 @@ interface Window {
    * Clipboard read callback for paste from IDEA shortcut
    */
   onClipboardRead?: (text: string) => void;
+
+  /**
+   * Yunxiao (Alibaba Cloud DevOps) settings config callback. Payload:
+   * { token, organizationId, domain }. Pushed in response to
+   * `get_yunxiao_config` / `set_yunxiao_config`.
+   */
+  updateYunxiaoConfig?: (json: string) => void;
+
+  /**
+   * Yunxiao「测试连接」result callback. Payload: { ok, userId? , error? }.
+   * Pushed in response to `yunxiao_test_connection`.
+   */
+  onYunxiaoTestResult?: (json: string) => void;
+
+  /**
+   * Yunxiao project-dropdown callback. Payload: { ok, projects?, error? }.
+   * Pushed in response to `load_yunxiao_projects`.
+   */
+  onYunxiaoProjects?: (json: string) => void;
+
+  /**
+   * Yunxiao「我的缺陷」page callback. Payload: { ok, page?, hasMore?, bugs?, error? }.
+   * Pushed in response to `load_yunxiao_bugs`.
+   */
+  onYunxiaoBugs?: (json: string) => void;
+
+  /**
+   * Yunxiao bug-detail modal callback. Payload: { ok, bugId?, detail?, error? }.
+   * Pushed in response to `load_yunxiao_bug_detail`.
+   */
+  onYunxiaoBugDetail?: (json: string) => void;
+
+  /**
+   * Yunxiao attachment download-url callback. Payload: { ok, url?, name?, error? }.
+   * Pushed in response to `download_yunxiao_attachment`; the URL is opened in the browser.
+   */
+  onYunxiaoAttachmentUrl?: (json: string) => void;
+
+  /**
+   * Yunxiao status-options callback. Payload: { ok, bugId?, statuses?, error? }.
+   * Pushed in response to `load_yunxiao_statuses`.
+   */
+  onYunxiaoStatuses?: (json: string) => void;
+
+  /**
+   * Yunxiao status-update result. Payload: { ok, bugId?, statusId?, statusName?, error? }.
+   * Pushed in response to `update_yunxiao_status`.
+   */
+  onYunxiaoStatusUpdated?: (json: string) => void;
+
+  /** Yunxiao comment-submit result. Payload: { ok, bugId?, error? }. */
+  onYunxiaoCommentAdded?: (json: string) => void;
+
+  /** Yunxiao pasted-image upload result. Payload: { ok, markdown?, error? }. */
+  onYunxiaoCommentImage?: (json: string) => void;
 }

@@ -1289,6 +1289,184 @@ public class CodemossSettingsService {
         LOG.info("[CodemossSettings] Set remoteServerUrl: " + trimmed);
     }
 
+    // ==================== Yunxiao (Alibaba Cloud DevOps) Bug Integration ====================
+
+    /** Central-edition (中心版) host; predefined Region/private-cloud override. */
+    public static final String DEFAULT_YUNXIAO_DOMAIN = "openapi-rdc.aliyuncs.com";
+
+    /**
+     * Personal access token for the云效 new OpenAPI (sent as {@code x-yunxiao-token}).
+     * Stored in plaintext under the nested {@code yunxiao} object (§2.1), mirroring
+     * the {@code remoteServerUrl} status quo. Empty string when unset.
+     */
+    public String getYunxiaoToken() {
+        return getYunxiaoField("token", "");
+    }
+
+    public void setYunxiaoToken(String token) throws IOException {
+        String next = token == null ? "" : token.trim();
+        boolean changed = !next.equals(getYunxiaoToken());
+        setYunxiaoField("token", next);
+        // Only a *real* credential change invalidates derived state (resolved userId,
+        // default project). A plain re-save of the same token must keep them, so the
+        // user doesn't lose the resolved user id / default project on every「保存」.
+        if (changed) {
+            clearYunxiaoDerived();
+        }
+        LOG.info("[CodemossSettings] Set yunxiao.token (len=" + next.length()
+                + ", changed=" + changed + ")");
+    }
+
+    /** 云效 organization id (中心版 path 段 {@code organizations/{orgId}}). */
+    public String getYunxiaoOrgId() {
+        return getYunxiaoField("organizationId", "");
+    }
+
+    public void setYunxiaoOrgId(String orgId) throws IOException {
+        String next = orgId == null ? "" : orgId.trim();
+        boolean changed = !next.equals(getYunxiaoOrgId());
+        setYunxiaoField("organizationId", next);
+        // Same as setYunxiaoToken: only drop derived state when the org actually changes.
+        if (changed) {
+            clearYunxiaoDerived();
+        }
+        LOG.info("[CodemossSettings] Set yunxiao.organizationId: " + next + " (changed=" + changed + ")");
+    }
+
+    /** 云效 OpenAPI host; falls back to {@link #DEFAULT_YUNXIAO_DOMAIN} when unset. */
+    public String getYunxiaoDomain() {
+        String domain = getYunxiaoField("domain", "");
+        return (domain == null || domain.isEmpty()) ? DEFAULT_YUNXIAO_DOMAIN : domain;
+    }
+
+    public void setYunxiaoDomain(String domain) throws IOException {
+        String trimmed = domain == null ? "" : domain.trim();
+        if (trimmed.endsWith("/")) trimmed = trimmed.substring(0, trimmed.length() - 1);
+        setYunxiaoField("domain", trimmed.isEmpty() ? DEFAULT_YUNXIAO_DOMAIN : trimmed);
+        LOG.info("[CodemossSettings] Set yunxiao.domain: "
+                + (trimmed.isEmpty() ? DEFAULT_YUNXIAO_DOMAIN : trimmed));
+    }
+
+    /**
+     * Persisted current-user id (云效 ObjectId-style hex string, e.g.
+     * {@code 654458cef717cdf76f826b62}) resolved from the token-only current-user API.
+     * Acts as a durable cache so the缺陷 list's {@code assignedTo} filter doesn't re-hit
+     * the API on every query and survives IDE restarts. Empty when unset / after a
+     * token/orgId change clears it.
+     */
+    public String getYunxiaoUserId() {
+        return getYunxiaoField("userId", "");
+    }
+
+    public void setYunxiaoUserId(String userId) throws IOException {
+        setYunxiaoField("userId", userId == null ? "" : userId.trim());
+        LOG.info("[CodemossSettings] Set yunxiao.userId: " + (userId == null ? "" : userId.trim()));
+    }
+
+    /**
+     * Default project for the「我的缺陷」list (id = workitem-search {@code spaceId}).
+     * When set, the list auto-selects it on open instead of forcing a manual pick.
+     * {@code defaultProjectName} is kept only for display. Both are cleared on a
+     * token/orgId change (the project set is org-scoped).
+     */
+    public String getYunxiaoDefaultProjectId() {
+        return getYunxiaoField("defaultProjectId", "");
+    }
+
+    public void setYunxiaoDefaultProjectId(String projectId) throws IOException {
+        setYunxiaoField("defaultProjectId", projectId == null ? "" : projectId.trim());
+    }
+
+    public String getYunxiaoDefaultProjectName() {
+        return getYunxiaoField("defaultProjectName", "");
+    }
+
+    public void setYunxiaoDefaultProjectName(String name) throws IOException {
+        setYunxiaoField("defaultProjectName", name == null ? "" : name.trim());
+    }
+
+    /**
+     * Extra prompt auto-appended to the「建监督者」/「建会话」prefill text when starting
+     * from a缺陷 list item. A user preference (NOT credential-derived) — survives a
+     * token/orgId change. Empty when unset.
+     */
+    public String getYunxiaoAppendPrompt() {
+        return getYunxiaoField("appendPrompt", "");
+    }
+
+    public void setYunxiaoAppendPrompt(String prompt) throws IOException {
+        // No trim: leading/trailing whitespace may be intentional in a multi-line prompt.
+        setYunxiaoField("appendPrompt", prompt == null ? "" : prompt);
+    }
+
+    /**
+     * Drop credential-derived fields (resolved {@code userId}, default project) in a
+     * single config write. Only valid for a given token/orgId, so cleared whenever
+     * either changes.
+     */
+    private void clearYunxiaoDerived() throws IOException {
+        JsonObject config = readConfig();
+        JsonObject yunxiao = (config.has("yunxiao") && config.get("yunxiao").isJsonObject())
+                ? config.getAsJsonObject("yunxiao")
+                : new JsonObject();
+        yunxiao.addProperty("userId", "");
+        yunxiao.addProperty("defaultProjectId", "");
+        yunxiao.addProperty("defaultProjectName", "");
+        config.add("yunxiao", yunxiao);
+        writeConfig(config);
+    }
+
+    /** Read a field from the nested {@code yunxiao} object, or {@code def} when absent. */
+    private String getYunxiaoField(String key, String def) {
+        try {
+            JsonObject config = readConfig();
+            if (config.has("yunxiao") && config.get("yunxiao").isJsonObject()) {
+                JsonObject yunxiao = config.getAsJsonObject("yunxiao");
+                if (yunxiao.has(key) && !yunxiao.get(key).isJsonNull()) {
+                    return yunxiao.get(key).getAsString();
+                }
+            }
+        } catch (IOException ignored) {
+        }
+        return def;
+    }
+
+    /** Upsert a single field inside the nested {@code yunxiao} object without disturbing siblings. */
+    private void setYunxiaoField(String key, String value) throws IOException {
+        JsonObject config = readConfig();
+        JsonObject yunxiao = (config.has("yunxiao") && config.get("yunxiao").isJsonObject())
+                ? config.getAsJsonObject("yunxiao")
+                : new JsonObject();
+        yunxiao.addProperty(key, value);
+        config.add("yunxiao", yunxiao);
+        writeConfig(config);
+    }
+
+    /**
+     * Build the 云效 daemon env block ({@code YUNXIAO_TOKEN / YUNXIAO_ORG_ID /
+     * YUNXIAO_DOMAIN}) injected into daemon {@code params.env} so the
+     * {@code query_bug_details} tool (services/supervisor/yunxiao-tools.js) can
+     * read it from {@code process.env}. Returns an empty object when token + orgId
+     * are not both configured (the daemon tool then reports "未配置"). Read fresh on
+     * each call, so a token change propagates to the next daemon command without a
+     * session restart.
+     */
+    public JsonObject buildYunxiaoEnv() {
+        JsonObject env = new JsonObject();
+        try {
+            String token = getYunxiaoToken();
+            String orgId = getYunxiaoOrgId();
+            if (token != null && !token.isBlank() && orgId != null && !orgId.isBlank()) {
+                env.addProperty("YUNXIAO_TOKEN", token.trim());
+                env.addProperty("YUNXIAO_ORG_ID", orgId.trim());
+                env.addProperty("YUNXIAO_DOMAIN", getYunxiaoDomain());
+            }
+        } catch (Exception ignored) {
+            // best-effort: tool surfaces a clear "未配置" error if env is absent
+        }
+        return env;
+    }
+
     // ==================== Remote Sync (mutagen) ====================
 
     /** Default GitHub proxy used to fetch mutagen releases when none is configured. */

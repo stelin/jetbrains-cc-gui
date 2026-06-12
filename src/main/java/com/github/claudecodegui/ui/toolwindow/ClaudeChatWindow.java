@@ -88,6 +88,16 @@ public class ClaudeChatWindow {
     private volatile boolean pendingSupervised = false;
 
     /**
+     * Optional payload for a directed supervised tab (需求3): JSON
+     * {@code {agentId, initialComposerText}}. When set (alongside
+     * {@link #pendingSupervised}), the delegate pushes
+     * {@code window.onRequestNewSupervisedWith} instead of the picker, so the new
+     * tab creates the named session and prefills (without sending) the composer.
+     * Self-clearing in {@link #consumePendingSupervisedPayload()}.
+     */
+    private volatile String pendingSupervisedPayload = null;
+
+    /**
      * Set when this tab was created to open a history session in a fresh tab
      * (normal or supervised). Holds the ASCII-safe JSON {@code {sessionId,
      * containerId, kind}} to hand to {@code window.onRequestLoadHistory} once the
@@ -95,6 +105,14 @@ public class ClaudeChatWindow {
      * (self-clearing) so a webview reload doesn't re-trigger the load.
      */
     private volatile String pendingHistoryLoad = null;
+
+    /**
+     * Set when this (normal) tab was created with a prefilled composer — e.g. the
+     * 云效「建会话」button opens a fresh chat tab and seeds the input with the bug
+     * prompt (unsent). Handed to {@code window.onRequestComposerPrefill} once the
+     * webview is ready. Consumed once (self-clearing) so a reload doesn't re-seed.
+     */
+    private volatile String pendingComposerText = null;
 
     private HandlerContext handlerContext;
     private MessageDispatcher messageDispatcher;
@@ -394,6 +412,30 @@ public class ClaudeChatWindow {
     }
 
     /**
+     * Stage a directed supervised tab (需求3): marks the tab supervised AND records
+     * the {@code {agentId, initialComposerText}} payload. Equivalent to
+     * {@link #setPendingSupervised(boolean) setPendingSupervised(true)} for the
+     * boolean gate, but additionally lets the delegate route to
+     * {@code onRequestNewSupervisedWith}.
+     */
+    public void setPendingSupervisedPayload(String json) {
+        this.pendingSupervised = true;
+        this.pendingSupervisedPayload = json;
+    }
+
+    /**
+     * Atomically read-and-clear the directed supervised-tab payload. Returns the
+     * staged JSON exactly once (null otherwise / for a plain supervised tab), so
+     * the directed create fires on the first {@code frontend_ready} but not on a
+     * later webview reload.
+     */
+    public synchronized String consumePendingSupervisedPayload() {
+        String v = pendingSupervisedPayload;
+        pendingSupervisedPayload = null;
+        return v;
+    }
+
+    /**
      * Stage a history-load request to run once this tab's webview is ready (see
      * {@link #pendingHistoryLoad}). Called by {@code TabHandler} right after
      * construction, before the webview mounts.
@@ -410,6 +452,26 @@ public class ClaudeChatWindow {
     public synchronized String consumePendingHistoryLoad() {
         String v = pendingHistoryLoad;
         pendingHistoryLoad = null;
+        return v;
+    }
+
+    /**
+     * Stage prefill text to seed this tab's composer once its webview is ready
+     * (see {@link #pendingComposerText}). Called by {@code TabHandler} right after
+     * construction, before the webview mounts.
+     */
+    public void setPendingComposerText(String text) {
+        this.pendingComposerText = text;
+    }
+
+    /**
+     * Atomically read-and-clear the staged composer prefill. Returns the text
+     * exactly once per staging (null otherwise), so it seeds on the first
+     * {@code frontend_ready} but not on subsequent webview reloads.
+     */
+    public synchronized String consumePendingComposerText() {
+        String v = pendingComposerText;
+        pendingComposerText = null;
         return v;
     }
 
@@ -1041,8 +1103,18 @@ public class ClaudeChatWindow {
             }
 
             @Override
+            public String consumePendingSupervisedPayload() {
+                return ClaudeChatWindow.this.consumePendingSupervisedPayload();
+            }
+
+            @Override
             public String consumePendingHistoryLoad() {
                 return ClaudeChatWindow.this.consumePendingHistoryLoad();
+            }
+
+            @Override
+            public String consumePendingComposerText() {
+                return ClaudeChatWindow.this.consumePendingComposerText();
             }
         };
     }

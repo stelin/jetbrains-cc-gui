@@ -17,6 +17,7 @@ import AgentSection from './AgentSection';
 import PromptSection from './PromptSection';
 import CommitSection from './CommitSection';
 import OtherSettingsSection from './OtherSettingsSection';
+import YunxiaoSection from './YunxiaoSection';
 import RemoteServerSection from './RemoteServerSection';
 import RemoteSyncSection from './RemoteSyncSection';
 import SupervisorSection from './SupervisorSection';
@@ -541,6 +542,11 @@ const SettingsView = ({
           {/* Skills */}
           <div style={{ display: currentTab === 'skills' ? 'block' : 'none' }}>
             <SkillsSettingsSection currentProvider={currentProvider} />
+          </div>
+
+          {/* Yunxiao (Alibaba Cloud DevOps) settings */}
+          <div style={{ display: currentTab === 'yunxiao' ? 'block' : 'none' }}>
+            <YunxiaoSection />
           </div>
 
           {/* Remote mode (ai-bridge-server) */}

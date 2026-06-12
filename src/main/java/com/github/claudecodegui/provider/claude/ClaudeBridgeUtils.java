@@ -1,5 +1,6 @@
 package com.github.claudecodegui.provider.claude;
 
+import com.github.claudecodegui.settings.CodemossSettingsService;
 import com.google.gson.JsonObject;
 import com.intellij.openapi.diagnostic.Logger;
 
@@ -26,6 +27,15 @@ final class ClaudeBridgeUtils {
         if (isValidCwd(cwd)) {
             envVars.addProperty("IDEA_PROJECT_PATH", cwd);
             envVars.addProperty("PROJECT_PATH", cwd);
+        }
+        // 云效 credentials for the query_bug_details daemon tool (main-AI path).
+        try {
+            JsonObject yunxiao = new CodemossSettingsService().buildYunxiaoEnv();
+            for (String key : yunxiao.keySet()) {
+                envVars.add(key, yunxiao.get(key));
+            }
+        } catch (Exception ignored) {
+            // best-effort; tool reports "未配置" when env is absent
         }
         return envVars;
     }

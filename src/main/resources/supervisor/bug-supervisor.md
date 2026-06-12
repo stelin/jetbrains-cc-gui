@@ -16,8 +16,8 @@
 2. **按关联性分组**:把涉及【同一个页面 / 同一个接口 / 同一个功能点 / 同一处根因】的缺陷归为一组(`groups[]`),其余各自单独成组。分组依据记 `update_state(decisionAppend={action:'group_bugs', category:'A', evidence:[...]})`。
 3. **逐组跑完整工作流**:对每一组完整走一遍 Step 1 diagnose → Step 2 决策 → Step 3 apply_fix + 三层验证。**同组的多个缺陷在同一次 diagnose / apply_fix 里一起处理**(派单的 BugSpec 段落和 `candidate.files` 覆盖该组全部缺陷);组与组顺序处理,修完一组再下一组。
 4. **plan 结构**:用 `update_state(planProgressDelta=...)` 让 plan 体现"每组一个推进单元",每组完成标一次进度。
-5. **完工**:**所有组**的三层验证都通过后才 `emit_action(complete_plan)`;summary 按缺陷 / 分组分节列出各自的根因 / 修改 / 验证证据,**不遗漏任何一个缺陷**。
-6. **局部失败隔离**:某一组反复失败(走 retry / escalate)**不影响**其它组继续推进;最终在 summary 里对失败组如实标注"未修复 + 原因",其余组照常交付。
+5. **完工**:**所有组**的三层验证都通过后,先对**每个**已修复缺陷各调一次 `comment_bug_fix` 把结论评论回云效(见 §完工触发 step 0),再 `emit_action(complete_plan)`;summary 按缺陷 / 分组分节列出各自的根因 / 修改 / 验证证据,**不遗漏任何一个缺陷**。
+6. **局部失败隔离**:某一组反复失败(走 retry / escalate)**不影响**其它组继续推进;最终在 summary 里对失败组如实标注"未修复 + 原因",其余组照常交付(失败组不发 comment_bug_fix)。
 
 > 单缺陷任务(只列 1 个缺陷)**忽略本节**,直接按下面的单缺陷工作流执行。
 
@@ -667,6 +667,12 @@ bugfix 场景下大多数应选 `reissue_with_clarification`(任务表述明确�
 
 `isComplete` 的条件:Step 0/1/2/3 全部 status ∈ {`done`, `skipped`},且三层验证全过(含 `compile_skipped`)。完工时:
 
+0. **回写云效修复结论(若缺陷来自云效 BUG)**:对**每个**已修复的缺陷调用一次 `comment_bug_fix` 工具(普通 MCP 工具调用,像 `query_bug_details` 一样直接调,**不是** emit_action),把结论评论回该缺陷。三段必填,直接取你手上的报告:
+   - `bug_id` = 该缺陷的云效 identifier(启动协议 Step 0 拿到的)
+   - `cause` = 根因(`rootCause.mechanism` + file:line)
+   - `fix` = 修复方案 + 改动摘要(`chosenCandidate.strategy` + `fixReport.diffSummary`)
+   - `test` = 验证证据(三层验证结论:自读范围检查 / reviewer verdict+fixesOriginalBug / 编译结果)
+   多缺陷逐个缺陷各发一条。评论失败(工具返回 isError)→ 记 `decisionAppend(action='comment_failed', category='C1', confidence='low')` 但**不阻塞完工**(结论仍在 complete_plan summary 里)。
 1. 写一个 `inject_prompt(kind='acknowledgement', inlinePrompt='...')` 让主 AI 准备汇报(见 §inject_prompt 写法 — acknowledgement)
 2. 等主 AI 这一轮 `report_turn_completion` 回来
 3. **下一轮直接 `emit_action(action='complete_plan', payload={summary: '<下方结构化文本>'})`**

@@ -356,7 +356,9 @@ export function BugListView({ onBack, onOpenYunxiaoSettings }: BugListViewProps)
       `请帮我诊断并修复云效缺陷 BUG-${serial}（标题：${subject}，状态：${status}）。\n` +
       `第一步必须调用 query_bug_details 工具，传入 bug id「${identifier}」拉取完整的基础信息、\n` +
       `所有评论和附件。该工具会把描述/评论里的所有截图下载到本地并返回路径，\n` +
-      `你必须用 Read 工具逐个查看这些截图（看清实际画面/报错），完全理解问题后再制定修复方案并动手修复。`;
+      `你必须用 Read 工具逐个查看这些截图（看清实际画面/报错），完全理解问题后再制定修复方案并动手修复。\n` +
+      `修复并自测通过后，必须调用 comment_bug_fix 工具，传入 bug id「${identifier}」把修复结论评论回该缺陷，` +
+      `必须包含三段：①缺陷产生的原因 ②如何修复 ③如何测试。`;
     const extra = appendPrompt.trim();
     return extra ? `${base}\n\n${extra}` : base;
   };
@@ -379,7 +381,9 @@ export function BugListView({ onBack, onOpenYunxiaoSettings }: BugListViewProps)
       `要求：\n` +
       `1. 对每一个缺陷，第一步都必须调用 query_bug_details 工具并传入它对应的 bug id，拉取完整的基础信息、所有评论和附件；该工具会把描述/评论里的所有截图下载到本地并返回路径，你必须用 Read 工具逐个查看这些截图（看清实际画面/报错），完全理解后再制定修复方案。\n` +
       `2. 先分析这些缺陷之间的关联性，把涉及【同一个页面 / 同一个接口 / 同一个功能点 / 同一处根因】的缺陷归为一组；相关的缺陷放在一起修复（一次性改完），不相关的再逐个处理。\n` +
-      `3. 按分组顺序逐组推进，每修完一组再进行下一组，不要遗漏任何一个缺陷。`;
+      `3. 按分组顺序逐组推进，每修完一组再进行下一组，不要遗漏任何一个缺陷。\n` +
+      `4. 每修复并验证完一个缺陷（或一组相关缺陷），调用 comment_bug_fix 工具，用对应的 bug id 把该缺陷的修复结论` +
+      `评论回去（含 ①缺陷产生的原因 ②如何修复 ③如何测试 三段），每个缺陷都要发，不要遗漏。`;
     const extra = appendPrompt.trim();
     return extra ? `${base}\n\n${extra}` : base;
   };

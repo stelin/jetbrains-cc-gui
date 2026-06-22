@@ -303,7 +303,7 @@ export default function NodeDrawer({
                 onLongContextChange={(en) => commit({ longContext: en })}
               />
               <ReasoningSelect
-                value={(node.reasoning || 'high') as ReasoningEffort}
+                value={(node.reasoning || 'max') as ReasoningEffort}
                 onChange={(r) => commit({ reasoning: r })}
                 selectedModel={effModel}
                 currentProvider="claude"

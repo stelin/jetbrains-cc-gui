@@ -106,7 +106,11 @@ export function uid(prefix: string): string {
 }
 
 export function createNode(name: string): WorkflowNode {
-  return { name, supervisorId: '', plan: '', dependsOn: [] };
+  // New nodes default to the highest reasoning tier ('max' = 最高). Persisted on
+  // the node so it actually travels to the backend (StartPairParams.reasoningOverride)
+  // even when the user never touches the picker. The default model (Opus 4.8) supports
+  // 'max'; the ReasoningSelect degrades it on models that don't.
+  return { name, supervisorId: '', plan: '', dependsOn: [], reasoning: 'max' };
 }
 
 export function createWorkflow(name: string): WorkflowDefinition {

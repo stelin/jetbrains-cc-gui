@@ -2,6 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import VirtualList from '../history/VirtualList';
 import { sendBridgeEvent } from '../../utils/bridge';
+import { buildPrefill, buildPrefillMulti } from '../../utils/bugPrefill';
+import { useWorkflowContext } from '../WorkflowOrchestration/WorkflowContext';
+import { uid, type WorkflowDefinition, type WorkflowNode } from '../WorkflowOrchestration/types';
 import { useYunxiaoBugs, type YunxiaoBug } from '../../hooks/useYunxiaoBugs';
 import BugDetailModal from './BugDetailModal';
 import styles from './style.module.less';
@@ -23,6 +26,12 @@ interface BugListViewProps {
   onBack: () => void;
   /** Jump to the「云效设置」tab when token/orgId is missing. */
   onOpenYunxiaoSettings: () => void;
+  /** Open the workflow page after building a workflow draft from the selected bugs. */
+  onOpenWorkflow: () => void;
+  /** 当前会话模型 id —— 独立分析窗继承它(header 回显)。 */
+  model: string;
+  /** 当前会话思考档位 —— 独立分析窗继承它。 */
+  reasoning: string;
 }
 
 /** Coerce 云效 status (string | {displayName|name} | null) into a display string. */
@@ -78,8 +87,9 @@ const DEFAULT_STATUSES = ['处理中', '再次打开', '待确认'];
 /** Max bugs selectable into a single batch (one shared supervisor/session). */
 const MAX_BATCH = 10;
 
-export function BugListView({ onBack, onOpenYunxiaoSettings }: BugListViewProps) {
+export function BugListView({ onBack, onOpenYunxiaoSettings, onOpenWorkflow, model, reasoning }: BugListViewProps) {
   const { t } = useTranslation();
+  const { loadDraft } = useWorkflowContext();
   const {
     projects,
     projectsError,
@@ -90,6 +100,7 @@ export function BugListView({ onBack, onOpenYunxiaoSettings }: BugListViewProps)
     loading,
     hasMore,
     loadMore,
+    refresh,
     appendPrompt,
     updateBugStatus,
     updateBugAssignee,
@@ -344,54 +355,11 @@ export function BugListView({ onBack, onOpenYunxiaoSettings }: BugListViewProps)
     return bugs.filter((b) => selectedStatuses.includes(statusText(b.status)));
   }, [bugs, selectedStatuses]);
 
-  // Shared prefill text for both「建会话」and「建监督者」. 展示用 serialNumber、工具入参用
-  // identifier(双标识)。末尾追加用户在云效设置里配置的 appendPrompt(若有)。
-  const buildPrefill = (bug: YunxiaoBug): string => {
-    const serial = serialText(bug);
-    const subject = bug.subject || '';
-    const status = statusText(bug.status);
-    // 工作项内部标识 = identifier(Java 已从云效 `id` 兜底映射);再兜一层 bug.id 防漂移。
-    const identifier = bug.identifier || bug.id || '';
-    const base =
-      `请帮我诊断并修复云效缺陷 BUG-${serial}（标题：${subject}，状态：${status}）。\n` +
-      `第一步必须调用 query_bug_details 工具，传入 bug id「${identifier}」拉取完整的基础信息、\n` +
-      `所有评论和附件。该工具会把描述/评论里的所有截图下载到本地并返回路径，\n` +
-      `你必须用 Read 工具逐个查看这些截图（看清实际画面/报错），完全理解问题后再制定修复方案并动手修复。\n` +
-      `修复并自测通过后，必须调用 comment_bug_fix 工具，传入 bug id「${identifier}」把修复结论评论回该缺陷，` +
-      `必须包含三段：①缺陷产生的原因 ②如何修复 ③如何测试。`;
-    const extra = appendPrompt.trim();
-    return extra ? `${base}\n\n${extra}` : base;
-  };
-
-  // Multi-bug prefill (批量): all selected bugs in one supervisor/session. Asks the
-  // model to group related bugs (same page / API / feature point) and fix each group
-  // together. Same identifier/serialNumber 双标识 convention + appendPrompt tail as the
-  // single-bug version.
-  const buildPrefillMulti = (list: YunxiaoBug[]): string => {
-    const lines = list.map((bug, i) => {
-      const serial = serialText(bug);
-      const subject = bug.subject || '';
-      const status = statusText(bug.status);
-      const identifier = bug.identifier || bug.id || '';
-      return `${i + 1}. BUG-${serial}（id「${identifier}」，标题：${subject}，状态：${status}）`;
-    });
-    const base =
-      `请帮我诊断并修复以下 ${list.length} 个云效缺陷：\n\n` +
-      `${lines.join('\n')}\n\n` +
-      `要求：\n` +
-      `1. 对每一个缺陷，第一步都必须调用 query_bug_details 工具并传入它对应的 bug id，拉取完整的基础信息、所有评论和附件；该工具会把描述/评论里的所有截图下载到本地并返回路径，你必须用 Read 工具逐个查看这些截图（看清实际画面/报错），完全理解后再制定修复方案。\n` +
-      `2. 先分析这些缺陷之间的关联性，把涉及【同一个页面 / 同一个接口 / 同一个功能点 / 同一处根因】的缺陷归为一组；相关的缺陷放在一起修复（一次性改完），不相关的再逐个处理。\n` +
-      `3. 按分组顺序逐组推进，每修完一组再进行下一组，不要遗漏任何一个缺陷。\n` +
-      `4. 每修复并验证完一个缺陷（或一组相关缺陷），调用 comment_bug_fix 工具，用对应的 bug id 把该缺陷的修复结论` +
-      `评论回去（含 ①缺陷产生的原因 ②如何修复 ③如何测试 三段），每个缺陷都要发，不要遗漏。`;
-    const extra = appendPrompt.trim();
-    return extra ? `${base}\n\n${extra}` : base;
-  };
-
   // 建会话: 新开一个【普通】标签页并把预填文案写入 composer(不发送)。
+  // buildPrefill / buildPrefillMulti 已抽到 utils/bugPrefill(纯函数,入参 bug + appendPrompt)。
   const handleCreateSession = (e: React.MouseEvent, bug: YunxiaoBug) => {
     e.stopPropagation();
-    sendBridgeEvent('create_new_tab', JSON.stringify({ initialComposerText: buildPrefill(bug) }));
+    sendBridgeEvent('create_new_tab', JSON.stringify({ initialComposerText: buildPrefill(bug, appendPrompt) }));
   };
 
   // 建监督者: 新建一个监督者标签页(自动选缺陷监督者)并预填(不发送)。
@@ -399,7 +367,7 @@ export function BugListView({ onBack, onOpenYunxiaoSettings }: BugListViewProps)
     e.stopPropagation();
     sendBridgeEvent(
       'create_new_supervised_tab',
-      JSON.stringify({ agentId: 'bug-supervisor', initialComposerText: buildPrefill(bug) }),
+      JSON.stringify({ agentId: 'bug-supervisor', initialComposerText: buildPrefill(bug, appendPrompt) }),
     );
   };
 
@@ -444,7 +412,7 @@ export function BugListView({ onBack, onOpenYunxiaoSettings }: BugListViewProps)
   // 批量建会话: 选中的多个缺陷拼成一段预填，开【一个】普通标签页(不发送)。
   const handleBatchSession = () => {
     if (selectedBugs.length === 0) return;
-    sendBridgeEvent('create_new_tab', JSON.stringify({ initialComposerText: buildPrefillMulti(selectedBugs) }));
+    sendBridgeEvent('create_new_tab', JSON.stringify({ initialComposerText: buildPrefillMulti(selectedBugs, appendPrompt) }));
     exitBatch();
   };
 
@@ -453,7 +421,61 @@ export function BugListView({ onBack, onOpenYunxiaoSettings }: BugListViewProps)
     if (selectedBugs.length === 0) return;
     sendBridgeEvent(
       'create_new_supervised_tab',
-      JSON.stringify({ agentId: 'bug-supervisor', initialComposerText: buildPrefillMulti(selectedBugs) }),
+      JSON.stringify({ agentId: 'bug-supervisor', initialComposerText: buildPrefillMulti(selectedBugs, appendPrompt) }),
+    );
+    exitBatch();
+  };
+
+  // 批量建工作流: 把选中缺陷组装成一个【串行】工作流草稿(每节点=一个缺陷、缺陷监督者、
+  // 任务=单缺陷预提示词、节点 i 依赖 i-1),加载到工作流编辑器(不保存/不运行),跳到工作流页
+  // 让用户自行审阅后保存+运行(并发默认 2)。
+  const handleBatchWorkflow = () => {
+    if (selectedBugs.length === 0) return;
+    // 节点名 = BUG-<serial>(唯一);serial 缺失兜底「节点i」,再防一层重名。
+    const names: string[] = [];
+    const seen = new Set<string>();
+    selectedBugs.forEach((bug, i) => {
+      const s = serialText(bug);
+      const baseName = s ? `BUG-${s}` : `节点${i + 1}`;
+      let nm = baseName;
+      let k = 2;
+      while (seen.has(nm)) nm = `${baseName}#${k++}`;
+      seen.add(nm);
+      names.push(nm);
+    });
+    const nodes: WorkflowNode[] = selectedBugs.map((bug, i) => ({
+      name: names[i],
+      supervisorId: 'bug-supervisor',
+      plan: buildPrefill(bug, appendPrompt),
+      dependsOn: i === 0 ? [] : [names[i - 1]], // 串行:依赖上一个节点
+      posX: 240,
+      posY: 60 + i * 120,
+    }));
+    const def: WorkflowDefinition = {
+      id: uid('wf'),
+      name: `缺陷批量修复(${selectedBugs.length})`,
+      maxConcurrency: 2,
+      nodes,
+      updatedAt: Date.now(),
+    };
+    loadDraft(def);   // 仅加载为未保存草稿;保存/运行交给用户在工作流页操作
+    onOpenWorkflow();
+    exitBatch();
+  };
+
+  // 🔬AI分析: 把选中缺陷快照发给 Java,打开一个【独立分离窗口】(脱离 IDE)跑分析。
+  // 窗口自带 webview、自带隔离会话,关闭即销毁(数据不留存)。快照字段供分组派单复用。
+  const handleBatchAnalyze = () => {
+    if (selectedBugs.length === 0) return;
+    const snapshot = selectedBugs.map((b) => ({
+      identifier: b.identifier || b.id || '',
+      serialNumber: serialText(b),
+      subject: b.subject || '',
+      status: statusText(b.status),
+    }));
+    sendBridgeEvent(
+      'open_bug_analysis_window',
+      JSON.stringify({ projectId: selectedProjectId, bugs: snapshot, model, reasoning, appendPrompt }),
     );
     exitBatch();
   };
@@ -635,6 +657,16 @@ export function BugListView({ onBack, onOpenYunxiaoSettings }: BugListViewProps)
         <span className={styles.title}>{t('bugList.title')}</span>
 
         <div className={styles.batchWrap}>
+          <button
+            type="button"
+            className={styles.refreshBtn}
+            onClick={refresh}
+            disabled={!selectedProjectId || loading}
+            title={t('bugList.refresh')}
+          >
+            <span className={`codicon codicon-refresh ${loading ? styles.refreshSpin : ''}`} />
+            {t('bugList.refresh')}
+          </button>
           {!batchMode ? (
             <button type="button" className={styles.batchToggle} onClick={enterBatch}>
               {t('bugList.batch')}
@@ -652,6 +684,14 @@ export function BugListView({ onBack, onOpenYunxiaoSettings }: BugListViewProps)
               </span>
               <button
                 type="button"
+                className={styles.sessionBtn}
+                disabled={selectedBugs.length === 0}
+                onClick={handleBatchWorkflow}
+              >
+                {t('bugList.createWorkflow')}
+              </button>
+              <button
+                type="button"
                 className={styles.createBtn}
                 disabled={selectedBugs.length === 0}
                 onClick={handleBatchSupervisor}
@@ -665,6 +705,14 @@ export function BugListView({ onBack, onOpenYunxiaoSettings }: BugListViewProps)
                 onClick={handleBatchSession}
               >
                 {t('bugList.createSession')}
+              </button>
+              <button
+                type="button"
+                className={styles.analyzeBtn}
+                disabled={selectedBugs.length === 0}
+                onClick={handleBatchAnalyze}
+              >
+                🔬 {t('bugList.aiAnalyze')}
               </button>
             </>
           )}

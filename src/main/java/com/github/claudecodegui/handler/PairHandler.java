@@ -987,6 +987,17 @@ public class PairHandler extends BaseMessageHandler {
         if (model != null && !model.isEmpty()) {
             result.addProperty("model", model);
         }
+        // Carry the session's ACTUAL resolved reasoning tier (not just the agent's
+        // stored default) so the node window's supervisor composer reflects the
+        // running config. A workflow node launches its supervisor with the node's
+        // configured reasoning (StartPairParams.reasoningOverride → session.setReasoningEffort),
+        // but the composer was seeding only `defaultReasoning` from the agent config —
+        // so a node configured at 最高 showed the agent default (中等). The webview seeds
+        // reasoningByAgentId from this when it builds `selected` off onPairStarted.
+        String effectiveReasoning = session.getReasoningEffort();
+        if (effectiveReasoning != null && !effectiveReasoning.isEmpty()) {
+            result.addProperty("reasoningEffort", effectiveReasoning);
+        }
         try {
             JsonObject agentConfig = new CodemossSettingsService()
                     .getSupervisorAgentManager().getAgent(session.getAgentId());
@@ -1448,6 +1459,13 @@ public class PairHandler extends BaseMessageHandler {
                 String model = session.getModel();
                 if (model != null && !model.isEmpty()) {
                     payload.addProperty("model", model);
+                }
+                // Real running reasoning tier (see onPairStarted note): so a post-reload
+                // restore of a node's supervisor composer keeps the node-configured
+                // effort instead of snapping back to the agent default.
+                String effectiveReasoning = session.getReasoningEffort();
+                if (effectiveReasoning != null && !effectiveReasoning.isEmpty()) {
+                    payload.addProperty("reasoningEffort", effectiveReasoning);
                 }
                 if (agentConfig != null) {
                     if (agentConfig.has("defaultLongContext")

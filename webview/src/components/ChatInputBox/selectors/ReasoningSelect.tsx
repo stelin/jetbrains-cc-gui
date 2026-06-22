@@ -16,6 +16,13 @@ interface ReasoningSelectProps {
   disabled?: boolean;
   selectedModel?: string;
   currentProvider?: string;
+  /**
+   * Dropdown open direction. Defaults to `true` (opens upward) for the
+   * bottom-anchored chat input. Pass `false` for top-anchored placements
+   * (e.g. the bug-analysis config window) so the menu drops down instead of
+   * being clipped above the container.
+   */
+  openUpward?: boolean;
 }
 
 /**
@@ -26,7 +33,7 @@ interface ReasoningSelectProps {
  * - Claude Sonnet 4.6: low/medium/high/max
  * - Claude Haiku 4.5 / legacy models: hidden
  */
-export const ReasoningSelect = ({ value, onChange, disabled, selectedModel, currentProvider }: ReasoningSelectProps) => {
+export const ReasoningSelect = ({ value, onChange, disabled, selectedModel, currentProvider, openUpward = true }: ReasoningSelectProps) => {
   const { t } = useTranslation();
   const [isOpen, setIsOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -142,10 +149,11 @@ export const ReasoningSelect = ({ value, onChange, disabled, selectedModel, curr
           className="selector-dropdown"
           style={{
             position: 'absolute',
-            bottom: '100%',
             left: 0,
-            marginBottom: '4px',
             zIndex: 10000,
+            ...(openUpward
+              ? { bottom: '100%', marginBottom: '4px' }
+              : { top: '100%', marginTop: '4px' }),
           }}
         >
           {availableLevels.map((level) => (

@@ -616,6 +616,14 @@ interface Window {
   onRequestComposerPrefill?: (text: string) => void;
 
   /**
+   * Workflow-node main-AI seed: pushed by Java on every `frontend_ready` of a
+   * workflow node window. Payload `{ model?, longContextEnabled?, reasoningEffort? }`
+   * is the node's configured model + thinking depth — applied to the MAIN AI (left
+   * pane) composer so both legs (main AI + supervisor) match the node config.
+   */
+  onWorkflowNodeMainAi?: (json: string) => void;
+
+  /**
    * Session-kind refactor: supervised-session history list (read from the
    * SessionRegistry manifests, kind=supervised, parents excluded). Payload is
    * the same HistoryData shape as setHistoryData but each session carries
@@ -1019,4 +1027,25 @@ interface Window {
 
   /** Yunxiao reassign result. Payload: { ok, bugId?, userId?, name?, error? }. */
   onYunxiaoAssigneeUpdated?: (json: string) => void;
+
+  /**
+   * 缺陷「AI 分析」进度回调（多次）。Payload:
+   * { projectId, total, doneIds:[], currentId, toolCalls }. 由隔离分析会话推送，
+   * useBugAnalysis 据此推进逐 bug 进度（带 projectId 守卫防切项目串台）。
+   */
+  onBugAnalysisProgress?: (json: string) => void;
+
+  /**
+   * 缺陷「AI 分析」终态回调（一次）。成功 Payload:
+   * { ok:true, projectId, model, reasoning, result:{bugs,groups} }；
+   * 失败 Payload: { ok:false, projectId, raw, error }。落地时由 useBugAnalysis 写盘。
+   */
+  onBugAnalysisResult?: (json: string) => void;
+
+  /**
+   * 缺陷「AI 分析」【实时过程】流（分析中只读直播，类似普通会话思考过程）。
+   * Payload: { projectId, kind: 'thinking'|'content'|'tool', text }。仅 running 期间由
+   * useBugAnalysis 累积渲染（同类相邻 delta 合并、tool 离散），不持久化（终态/切项目清空）。
+   */
+  onBugAnalysisStream?: (json: string) => void;
 }

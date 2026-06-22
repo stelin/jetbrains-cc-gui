@@ -1,5 +1,6 @@
 package com.github.claudecodegui.provider.claude;
 
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 
 import com.github.claudecodegui.session.ClaudeSession;
@@ -13,7 +14,9 @@ import com.intellij.openapi.project.Project;
 import java.io.File;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Claude Agent SDK bridge.
@@ -31,6 +34,9 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
     private final ClaudeMcpQueryService mcpQueryService;
     private final ClaudeRewindService rewindService;
     private final ClaudeDaemonRequestExecutor daemonRequestExecutor;
+
+    /** In-flight headless bug analysis sessions keyed by projectId (design §3/§8). */
+    private final ConcurrentHashMap<String, AnalysisHandle> activeAnalyses = new ConcurrentHashMap<>();
 
     /**
      * Legacy constructor — keep for callers that have no Project on hand. In
@@ -327,6 +333,105 @@ public class ClaudeSDKBridge extends BaseSDKBridge {
             return failed;
         }
         return bridge.sendCommand(method, params, callback);
+    }
+
+    // ============================================================================
+    // Headless bug analysis (design §3 / §8)
+    // ============================================================================
+
+    /**
+     * Run a one-shot headless bug analysis in an isolated scratch session.
+     *
+     * <p>Uses an independent {@code sessionId + runtimeSessionEpoch} so the scratch
+     * runtime never touches the user's chat session. On completion the scratch runtime
+     * is cleaned up via {@code claude.resetRuntime}.
+     *
+     * @param projectId      cloud project id — used as analysis key and echoed in progress/result events
+     * @param message        full analysis prompt (built by {@link BugAnalysisPrompt})
+     * @param bugs           bug snapshot for the collector's {@code total} counter
+     * @param model          model id to use (may include {@code [1m]} suffix — passed through as-is)
+     * @param reasoningEffort reasoning effort level; {@code null} to omit
+     * @param cwd            working directory (any valid project dir — used for {@code IDEA_PROJECT_PATH})
+     * @param cb             terminal callbacks for result / fallback / transport-error push
+     */
+    public void analyzeBugsHeadless(String projectId, String message, JsonArray bugs,
+                                    String model, String reasoningEffort, String cwd,
+                                    BugAnalysisHandlerCallbacks cb) {
+        IBridge bridge = daemonCoordinator.getDaemonBridge();
+        if (bridge == null) {
+            cb.onTransportError("daemon 不可用");
+            return;
+        }
+
+        // A scratch analysis is a brand-new, throwaway session — it must NEVER resume.
+        // Any non-empty sessionId makes the daemon run `claude -p --resume <sessionId>`, and
+        // the CLI rejects an id that isn't a real UUID / existing session title
+        // ("--resume requires a valid session ID ... is not a UUID"). So pass an EMPTY
+        // sessionId (= new session, no --resume) and isolate purely via the unique
+        // runtimeSessionEpoch: findRuntimeForRequest looks an empty-sessionId request up
+        // only in anonymousRuntimesBySignature (signature includes the epoch), so a unique
+        // epoch yields a fresh runtime that never reuses/evicts the chat runtime, and it
+        // stays the reset key below (resetRuntime matches by runtimeSessionEpoch).
+        String scratchEpoch = "epoch-" + UUID.randomUUID();
+
+        JsonObject params = requestParamsBuilder.buildSendParams(
+                message,
+                "",                  // sessionId: EMPTY → new session, never --resume
+                scratchEpoch,        // runtimeSessionEpoch: unique → isolated runtime + reset key
+                cwd,
+                "bypassPermissions", // no dialogs
+                model,
+                null,                // attachments
+                null,                // openedFiles
+                null,                // agentPrompt
+                Boolean.TRUE,        // streaming
+                null,                // disableThinking (let reasoningEffort take effect)
+                reasoningEffort,
+                null,                // systemPromptAppend
+                null                 // windowId: not tied to any tab
+        );
+        params.add("env", ClaudeBridgeUtils.buildDaemonEnv(cwd));
+
+        AnalysisHandle handle = new AnalysisHandle(projectId, scratchEpoch);
+        activeAnalyses.put(projectId, handle);
+
+        BugAnalysisCollector collector = new BugAnalysisCollector(handle, bugs, cb);
+        bridge.sendCommand("claude.send", params, collector)
+              .whenComplete((ok, err) -> {
+                  activeAnalyses.remove(projectId, handle);
+                  // Release the scratch runtime to prevent accumulation (design §8)
+                  JsonObject reset = new JsonObject();
+                  reset.addProperty("runtimeSessionEpoch", scratchEpoch);
+                  bridge.sendCommand("claude.resetRuntime", reset, IBridge.DaemonOutputCallback.NOOP);
+              });
+    }
+
+    /**
+     * Cancel an in-flight headless bug analysis (design §8).
+     *
+     * <p>Sets {@code handle.canceled = true} so the collector skips the result push on
+     * completion. If the analysis is the daemon's current active request, also sends
+     * {@code abort} to interrupt it immediately. If the analysis is still queued behind
+     * a chat turn, only the flag is set — abort is intentionally skipped to avoid
+     * interrupting the wrong request; the collector short-circuits on first {@code onLine}
+     * check when the queued turn eventually starts.
+     *
+     * @param projectId cloud project id matching the key passed to {@link #analyzeBugsHeadless}
+     */
+    public void cancelBugAnalysis(String projectId) {
+        AnalysisHandle handle = activeAnalyses.get(projectId);
+        if (handle == null) {
+            return;
+        }
+        handle.canceled = true;
+        IBridge db = daemonCoordinator.getCurrentDaemonBridge();
+        if (db != null && db.isAlive()) {
+            try {
+                db.sendAbort();
+            } catch (Exception e) {
+                LOG.warn("[ClaudeSDKBridge] cancelBugAnalysis abort failed: " + e.getMessage());
+            }
+        }
     }
 
     // ============================================================================

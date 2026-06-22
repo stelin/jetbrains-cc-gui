@@ -71,6 +71,8 @@ interface WorkflowContextValue {
   exportWorkflowJson(id: string, agents: SupervisorAgent[]): string;
   /** Import pasted JSON as an UNSAVED draft (user reviews + saves). `agents` for supervisor remap. */
   importWorkflowDraft(text: string, agents: SupervisorAgent[]): { ok: boolean; warnings: string[]; error?: string };
+  /** Load a prebuilt definition as an UNSAVED draft (e.g. from the bug list); user reviews + saves/runs. */
+  loadDraft(def: WorkflowDefinition): void;
   runWorkflow(id: string): void;
   abortWorkflow(): void;
   /** Resume a PAUSED (restored-after-restart) execution — opens windows + pumps safe frontier. */
@@ -539,6 +541,14 @@ export function WorkflowProvider({ children, addToast }: { children: React.React
     return { ok: true, warnings: parsed.versionWarn ? [parsed.versionWarn, ...warnings] : warnings };
   }, []);
 
+  // Load a prebuilt definition (e.g. assembled from the bug list) as an UNSAVED draft.
+  // The user reviews it on the canvas and decides whether to Save + Run — no implicit
+  // persist/run here (mirrors importWorkflowDraft's setDraft+setSelectedId).
+  const loadDraft = useCallback((def: WorkflowDefinition) => {
+    setDraft(def);
+    setSelectedId(def.id);
+  }, []);
+
   const runWorkflow = useCallback((id: string) => {
     wfSend('workflow_run', JSON.stringify({ id }));
   }, [wfSend]);
@@ -604,13 +614,13 @@ export function WorkflowProvider({ children, addToast }: { children: React.React
   const value = useMemo<WorkflowContextValue>(() => ({
     definitions, selectedId, draft, execution, executionStatuses, nodeActivity, agents, escalations, capabilities,
     selectWorkflow, newWorkflow, updateDraft, upsertNode, removeNode, addNode,
-    saveDraft, deleteWorkflow, exportWorkflowJson, importWorkflowDraft, runWorkflow, abortWorkflow, resumeWorkflow, redispatchNode, setFreezeThreshold,
+    saveDraft, deleteWorkflow, exportWorkflowJson, importWorkflowDraft, loadDraft, runWorkflow, abortWorkflow, resumeWorkflow, redispatchNode, setFreezeThreshold,
     refreshState, jumpToNode, openReport,
     dismissEscalation, agentName, isRunning, isPaused, runningOf, isSaved, isDirty,
   }), [
     definitions, selectedId, draft, execution, executionStatuses, nodeActivity, agents, escalations, capabilities,
     selectWorkflow, newWorkflow, updateDraft, upsertNode, removeNode, addNode,
-    saveDraft, deleteWorkflow, exportWorkflowJson, importWorkflowDraft, runWorkflow, abortWorkflow, resumeWorkflow, redispatchNode, setFreezeThreshold,
+    saveDraft, deleteWorkflow, exportWorkflowJson, importWorkflowDraft, loadDraft, runWorkflow, abortWorkflow, resumeWorkflow, redispatchNode, setFreezeThreshold,
     refreshState, jumpToNode, openReport,
     dismissEscalation, agentName, isRunning, isPaused, runningOf, isSaved, isDirty,
   ]);

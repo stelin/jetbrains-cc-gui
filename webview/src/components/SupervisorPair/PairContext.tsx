@@ -13,6 +13,16 @@ import type { ClaudeMessage, ClaudeContentOrResultBlock, ToolResultBlock } from 
 import type { ReasoningEffort } from '../ChatInputBox/types';
 import { apply1MContextSuffix, strip1MContextSuffix } from '../ChatInputBox/types';
 
+/** Valid reasoning tiers, mirrors ReasoningEffort. */
+const REASONING_TIERS: readonly ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+
+/** Coerce an arbitrary string into a valid ReasoningEffort, or null if unrecognised. */
+function normalizeReasoningTier(value: unknown): ReasoningEffort | null {
+  return typeof value === 'string' && (REASONING_TIERS as readonly string[]).includes(value)
+    ? (value as ReasoningEffort)
+    : null;
+}
+
 /**
  * One queued user message for a supervisor. Holds raw text + the structured
  * @-path attachments the composer extracted so the auto-flush effect can
@@ -1065,6 +1075,8 @@ export function PairProvider({ children }: PairProviderProps) {
           model?: string;
           defaultLongContext?: boolean;
           defaultReasoning?: string;
+          /** Session's ACTUAL resolved reasoning tier (node-configured for workflow nodes). */
+          reasoningEffort?: string;
         };
         if (o.pairId) setPairId(o.pairId);
         // Restoring/switching into a DIFFERENT supervised container in THIS tab
@@ -1101,6 +1113,17 @@ export function PairProvider({ children }: PairProviderProps) {
                   defaultReasoning: o.defaultReasoning,
                 }]
           );
+          // Seed the per-agent reasoning tier from the session's ACTUAL running
+          // effort so the supervisor composer reflects the real config. The
+          // composer reads `reasoningByAgentId[agentId] ?? 'medium'` (it does NOT
+          // fall back to defaultReasoning), so without this a workflow node
+          // configured at 最高 showed 中等. Seed-if-absent: never clobber a choice
+          // the user already made in this session (manual launches set it via
+          // setSelected; node windows have it empty here).
+          const tier = normalizeReasoningTier(o.reasoningEffort);
+          if (tier) {
+            setReasoningByAgentId((prev) => (prev[agentId] ? prev : { ...prev, [agentId]: tier }));
+          }
         }
         // Clear the previous session's supervisor messages/streaming so the new
         // session's history replay (onSupervisorHistoryLoad) starts clean.
@@ -1501,16 +1524,25 @@ export function PairProvider({ children }: PairProviderProps) {
           model?: string;
           defaultLongContext?: boolean;
           defaultReasoning?: string;
+          /** Session's ACTUAL resolved reasoning tier (node-configured for workflow nodes). */
+          reasoningEffort?: string;
         };
         if (!o || !o.agentId) return;
+        const resumeAgentId = o.agentId;
         setSelectedState([{
-          agentId: o.agentId,
-          name: o.name ?? o.agentId,
+          agentId: resumeAgentId,
+          name: o.name ?? resumeAgentId,
           role: 'coordinator',
           model: o.model,
           defaultLongContext: o.defaultLongContext,
           defaultReasoning: o.defaultReasoning,
         }]);
+        // Restore the real running reasoning tier after a webview reload (React
+        // state was wiped) so the supervisor composer doesn't snap back to 中等.
+        const resumeTier = normalizeReasoningTier(o.reasoningEffort);
+        if (resumeTier) {
+          setReasoningByAgentId((prev) => ({ ...prev, [resumeAgentId]: resumeTier }));
+        }
         if (o.pairId) setPairId(o.pairId);
         if (o.containerId) setContainerId(o.containerId);
       } catch { /* ignore malformed */ }

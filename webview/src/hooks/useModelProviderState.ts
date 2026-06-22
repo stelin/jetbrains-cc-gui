@@ -72,6 +72,15 @@ export function useModelProviderState({ addToast, t }: UseModelProviderStateOpti
   useEffect(() => { selectedClaudeModelRef.current = selectedClaudeModel; }, [selectedClaudeModel]);
   useEffect(() => { longContextEnabledRef.current = longContextEnabled; }, [longContextEnabled]);
 
+  // True once a workflow-node window has seeded its MAIN AI composer from the
+  // node config (window.onWorkflowNodeMainAi). When set:
+  //   - the init sync MUST NOT clobber model/reasoning with the global localStorage
+  //     selection (the node config is authoritative for this window), and
+  //   - we MUST NOT persist this window's model/reasoning back to the SHARED
+  //     localStorage (all JCEF webviews share one origin → it would corrupt the
+  //     user's global selection for every other window).
+  const nodeMainAiSeededRef = useRef(false);
+
   // Select the displayed model based on the current provider
   const selectedModel = currentProvider === 'codex' ? selectedCodexModel : selectedClaudeModel;
 
@@ -183,14 +192,20 @@ export function useModelProviderState({ addToast, t }: UseModelProviderStateOpti
       const syncToBackend = () => {
         if (window.sendToJava) {
           sendBridgeEvent('set_provider', restoredProvider);
-          // For Claude, apply [1m] suffix if long context is enabled and model supports it
-          const modelToSync = restoredProvider === 'codex'
-            ? restoredCodexModel
-            : apply1MContextSuffix(restoredClaudeModel, restoredLongContextEnabled);
-          sendBridgeEvent('set_model', modelToSync);
           sendBridgeEvent('set_mode', initialPermissionMode);
-          // 同步默认/恢复的 reasoning effort 给 Java,避免 Java SessionState 默认值与 webview 不一致
-          sendBridgeEvent('set_reasoning_effort', restoredReasoningEffort);
+          // Workflow-node windows have their main-AI model/reasoning driven by the
+          // node config (window.onWorkflowNodeMainAi). If that seed already landed,
+          // skip the global-localStorage model/reasoning so we don't clobber it
+          // (the seed handler re-sends them when it lands after this sync).
+          if (!nodeMainAiSeededRef.current) {
+            // For Claude, apply [1m] suffix if long context is enabled and model supports it
+            const modelToSync = restoredProvider === 'codex'
+              ? restoredCodexModel
+              : apply1MContextSuffix(restoredClaudeModel, restoredLongContextEnabled);
+            sendBridgeEvent('set_model', modelToSync);
+            // 同步默认/恢复的 reasoning effort 给 Java,避免 Java SessionState 默认值与 webview 不一致
+            sendBridgeEvent('set_reasoning_effort', restoredReasoningEffort);
+          }
         } else {
           syncRetryCount++;
           if (syncRetryCount < MAX_SYNC_RETRIES) {
@@ -206,6 +221,10 @@ export function useModelProviderState({ addToast, t }: UseModelProviderStateOpti
 
   // Save model selection state to LocalStorage
   useEffect(() => {
+    // Node windows are driven by the workflow node config, not the global
+    // selection — and localStorage is shared across all JCEF webviews, so
+    // persisting here would corrupt the user's global model choice everywhere.
+    if (nodeMainAiSeededRef.current) return;
     try {
       localStorage.setItem('model-selection-state', JSON.stringify({
         provider: currentProvider,
@@ -220,6 +239,61 @@ export function useModelProviderState({ addToast, t }: UseModelProviderStateOpti
       // Failed to save model selection state
     }
   }, [currentProvider, selectedClaudeModel, selectedCodexModel, claudePermissionMode, codexPermissionMode, longContextEnabled, reasoningEffort]);
+
+  // Workflow-node main-AI seed (window.onWorkflowNodeMainAi): a node window's
+  // MAIN AI (left pane) must run with the SAME model + thinking depth the node
+  // configured for its supervisor, so both legs match the node. Java pushes this
+  // on every frontend_ready (incl. reloads). We apply it to the composer AND
+  // forward it to the daemon (set_model / set_reasoning_effort), while marking the
+  // window as node-driven so the global-localStorage sync neither clobbers nor
+  // persists it. Idempotent — safe to receive more than once.
+  useEffect(() => {
+    window.onWorkflowNodeMainAi = (json: string) => {
+      try {
+        const o = JSON.parse(json) as {
+          model?: string;
+          longContextEnabled?: boolean;
+          reasoningEffort?: string;
+        };
+        nodeMainAiSeededRef.current = true;
+
+        // Resolve the 1M flag first so the model [1m] suffix is applied consistently.
+        // Precedence: explicit node flag → the [1m] suffix carried on the node model
+        // → the window's current toggle (so an opus-4.8[1m] node still shows 1M).
+        let lc = longContextEnabledRef.current;
+        if (typeof o.longContextEnabled === 'boolean') {
+          lc = o.longContextEnabled;
+        } else if (o.model) {
+          lc = strip1MContextSuffix(o.model) !== o.model;
+        }
+        setLongContextEnabled(lc);
+
+        if (o.model) {
+          // Node main AI is a Claude pair — force the claude provider so the
+          // seeded claude model actually shows in the composer + syncs to Java.
+          setCurrentProvider('claude');
+          sendBridgeEvent('set_provider', 'claude');
+          const normalized = normalizeClaudeModelId(strip1MContextSuffix(o.model));
+          setSelectedClaudeModel(normalized);
+          sendBridgeEvent('set_model', apply1MContextSuffix(normalized, lc));
+        } else if (typeof o.longContextEnabled === 'boolean') {
+          // 1M toggled without an explicit model → re-apply the suffix to the current model.
+          sendBridgeEvent('set_model', apply1MContextSuffix(selectedClaudeModelRef.current, lc));
+        }
+
+        const validEfforts: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
+        if (o.reasoningEffort && validEfforts.includes(o.reasoningEffort as ReasoningEffort)) {
+          setReasoningEffort(o.reasoningEffort as ReasoningEffort);
+          sendBridgeEvent('set_reasoning_effort', o.reasoningEffort);
+        }
+      } catch {
+        /* ignore malformed */
+      }
+    };
+    return () => {
+      delete window.onWorkflowNodeMainAi;
+    };
+  }, []);
 
   // Load selected agent
   useEffect(() => {

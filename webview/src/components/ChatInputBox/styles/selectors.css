@@ -147,6 +147,10 @@
   border-radius: 6px;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
   min-width: 140px;
+  /* Cap height so a tall menu (e.g. the full model list + 1M toggle) scrolls
+     internally instead of overflowing — and being clipped by — the container. */
+  max-height: min(60vh, 360px);
+  overflow-y: auto;
   padding: 4px 0;
   white-space: nowrap;
   font-family: inherit;

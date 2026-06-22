@@ -94,6 +94,17 @@ public interface IBridge {
         void onStderr(String text);
         void onError(String error);
         void onComplete(boolean success);
+
+        /**
+         * No-op instance for fire-and-forget commands where the caller has no
+         * interest in output (e.g. {@code claude.resetRuntime} scratch cleanup).
+         */
+        DaemonOutputCallback NOOP = new DaemonOutputCallback() {
+            @Override public void onLine(String line) {}
+            @Override public void onStderr(String text) {}
+            @Override public void onError(String error) {}
+            @Override public void onComplete(boolean success) {}
+        };
     }
 
     /**

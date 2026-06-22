@@ -1,5 +1,6 @@
 import ReactDOM from 'react-dom/client';
 import App from './App';
+import BugAnalysisStandalone from './components/BugList/BugAnalysisStandalone';
 import ErrorBoundary from './components/ErrorBoundary';
 import './codicon.css';
 import './styles/app.less';
@@ -576,10 +577,15 @@ if (typeof window !== 'undefined' && !window.showPlanApprovalDialog) {
   };
 }
 
-// Render the React application
+// Render the React application.
+// 独立分离窗口(BugAnalysisFrame)在加载前向 HTML 注入 window.__BUG_ANALYSIS_BOOT__,
+// 此时只渲染独立的「缺陷 AI 分析」根组件,不引导整个 App(避免跑无关 hook/IPC)。
+const bugAnalysisBoot = (window as unknown as { __BUG_ANALYSIS_BOOT__?: import('./components/BugList/BugAnalysisStandalone').BugAnalysisBoot })
+  .__BUG_ANALYSIS_BOOT__;
+
 ReactDOM.createRoot(document.getElementById('app') as HTMLElement).render(
   <ErrorBoundary>
-    <App />
+    {bugAnalysisBoot ? <BugAnalysisStandalone {...bugAnalysisBoot} /> : <App />}
   </ErrorBoundary>,
 );
 

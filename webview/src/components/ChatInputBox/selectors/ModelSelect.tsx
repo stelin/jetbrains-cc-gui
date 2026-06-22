@@ -14,6 +14,13 @@ interface ModelSelectProps {
   onAddModel?: () => void;
   longContextEnabled?: boolean;
   onLongContextChange?: (enabled: boolean) => void;
+  /**
+   * Dropdown open direction. Defaults to `true` (opens upward) for the
+   * bottom-anchored chat input. Pass `false` for top-anchored placements
+   * (e.g. the bug-analysis config window), so the menu drops down into the
+   * available space instead of being clipped above the container.
+   */
+  openUpward?: boolean;
 }
 
 const DEFAULT_MODEL_MAP: Record<string, ModelInfo> = AVAILABLE_MODELS.reduce(
@@ -113,7 +120,7 @@ const resolveModelIdForIcon = (
  * ModelSelect - Model selector component
  * Supports switching between Sonnet 4.5, Opus 4.5, and other models, including Codex models
  */
-export const ModelSelect = ({ value, onChange, models = AVAILABLE_MODELS, currentProvider = 'claude', onAddModel, longContextEnabled = true, onLongContextChange }: ModelSelectProps) => {
+export const ModelSelect = ({ value, onChange, models = AVAILABLE_MODELS, currentProvider = 'claude', onAddModel, longContextEnabled = true, onLongContextChange, openUpward = true }: ModelSelectProps) => {
   const { t } = useTranslation();
   const [isOpen, setIsOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
@@ -239,10 +246,11 @@ export const ModelSelect = ({ value, onChange, models = AVAILABLE_MODELS, curren
           className="selector-dropdown"
           style={{
             position: 'absolute',
-            bottom: '100%',
             left: 0,
-            marginBottom: '4px',
             zIndex: 10000,
+            ...(openUpward
+              ? { bottom: '100%', marginBottom: '4px' }
+              : { top: '100%', marginTop: '4px' }),
           }}
         >
           {models.map((model) => (

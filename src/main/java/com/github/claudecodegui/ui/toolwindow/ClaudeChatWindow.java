@@ -475,6 +475,42 @@ public class ClaudeChatWindow {
         return v;
     }
 
+    /**
+     * Workflow node main-AI config JSON ({@code {model, reasoningEffort}}), staged by
+     * {@link #applyNodeMainAiConfig} once the supervisor pair has started so this node
+     * window's MAIN AI (left pane) runs with the SAME model + thinking depth as the
+     * supervisor — keeping both legs consistent with the node.
+     *
+     * <p>NON-consuming: re-pushed to the webview on EVERY {@code frontend_ready} (incl.
+     * a watchdog reload), because the main composer's model/reasoning live in webview
+     * React state a reload wipes — without re-seeding, the reloaded composer would snap
+     * back to the user's global localStorage selection.
+     */
+    private volatile String nodeMainAiConfig = null;
+
+    /** Current staged node main-AI config JSON, or null for a non-node window. */
+    public String getNodeMainAiConfig() {
+        return nodeMainAiConfig;
+    }
+
+    /**
+     * Stage AND immediately push the node main-AI config to the webview. Called by
+     * {@code IdeNodeLauncher} once the supervisor pair has started (so we can use the
+     * supervisor's RESOLVED model/reasoning — node override OR agent default — instead
+     * of the raw, possibly-null node fields). By pair-start the webview is long since
+     * mounted, so the push lands (unlike a {@code frontend_ready}-time push, which can
+     * race the React handler registration and get silently dropped). Staging also keeps
+     * it for re-push on a later reload (handleFrontendReady → onWorkflowNodeMainAi).
+     * Safe to call off the EDT — callJavaScript marshals + null/dispose-guards.
+     */
+    public void applyNodeMainAiConfig(String json) {
+        this.nodeMainAiConfig = json;
+        if (json == null || json.isEmpty()) {
+            return;
+        }
+        callJavaScript("onWorkflowNodeMainAi", com.github.claudecodegui.util.JsUtils.escapeJs(json));
+    }
+
     public CodexSDKBridge getCodexSDKBridge() {
         return codexSDKBridge;
     }
@@ -676,6 +712,20 @@ public class ClaudeChatWindow {
         }
 
         LOG.warn("Unknown message type: " + type);
+    }
+
+    /**
+     * Forward a raw webview message ("type:content") into THIS window's dispatcher.
+     *
+     * <p>Used by the detached {@code BugAnalysisFrame}: its 建监督者/建会话 (create_new_tab /
+     * create_new_supervised_tab) actions are forwarded here so the tabs open in the MAIN
+     * tool window, not in the detached analysis window (which has no tab container).
+     */
+    public void dispatchWebviewMessage(String rawMessage) {
+        if (rawMessage == null || rawMessage.isEmpty()) {
+            return;
+        }
+        handleJavaScriptMessage(rawMessage);
     }
 
     // ==================== Session Delegates ====================
@@ -1115,6 +1165,11 @@ public class ClaudeChatWindow {
             @Override
             public String consumePendingComposerText() {
                 return ClaudeChatWindow.this.consumePendingComposerText();
+            }
+
+            @Override
+            public String getNodeMainAiConfig() {
+                return ClaudeChatWindow.this.getNodeMainAiConfig();
             }
         };
     }

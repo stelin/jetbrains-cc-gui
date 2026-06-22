@@ -84,6 +84,10 @@ public class SettingsHandler extends BaseMessageHandler {
         "update_yunxiao_assignee",
         "submit_yunxiao_comment",
         "upload_yunxiao_comment_image",
+        // Bug AI analysis
+        "analyze_bugs",
+        "cancel_bug_analysis",
+        "open_bug_analysis_window",
         // Path mapping (per-project, remote mode only)
         "get_path_mapping",
         "set_path_mapping",
@@ -301,6 +305,15 @@ public class SettingsHandler extends BaseMessageHandler {
                 return true;
             case "upload_yunxiao_comment_image":
                 projectConfigHandler.handleUploadYunxiaoCommentImage(content);
+                return true;
+            case "analyze_bugs":
+                projectConfigHandler.handleAnalyzeBugs(content);
+                return true;
+            case "cancel_bug_analysis":
+                projectConfigHandler.handleCancelBugAnalysis(content);
+                return true;
+            case "open_bug_analysis_window":
+                projectConfigHandler.handleOpenBugAnalysisWindow(content);
                 return true;
             // Path mapping
             case "get_path_mapping":

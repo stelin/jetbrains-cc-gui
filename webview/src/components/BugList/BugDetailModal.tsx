@@ -245,14 +245,26 @@ export function BugDetailModal({ bugId, onClose }: BugDetailModalProps) {
     };
   }, [mentionOpen]);
 
-  // ESC closes the modal.
+  // Image lightbox: clicking an image in the (richtext) description or a comment opens a
+  // large preview. MarkdownBlock-rendered content already has its own preview, so this
+  // delegated handler is attached only to the dangerouslySetInnerHTML containers.
+  const [previewSrc, setPreviewSrc] = useState<string | null>(null);
+  const onImageClick = (e: React.MouseEvent) => {
+    const img = (e.target as HTMLElement).closest('img');
+    const src = img?.getAttribute('src');
+    if (src) setPreviewSrc(src);
+  };
+
+  // ESC closes the image preview first (if open), otherwise the modal.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key !== 'Escape') return;
+      if (previewSrc) setPreviewSrc(null);
+      else onClose();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onClose]);
+  }, [onClose, previewSrc]);
 
   const isMarkdown = (detail?.formatType || '').toUpperCase() === 'MARKDOWN';
 
@@ -419,7 +431,7 @@ export function BugDetailModal({ bugId, onClose }: BugDetailModalProps) {
                   isMarkdown ? (
                     <MarkdownBlock content={detail.description} />
                   ) : (
-                    <div className="markdown-content" dangerouslySetInnerHTML={{ __html: richHtml }} />
+                    <div className="markdown-content" onClick={onImageClick} dangerouslySetInnerHTML={{ __html: richHtml }} />
                   )
                 ) : (
                   <div className={styles.empty}>{t('bugList.detail.noContent')}</div>
@@ -463,6 +475,7 @@ export function BugDetailModal({ bugId, onClose }: BugDetailModalProps) {
                       {/<[a-z][\s\S]*>/i.test(c.content || '') ? (
                         <div
                           className="markdown-content"
+                          onClick={onImageClick}
                           dangerouslySetInnerHTML={{
                             __html: DOMPurify.sanitize(c.content || '', { ADD_ATTR: ['target'] }),
                           }}
@@ -566,6 +579,24 @@ export function BugDetailModal({ bugId, onClose }: BugDetailModalProps) {
             </div>
           )}
         </div>
+
+        {previewSrc && (
+          <div className="image-preview-overlay" onClick={() => setPreviewSrc(null)}>
+            <img
+              className="image-preview-content"
+              src={previewSrc}
+              alt=""
+              onClick={(e) => e.stopPropagation()}
+            />
+            <button
+              className="image-preview-close"
+              onClick={() => setPreviewSrc(null)}
+              title={t('common.close')}
+            >
+              ×
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );

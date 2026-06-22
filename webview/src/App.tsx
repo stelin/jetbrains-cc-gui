@@ -389,6 +389,9 @@ const App = () => {
     handleAutoOpenFileEnabledChange, handleLongContextChange,
   } = useModelProviderState({ addToast, t });
 
+  // 缺陷「AI 分析」现在跑在独立分离窗口(BugAnalysisFrame + BugAnalysisStandalone),
+  // 不再在主 App 里持有分析状态;主 App 只负责在批量时发 open_bug_analysis_window。
+
   // ── Global drag event interception ──
   useEffect(() => {
     const prevent = (e: DragEvent) => { e.preventDefault(); e.stopPropagation(); };
@@ -991,6 +994,9 @@ const App = () => {
             setSettingsInitialTab('yunxiao');
             setCurrentView('settings');
           }}
+          onOpenWorkflow={() => setCurrentView('workflow')}
+          model={selectedModel}
+          reasoning={reasoningEffort}
         />
       ) : (
         <HistoryView

@@ -224,6 +224,22 @@ public final class IdeNodeLauncher implements NodeLauncher {
             }
             handle.pair = pair;
             handle.pairDir = pair.getPairDir();
+
+            // Seed the node window's MAIN AI (left pane) so BOTH legs (main AI +
+            // supervisor) run the SAME model + thinking depth the node resolved to.
+            // Built from the supervisor's RESOLVED values (pair.getModel() /
+            // getReasoningEffort()) — these already fold in the node override OR the
+            // agent default, so the main AI matches even when the node stored no
+            // explicit override (raw node.model/reasoning are null in that case). The
+            // model carries the [1m] suffix when 1M is on; the webview derives the
+            // toggle from it. Pushed now (post-handshake → webview mounted, handler
+            // registered) so it lands; a frontend_ready-time push would race React.
+            String mainAiConfig = buildNodeMainAiConfig(pair.getModel(), pair.getReasoningEffort());
+            if (mainAiConfig != null) {
+                win.applyNodeMainAiConfig(mainAiConfig);
+                LOG.info("[Workflow] node " + node.name + " seeded main-AI model/reasoning: " + mainAiConfig);
+            }
+
             sink.pairStarted(pair.getPairId(), pair.getPairDir());
         } catch (Exception ex) {
             LOG.warn("[Workflow] startPair failed for node " + node.name + ": " + ex.getMessage());
@@ -305,6 +321,27 @@ public final class IdeNodeLauncher implements NodeLauncher {
     private ToolWindow toolWindow() {
         return ToolWindowManager.getInstance(project)
                 .getToolWindow(ClaudeSDKToolWindow.TOOL_WINDOW_ID);
+    }
+
+    /**
+     * Build the node's main-AI seed JSON ({@code {model, reasoningEffort}}) from the
+     * supervisor's RESOLVED model + reasoning (node override folded in, else the agent
+     * default). Returns {@code null} when neither is known (main AI then keeps the
+     * user's global selection). The model keeps its {@code [1m]} suffix so the webview
+     * can derive the 1M toggle — no separate longContext field needed.
+     */
+    private static String buildNodeMainAiConfig(String resolvedModel, String resolvedReasoning) {
+        com.google.gson.JsonObject cfg = new com.google.gson.JsonObject();
+        boolean any = false;
+        if (resolvedModel != null && !resolvedModel.isEmpty()) {
+            cfg.addProperty("model", resolvedModel);
+            any = true;
+        }
+        if (resolvedReasoning != null && !resolvedReasoning.isEmpty()) {
+            cfg.addProperty("reasoningEffort", resolvedReasoning);
+            any = true;
+        }
+        return any ? cfg.toString() : null;
     }
 
     /**

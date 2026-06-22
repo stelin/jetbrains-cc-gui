@@ -129,6 +129,14 @@ public class ChatWindowDelegate {
          * 「建会话」). Seeds the composer (unsent) via {@code onRequestComposerPrefill}.
          */
         String consumePendingComposerText();
+        /**
+         * Staged workflow-node main-AI config JSON ({@code {model, longContextEnabled,
+         * reasoningEffort}}) or null for a non-node window. NON-consuming: re-read on
+         * every {@code frontend_ready} so a reloaded node window re-seeds its main
+         * composer instead of reverting to the user's global model selection. Pushed
+         * via {@code onWorkflowNodeMainAi}.
+         */
+        String getNodeMainAiConfig();
     }
 
     private final DelegateHost host;
@@ -611,6 +619,17 @@ public class ChatWindowDelegate {
             // wraps args in single quotes WITHOUT escaping.
             host.callJavaScript("onRequestComposerPrefill",
                     com.github.claudecodegui.util.JsUtils.escapeJs(pendingComposerText));
+        }
+
+        // Workflow node window: seed the MAIN AI (left pane) composer with the node's
+        // configured model + thinking depth so both legs (main AI + supervisor) match
+        // the node config. NON-consuming (re-pushed on every reload) — the main
+        // composer's model/reasoning live in webview React state a reload wipes.
+        String nodeMainAiConfig = host.getNodeMainAiConfig();
+        if (nodeMainAiConfig != null && !nodeMainAiConfig.isEmpty()) {
+            LOG.info("[ChatWindowDelegate] Seeding node main-AI model/reasoning — " + nodeMainAiConfig);
+            host.callJavaScript("onWorkflowNodeMainAi",
+                    com.github.claudecodegui.util.JsUtils.escapeJs(nodeMainAiConfig));
         }
 
         if (pendingQuickFixPrompt != null && pendingQuickFixCallback != null) {

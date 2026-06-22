@@ -9,7 +9,15 @@ import com.github.claudecodegui.provider.claude.ClaudeHistoryReader;
 import com.github.claudecodegui.provider.codex.CodexHistoryReader;
 import com.github.claudecodegui.util.FontConfigService;
 import com.github.claudecodegui.util.ThemeConfigService;
+import com.github.claudecodegui.provider.claude.BugAnalysisHandlerCallbacks;
+import com.github.claudecodegui.provider.claude.BugAnalysisPrompt;
+import com.github.claudecodegui.ui.detached.BugAnalysisFrame;
+import com.github.claudecodegui.ui.toolwindow.ClaudeChatWindow;
+import com.github.claudecodegui.ui.toolwindow.ClaudeSDKToolWindow;
+import com.github.claudecodegui.util.JBCefBrowserFactory;
+import com.intellij.openapi.project.Project;
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.intellij.ide.util.PropertiesComponent;
 import com.intellij.openapi.application.ApplicationManager;
@@ -1065,6 +1073,98 @@ public class ProjectConfigHandler {
             }
             ApplicationManager.getApplication().invokeLater(() ->
                 context.callJavaScript("window.onYunxiaoCommentImage", context.escapeJs(gson.toJson(r))));
+        });
+    }
+
+    // ──────────────── Bug AI Analysis ────────────────
+
+    /**
+     * Launch a headless bug analysis scratch session (design §2.2 / §3).
+     * Parses {projectId, bugs, model, reasoningEffort} from the webview payload,
+     * builds the prompt, and delegates to {@code ClaudeSDKBridge.analyzeBugsHeadless}.
+     * Progress and results are pushed back via {@link BugAnalysisHandlerCallbacks}.
+     */
+    public void handleAnalyzeBugs(String content) {
+        CompletableFuture.runAsync(() -> {
+            try {
+                JsonObject req = gson.fromJson(content, JsonObject.class);
+                String projectId = strOf(req, "projectId");
+                JsonArray bugs = (req != null && req.has("bugs") && req.get("bugs").isJsonArray())
+                        ? req.getAsJsonArray("bugs") : new JsonArray();
+                String model = strOf(req, "model");
+                String reasoning = strOf(req, "reasoningEffort");
+                // 最大并发子智能体数(选项 3/4/5;默认 3);防御性夹紧到 [1,5]。
+                int concurrency = 3;
+                try {
+                    if (req != null && req.has("concurrency") && !req.get("concurrency").isJsonNull()) {
+                        concurrency = Math.max(1, Math.min(5, req.get("concurrency").getAsInt()));
+                    }
+                } catch (Exception ignored) {
+                    // keep default 3
+                }
+
+                BugAnalysisHandlerCallbacks cb =
+                        new BugAnalysisHandlerCallbacks(context, projectId, bugs, model, reasoning);
+                if (context.getClaudeSDKBridge() == null) {
+                    cb.onTransportError("Claude bridge 不可用");
+                    return;
+                }
+
+                String prompt = BugAnalysisPrompt.build(bugs, concurrency);
+                String cwd = context.getProject() != null ? context.getProject().getBasePath() : null;
+                context.getClaudeSDKBridge()
+                       .analyzeBugsHeadless(projectId, prompt, bugs, model, reasoning, cwd, cb);
+            } catch (Exception e) {
+                LOG.warn("[BugAnalysis] handleAnalyzeBugs failed: " + e.getMessage());
+            }
+        });
+    }
+
+    /**
+     * Cancel an in-flight bug analysis (design §2.2 / §8).
+     * Sets the canceled flag on the active handle; if it is the current active daemon
+     * request, also sends abort to interrupt it early.
+     */
+    public void handleCancelBugAnalysis(String content) {
+        try {
+            JsonObject json = gson.fromJson(content, JsonObject.class);
+            String projectId = strOf(json, "projectId");
+            if (context.getClaudeSDKBridge() != null) {
+                context.getClaudeSDKBridge().cancelBugAnalysis(projectId);
+            }
+        } catch (Exception e) {
+            LOG.warn("[BugAnalysis] handleCancelBugAnalysis failed: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Open the standalone, detached「AI 分析」window (脱离 IDE 的 JFrame, 自带 webview).
+     * The window runs an isolated analysis session and is ephemeral — closing it cancels
+     * the analysis and discards all data. 建监督者/建会话 inside it are forwarded to the
+     * MAIN tool window so tabs open in the IDE (跨窗转发). content = the raw webview payload
+     * {projectId, bugs, model, reasoning, appendPrompt}, injected as the window's boot data.
+     */
+    public void handleOpenBugAnalysisWindow(String content) {
+        ApplicationManager.getApplication().invokeLater(() -> {
+            try {
+                Project project = context.getProject();
+                if (project == null) {
+                    LOG.warn("[BugAnalysis] open window: no project");
+                    return;
+                }
+                if (!JBCefBrowserFactory.isJcefSupported()) {
+                    LOG.warn("[BugAnalysis] open window: JCEF not supported");
+                    return;
+                }
+                ClaudeChatWindow mainWindow = ClaudeSDKToolWindow.getChatWindow(project);
+                BugAnalysisFrame frame = new BugAnalysisFrame(
+                        project, mainWindow,
+                        context.getClaudeSDKBridge(), context.getCodexSDKBridge(),
+                        settingsService, content);
+                frame.open();
+            } catch (Exception e) {
+                LOG.warn("[BugAnalysis] handleOpenBugAnalysisWindow failed: " + e.getMessage());
+            }
         });
     }
 

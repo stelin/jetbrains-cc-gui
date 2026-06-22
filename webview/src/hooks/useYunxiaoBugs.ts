@@ -63,6 +63,8 @@ export interface UseYunxiaoBugsResult {
   loading: boolean;
   hasMore: boolean;
   loadMore: () => void;
+  /** Re-fetch the current project's bugs from page 1 (manual refresh). */
+  refresh: () => void;
   /** Configured prompt appended to the「建会话」/「建监督者」prefill (empty if unset). */
   appendPrompt: string;
   /** Patch a bug's status in-place after a successful status change. */
@@ -187,6 +189,17 @@ export function useYunxiaoBugs(): UseYunxiaoBugsResult {
     fetchBugs(selectedProjectId, next);
   }, [hasMore, loading, selectedProjectId, page, fetchBugs]);
 
+  // Manual refresh: drop the loaded pages and re-fetch page 1 of the current
+  // project (no-op when no project is selected or a request is already in flight).
+  const refresh = useCallback(() => {
+    if (!selectedProjectId || loading) return;
+    setBugs([]);
+    setBugsError(null);
+    setHasMore(false);
+    setPage(1);
+    fetchBugs(selectedProjectId, 1);
+  }, [selectedProjectId, loading, fetchBugs]);
+
   return {
     projects,
     projectsError,
@@ -197,6 +210,7 @@ export function useYunxiaoBugs(): UseYunxiaoBugsResult {
     loading,
     hasMore,
     loadMore,
+    refresh,
     appendPrompt,
     updateBugStatus,
     updateBugAssignee,

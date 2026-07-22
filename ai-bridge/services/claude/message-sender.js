@@ -29,6 +29,8 @@ import {
 } from './message-utils.js';
 import { createPreToolUseHook } from './permission-mode.js';
 import { setActiveQueryResult } from './message-session-registry.js';
+import { sanitizeSessionFileForResume } from './session-service.js';
+import { createStreamDeltaTracker } from './stream-delta-normalizer.js';
 
 // ========== Internal helpers for deduplication ==========
 
@@ -121,12 +123,21 @@ function buildQueryOptions({ workingDirectory, permissionMode, sdkModelName, max
  */
 async function prepareSessionResume(options, resumeSessionId, workingDirectory) {
   if (resumeSessionId && resumeSessionId !== '') {
-    options.resume = resumeSessionId;
     console.log('[RESUMING]', resumeSessionId);
     if (!hasClaudeProjectSessionFile(resumeSessionId, workingDirectory)) {
       console.log('[RESUME_WAIT] Waiting for session file to appear before resuming...');
       await waitForClaudeProjectSessionFile(resumeSessionId, workingDirectory, 2500, 100);
     }
+    // Custom gateways (GPT-5.x via Claude protocol) intermittently fail to verify
+    // the encrypted thinking/reasoning content replayed from a persisted session
+    // (400 "The encrypted content gAAA... could not be verified"). Strip those
+    // blocks from the session file before the CLI reads it. One-shot process, so
+    // no live runtime can own the session here.
+    const baseUrl = process.env.ANTHROPIC_BASE_URL || process.env.ANTHROPIC_API_URL || '';
+    if (isCustomBaseUrl(baseUrl)) {
+      sanitizeSessionFileForResume(resumeSessionId, workingDirectory);
+    }
+    options.resume = resumeSessionId;
   }
 }
 
@@ -181,17 +192,50 @@ function processStreamMessage(msg, state, logPrefix) {
         state.accumulatedUsage = mergeUsage(state.accumulatedUsage, event.usage);
         emitAccumulatedUsage(state.accumulatedUsage);
       }
+      // Retry re-stream detection: a message_start while the previous response
+      // never completed (no assistant message arrived) means the CLI is
+      // re-streaming the whole turn after a mid-stream failure. Reset the turn
+      // accumulators + delta tracker and re-emit [STREAM_START] so downstream
+      // resets the streaming bubble instead of doubling the message.
+      if (event.type === 'message_start') {
+        if (state.messageInFlight &&
+            (state.lastAssistantContent.length > 0 || state.lastThinkingContent.length > 0)) {
+          console.log('[RETRY] mid-turn stream restart detected — resetting streaming bubble');
+          state.lastAssistantContent = '';
+          state.lastThinkingContent = '';
+          state.deltaTracker?.reset('text');
+          state.deltaTracker?.reset('thinking');
+          if (state.streamStarted) {
+            process.stdout.write('[STREAM_START]\n');
+          }
+        }
+        state.messageInFlight = true;
+      }
       if (event.type === 'content_block_delta' && event.delta) {
         if (event.delta.type === 'text_delta' && event.delta.text) {
-          process.stdout.write(`[CONTENT_DELTA] ${JSON.stringify(event.delta.text)}\n`);
-          state.lastAssistantContent += event.delta.text;
+          const novel = state.deltaTracker
+            ? state.deltaTracker.normalize('text', event.delta.text)
+            : event.delta.text;
+          if (novel) {
+            process.stdout.write(`[CONTENT_DELTA] ${JSON.stringify(novel)}\n`);
+            state.lastAssistantContent += novel;
+          }
         } else if (event.delta.type === 'thinking_delta' && event.delta.thinking) {
-          process.stdout.write(`[THINKING_DELTA] ${JSON.stringify(event.delta.thinking)}\n`);
-          state.lastThinkingContent += event.delta.thinking;
+          const novel = state.deltaTracker
+            ? state.deltaTracker.normalize('thinking', event.delta.thinking)
+            : event.delta.thinking;
+          if (novel) {
+            process.stdout.write(`[THINKING_DELTA] ${JSON.stringify(novel)}\n`);
+            state.lastThinkingContent += novel;
+          }
         }
       }
-      if (event.type === 'content_block_start' && event.content_block?.type === 'thinking') {
-        console.log('[THINKING_START]');
+      if (event.type === 'content_block_start') {
+        // Cumulative/replay detection is per-block: gateway counters restart here.
+        state.deltaTracker?.reset(event.content_block?.type);
+        if (event.content_block?.type === 'thinking') {
+          console.log('[THINKING_START]');
+        }
       }
     }
     return;
@@ -207,6 +251,9 @@ function processStreamMessage(msg, state, logPrefix) {
 
   // Process assistant content blocks
   if (msg.type === 'assistant') {
+    // The API response completed — a later message_start is a new agent-loop
+    // iteration, not a retry re-stream.
+    state.messageInFlight = false;
     const content = msg.message?.content;
     if (Array.isArray(content)) {
       for (const block of content) {
@@ -295,7 +342,13 @@ async function executeWithRetry({ createQueryResult, streamingEnabled, resumeSes
       currentSessionId: resumeSessionId, messageCount: 0, hasStreamEvents: false,
       lastAssistantContent: '', lastThinkingContent: '', accumulatedUsage: null,
       streamingEnabled, streamStarted: outerStreamState.streamStarted,
-      streamEnded: outerStreamState.streamEnded, queryResult: null
+      streamEnded: outerStreamState.streamEnded, queryResult: null,
+      // Per-content-block delta normalization: drops cumulative / replayed
+      // deltas from non-compliant gateways (see stream-delta-normalizer.js).
+      // Fresh per attempt — a retry re-streams blocks from scratch.
+      deltaTracker: createStreamDeltaTracker(),
+      // Turn-restart detection (see stream-event-processor.js).
+      messageInFlight: false
     };
 
     if (retryAttempt > 0) {

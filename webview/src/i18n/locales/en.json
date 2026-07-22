@@ -859,11 +859,11 @@
         "proxyEndpointWarning": "Requests will be routed through that endpoint instead of directly to the official Anthropic API.",
         "modelMapping": "Model Mapping (will be injected into JSON env)",
         "mainModel": "Main Model",
-        "mainModelPlaceholder": "e.g., claude-sonnet-4-6",
+        "mainModelPlaceholder": "e.g., claude-sonnet-5",
         "haikuModel": "Haiku Default Model",
         "haikuModelPlaceholder": "e.g., claude-haiku-4-5",
         "sonnetModel": "Sonnet Default Model",
-        "sonnetModelPlaceholder": "e.g., claude-sonnet-4-6",
+        "sonnetModelPlaceholder": "e.g., claude-sonnet-5",
         "opusModel": "Opus Default Model",
         "opusModelPlaceholder": "e.g., claude-opus-4-6",
         "modelMappingHint": "Optional: Specify default Claude models to use. Leave empty for system defaults.",
@@ -1564,6 +1564,7 @@
     "todoTab": "Plan",
     "tasksTab": "Tasks",
     "subagentTab": "Subagent",
+    "workflowBadge": "Workflow",
     "filesTab": "File Changes",
     "editsTab": "Edits",
     "noTodos": "No tasks running",
@@ -1739,13 +1740,17 @@
       "notEntitledToast": "1M context is not available on your Claude plan — disabled automatically. Please resend."
     },
     "claude": {
-      "sonnet46": {
-        "label": "Sonnet 4.6",
-        "description": "Sonnet 4.6 · Use the default model"
+      "sonnet5": {
+        "label": "Sonnet 5",
+        "description": "Sonnet 5 · Use the default model"
       },
       "opus48": {
         "label": "Opus 4.8",
         "description": "Opus 4.8 · Latest and most capable"
+      },
+      "fable5": {
+        "label": "Fable 5",
+        "description": "Fable 5 · Most capable for complex tasks"
       },
       "opus46": {
         "label": "Opus 4.7",

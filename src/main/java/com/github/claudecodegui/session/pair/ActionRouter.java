@@ -345,6 +345,31 @@ public class ActionRouter {
         JsonObject payload = action.has("payload") && action.get("payload").isJsonObject()
                 ? action.getAsJsonObject("payload") : new JsonObject();
 
+        // L1 self-heal (2026-06-26): the daemon downgrades a malformed / truncated
+        // closing tool call to a `wait` carrying parseError="tool_malformed" — but
+        // only AFTER exhausting its own in-turn retries (supervisor-channel.js).
+        // This is NOT a hallucinated wait: the supervisor DID try to dispatch, the
+        // tool_use JSON was just truncated (almost always an over-long
+        // dispatch_to_main_ai prompt). Route it to a targeted corrective so the
+        // supervisor re-dispatches a SHORTER prompt next turn, instead of letting it
+        // flow through handleWaitGuard (which would mislabel it as "narrated dispatch
+        // but emitted wait" and ratchet consecutiveWaitRejections). The plan stays
+        // ACTIVE/PENDING_DECISION, so DeadlockGuard's time-based liveness still
+        // backstops a genuinely stuck supervisor → human.
+        String parseError = actionWrapper.has("parseError") && !actionWrapper.get("parseError").isJsonNull()
+                ? actionWrapper.get("parseError").getAsString() : null;
+        if ("tool_malformed".equals(parseError)) {
+            webview.onActionEvent(actionWrapper);
+            LOG.warn("[ActionRouter] " + pair.getPairId()
+                    + " tool_malformed downgrade — sending corrective (re-dispatch shorter)");
+            sendActionRejectionToSupervisor(
+                    "你上一轮的收尾工具调用(如 dispatch_to_main_ai)畸形/无法解析 —— 几乎肯定是 prompt 过长、"
+                            + "tool_use 的 JSON 在中途被截断。系统已在本轮内自动重试仍未成功。",
+                    "下一轮请**重新派发,并把指令写短**:一两句话点明目标 + 引用计划步号/验收标准,"
+                            + "不要重述整步内容(主 AI 已能看到计划);指令很长时拆成多次 dispatch_to_main_ai。不要 emit wait。");
+            return;
+        }
+
         // Plan A (2026-05-26 v3.2): supervisor broke out of the wait loop by
         // emitting *anything* other than `wait` — reset the consecutive counter.
         // We don't gate on whether the action will succeed (empty inject_prompt
@@ -1355,6 +1380,15 @@ public class ActionRouter {
             plan.steps.add(added);
             plan.currentStepIndex = next;
             current = added;
+            // H7 fix (2026-06-26): if the plan had already auto-reached terminal
+            // DONE (all previously-registered steps complete) but the supervisor
+            // is dispatching ANOTHER step, reopen it BEFORE the contract is issued
+            // for this step — otherwise onContractIssued/onTurnStarted no-op on the
+            // terminal plan and the step never progresses (the "premature DONE →
+            // wedge" symptom). reopenForNewStep no-ops unless state == DONE.
+            if (plan.state == Plan.PlanState.DONE) {
+                sm.reopenForNewStep();
+            }
         }
         return current != null ? current.id : "step_synthetic_" + System.currentTimeMillis();
     }

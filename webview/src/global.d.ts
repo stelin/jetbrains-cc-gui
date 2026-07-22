@@ -829,6 +829,13 @@ interface Window {
   onUndoFileResult?: (json: string) => void;
 
   /**
+   * Task event callback - a raw SDK `task_*` system message (task_started /
+   * task_progress / task_updated / task_notification) forwarded by the Java
+   * layer. Consumed by useWorkflowTasks to surface Workflow runs in the panel.
+   */
+  onTaskEvent?: (json: string) => void;
+
+  /**
    * Undo all files result callback - returns the result of a batch undo operation
    */
   onUndoAllFileResult?: (json: string) => void;

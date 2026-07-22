@@ -41,7 +41,7 @@ export function BugAnalysisStandalone({ projectId, bugs, model, reasoning, appen
 
   // 默认与发起会话一致:boot.model 可能带 [1m] 后缀 → 拆成 基础 id + 长上下文开关。
   const [selModel, setSelModel] = useState(
-    () => strip1MContextSuffix(normalizeClaudeModelId(model)) || 'claude-sonnet-4-6',
+    () => strip1MContextSuffix(normalizeClaudeModelId(model)) || 'claude-sonnet-5',
   );
   const [longContext, setLongContext] = useState(() => has1MContextSuffix(model));
   const [selReasoning, setSelReasoning] = useState<ReasoningEffort>(() => (reasoning as ReasoningEffort) || 'high');

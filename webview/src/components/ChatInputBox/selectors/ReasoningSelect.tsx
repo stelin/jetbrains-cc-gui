@@ -30,7 +30,7 @@ interface ReasoningSelectProps {
  * Visibility and available levels depend on the selected model:
  * - Codex: low/medium/high/xhigh
  * - Claude Opus 4.8: low/medium/high/xhigh/max/ultra
- * - Claude Sonnet 4.6: low/medium/high/max
+ * - Claude Sonnet 5: low/medium/high/xhigh/max
  * - Claude Haiku 4.5 / legacy models: hidden
  */
 export const ReasoningSelect = ({ value, onChange, disabled, selectedModel, currentProvider, openUpward = true }: ReasoningSelectProps) => {

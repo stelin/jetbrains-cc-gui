@@ -242,6 +242,67 @@ public class PlanStateMachineTest {
         assertEquals(Plan.PlanState.DONE, sm.getCurrent().state);
     }
 
+    // ─── H7 fix (2026-06-26): reopenForNewStep ──────────────────────────
+
+    @Test
+    public void reopenForNewStep_fromDone_movesToActivePendingDecision() {
+        sm.onPlanCreated(makeSteps(1), null);
+        sm.onStepCompleted(sm.getCurrent().steps.get(0).id);
+        assertEquals(Plan.PlanState.DONE, sm.getCurrent().state);
+
+        sm.reopenForNewStep();
+        assertEquals(Plan.PlanState.ACTIVE, sm.getCurrent().state);
+        assertEquals(Plan.ActiveSubState.PENDING_DECISION, sm.getCurrent().subState);
+    }
+
+    @Test
+    public void reopenForNewStep_firesListener() {
+        sm.onPlanCreated(makeSteps(1), null);
+        sm.onStepCompleted(sm.getCurrent().steps.get(0).id);   // → DONE
+        AtomicInteger count = new AtomicInteger();
+        sm.addListener((oldState, oldSub, now) -> count.incrementAndGet());
+        sm.reopenForNewStep();
+        assertEquals(1, count.get());
+    }
+
+    @Test
+    public void reopenForNewStep_nonTerminal_isNoop() {
+        sm.onPlanCreated(makeSteps(2), null);                  // ACTIVE/PENDING_DECISION
+        AtomicInteger count = new AtomicInteger();
+        sm.addListener((oldState, oldSub, now) -> count.incrementAndGet());
+        sm.reopenForNewStep();
+        assertEquals(Plan.PlanState.ACTIVE, sm.getCurrent().state);
+        assertEquals(0, count.get());
+    }
+
+    @Test
+    public void reopenForNewStep_aborted_staysAborted() {
+        sm.onPlanCreated(makeSteps(1), null);
+        sm.onUserCancel("stop");
+        sm.reopenForNewStep();
+        assertEquals(Plan.PlanState.ABORTED, sm.getCurrent().state);
+    }
+
+    @Test
+    public void reopenForNewStep_thenContractIssued_progressesAgain() {
+        // H7: a plan that auto-reached DONE but gains a new injected step must
+        // accept contracts again — on a terminal plan these would all no-op and
+        // the step could never progress (the "premature DONE → wedge" symptom).
+        sm.onPlanCreated(makeSteps(1), null);
+        sm.onStepCompleted(sm.getCurrent().steps.get(0).id);   // → DONE
+        PlanStep added = PlanStep.create("auto", sm.getCurrent().steps.size(),
+                "extra step", PlanStep.StepOwner.MAIN_AI);
+        sm.getCurrent().steps.add(added);
+        sm.getCurrent().currentStepIndex = sm.getCurrent().steps.size() - 1;
+        sm.reopenForNewStep();
+
+        sm.onContractIssued("c2", added.id, ContractAssignee.MAIN_AI);
+        sm.onTurnStarted(ContractAssignee.MAIN_AI);
+        assertEquals(Plan.ActiveSubState.EXECUTING, sm.getCurrent().subState);
+        assertEquals(PlanStep.StepStatus.IN_PROGRESS, added.status);
+        assertTrue(added.contractIds.contains("c2"));
+    }
+
     private List<PlanStep> makeSteps(int n) {
         List<PlanStep> steps = new ArrayList<>();
         for (int i = 0; i < n; i++) {

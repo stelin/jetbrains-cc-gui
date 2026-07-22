@@ -25,6 +25,8 @@ import {
   useFileChangesManagement,
   useModelProviderState,
 } from './hooks';
+import { useWorkflowTasks } from './hooks/useWorkflowTasks';
+import { useTaskSteps } from './hooks/useTaskSteps';
 import {
   NEW_SESSION_COMMANDS,
   RESUME_COMMANDS,
@@ -712,9 +714,13 @@ const App = () => {
 
   // ── Subagents ──
   const latestTurnSubagents = useSubagents({ messages: latestTurnMessages, getContentBlocks, findToolResult });
+  // Live ultracode Workflow / background tasks surfaced from the SDK task_* events
+  // (not tool calls in the message list). Merged ahead of message-derived Task
+  // subagents so a running workflow is visible with live progress in the 子代理 tab.
+  const workflowSubagents = useWorkflowTasks({ streamingActive, sessionId: currentSessionId });
   const subagents = useMemo(
-    () => finalizeSubagentsForSettledTurn(latestTurnSubagents, streamingActive),
-    [latestTurnSubagents, streamingActive],
+    () => [...workflowSubagents, ...finalizeSubagentsForSettledTurn(latestTurnSubagents, streamingActive)],
+    [workflowSubagents, latestTurnSubagents, streamingActive],
   );
 
   // ── Rewind handlers ──
@@ -750,6 +756,16 @@ const App = () => {
     }
     return finalizeTodosForSettledTurn(latestTodos ?? [], streamingActive);
   }, [latestTurnMessages, getContentBlocks, streamingActive]);
+
+  // Plain-task fallback for the 任务 tab: when there is no TodoWrite plan, show
+  // the current turn's ordinary tool steps (Read/Bash/Edit/…) with live status,
+  // so tasks that use neither a plan, a subagent, nor a workflow still show
+  // progress + breakdown instead of "暂无任务运行".
+  const taskSteps = useTaskSteps({ messages: latestTurnMessages, getContentBlocks, findToolResult });
+  const effectiveTodos = useMemo(
+    () => (globalTodos.length > 0 ? globalTodos : finalizeTodosForSettledTurn(taskSteps, streamingActive)),
+    [globalTodos, taskSteps, streamingActive],
+  );
 
   const canRewindFromMessageIndex = (userMessageIndex: number) => {
     if (userMessageIndex < 0 || userMessageIndex >= mergedMessages.length) return false;
@@ -903,7 +919,7 @@ const App = () => {
           <SyncStatusBar />
           <StatusPanelErrorBoundary>
             <StatusPanel
-              todos={globalTodos}
+              todos={effectiveTodos}
               fileChanges={filteredFileChanges}
               subagents={subagents}
               expanded={statusPanelExpanded}

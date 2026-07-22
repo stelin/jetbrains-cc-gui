@@ -3,7 +3,7 @@
  * Responsible for session persistence and history message management.
  */
 
-import { existsSync, createReadStream, mkdirSync, readFileSync, appendFileSync, statSync } from 'fs';
+import { existsSync, createReadStream, mkdirSync, readFileSync, writeFileSync, renameSync, appendFileSync, statSync } from 'fs';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
@@ -38,8 +38,8 @@ export function persistJsonlMessage(sessionId, cwd, obj) {
 }
 
 /**
- * Remove thinking / redacted_thinking blocks from a reconstructed assistant
- * content array.
+ * Remove thinking / redacted_thinking / reasoning blocks from a reconstructed
+ * assistant content array.
  *
  * Extended-thinking blocks carry a cryptographic `signature` that is only valid
  * for the exact request that produced them. When we manually rebuild a resumed
@@ -51,14 +51,89 @@ export function persistJsonlMessage(sessionId, cwd, obj) {
  * within the SAME turn's tool-use loop (handled by the Agent SDK), never across
  * turns — so dropping historical thinking blocks here is both safe and required
  * for this non-thinking fallback request.
+ *
+ * OpenAI-compatible proxies (GPT-5.x via Claude protocol) use `reasoning` blocks
+ * with `encrypted_content` (Fernet-encrypted) instead of Anthropic's `thinking`
+ * format. Those encrypted signatures are equally session-scoped and must be
+ * stripped when resuming to avoid:
+ *   400 The encrypted content gAAA...ZwgV could not be verified.
  */
 function stripThinkingBlocks(content) {
   if (!Array.isArray(content)) {
     return content;
   }
   return content.filter(
-    (block) => !block || (block.type !== 'thinking' && block.type !== 'redacted_thinking')
+    (block) => !block || (
+      block.type !== 'thinking' &&
+      block.type !== 'redacted_thinking' &&
+      block.type !== 'reasoning'
+    )
   );
+}
+
+/**
+ * Strip thinking / redacted_thinking / reasoning blocks from a persisted session
+ * JSONL **in place**, so an Agent-SDK resume (`options.resume`) does not replay
+ * encrypted reasoning content that a third-party gateway can no longer verify.
+ *
+ * Background: Claude Code persists assistant thinking blocks (carrying encrypted
+ * signatures — Fernet `gAAA...` payloads on OpenAI-compatible gateways) into the
+ * session file and replays them verbatim when the CLI resumes the session. The
+ * official Anthropic API verifies these signatures fine, but Claude-protocol-
+ * compatible gateways (GPT-5.x) can only decrypt content produced under their
+ * current key/instance — after key rotation or routing to a different backend
+ * instance the replay fails the whole turn with:
+ *   400 The encrypted content gAAA...muWJ could not be verified.
+ * Once a session file contains such a block, EVERY subsequent resume of that
+ * session fails. Dropping historical thinking blocks is safe: the Messages API
+ * only requires them unmodified within the SAME turn's tool-use loop, never
+ * across turns (see stripThinkingBlocks above).
+ *
+ * Only call this BEFORE a resume starts (no live runtime may own the session —
+ * a running CLI appends to the file and an in-place rewrite could race it).
+ * Best-effort: any failure is logged and swallowed so resume proceeds unchanged.
+ *
+ * @returns {boolean} true if the file was rewritten
+ */
+export function sanitizeSessionFileForResume(sessionId, cwd) {
+  try {
+    const sessionFile = resolveSessionFile(sessionId, cwd);
+    if (!existsSync(sessionFile)) {
+      return false;
+    }
+
+    const lines = readFileSync(sessionFile, 'utf8').split('\n');
+    let changed = false;
+    const rewritten = lines.map((line) => {
+      if (!line.trim()) return line;
+      let msg;
+      try { msg = JSON.parse(line); } catch { return line; }
+      const content = msg?.message?.content;
+      if (msg?.type !== 'assistant' || !Array.isArray(content)) return line;
+      const cleaned = stripThinkingBlocks(content);
+      if (cleaned.length === content.length) return line;
+      changed = true;
+      // An empty assistant content array is itself an API error — substitute a
+      // placeholder text block for thinking-only turns (keeps role parity and
+      // the uuid/parentUuid chain intact).
+      msg.message.content = cleaned.length > 0 ? cleaned : [{ type: 'text', text: ' ' }];
+      return JSON.stringify(msg);
+    });
+
+    if (!changed) {
+      return false;
+    }
+    // Atomic rewrite (tmp + rename) so a concurrent reader never sees a
+    // half-written file.
+    const tmpFile = `${sessionFile}.sanitize-${randomUUID()}.tmp`;
+    writeFileSync(tmpFile, rewritten.join('\n'), 'utf8');
+    renameSync(tmpFile, sessionFile);
+    console.log('[RESUME_SANITIZE] Stripped encrypted thinking/reasoning blocks from', sessionFile);
+    return true;
+  } catch (e) {
+    console.error('[RESUME_SANITIZE_ERROR]', e.message);
+    return false;
+  }
 }
 
 /**

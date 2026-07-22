@@ -12,6 +12,7 @@ import com.github.claudecodegui.session.registry.SessionRegistry;
 import com.github.claudecodegui.util.TokenUsageUtils;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.intellij.openapi.diagnostic.Logger;
 import com.intellij.openapi.project.Project;
@@ -853,9 +854,18 @@ public class ClaudeMessageHandler implements MessageCallback {
             // daemon also tag-prints a [COMPACT_BOUNDARY] line for telemetry,
             // but that goes to the command callback (not the message stream).
             // The system message is the authoritative signal on the SDK-stream side.
-            if (systemObj.has("subtype") && !systemObj.get("subtype").isJsonNull()
-                    && "compact_boundary".equals(systemObj.get("subtype").getAsString())) {
-                notifyMainAIMonitorCompactBoundary();
+            if (systemObj.has("subtype") && !systemObj.get("subtype").isJsonNull()) {
+                String subtype = systemObj.get("subtype").getAsString();
+                // Forward SDK task lifecycle events (Workflow runs / background
+                // tasks: task_started/task_progress/task_updated/task_notification)
+                // to the webview so the status panel can surface progress +
+                // breakdown. Previously these system messages were dropped here.
+                if (subtype.startsWith("task_")) {
+                    callbackHandler.notifyTaskEvent(content);
+                }
+                if ("compact_boundary".equals(subtype)) {
+                    notifyMainAIMonitorCompactBoundary();
+                }
             }
         } catch (Exception e) {
             LOG.warn("Failed to extract slash commands from system message: " + e.getMessage());
@@ -869,6 +879,22 @@ public class ClaudeMessageHandler implements MessageCallback {
      */
     private void handleStreamStart() {
         LOG.debug("Stream started");
+        // Turn-restart detection: a [STREAM_START] while the previous stream never
+        // ended means the turn is being re-streamed after a mid-stream failure
+        // (bridge-level retry or CLI-internal API retry re-emits stream events).
+        // The partial text/thinking already accumulated belongs to the failed
+        // attempt — clear it so the replay REPLACES the bubble instead of
+        // appending a second full copy (whole-message duplication). A fresh
+        // turn's stream_start sees isStreaming == false and skips this, so the
+        // previous turn's finalized message is never touched.
+        if (isStreaming) {
+            LOG.debug("Stream restart detected — clearing partial streaming content from the failed attempt");
+            assistantContent.setLength(0);
+            if (currentAssistantMessage != null) {
+                currentAssistantMessage.content = "";
+                clearStreamingTextAndThinkingBlocks(currentAssistantMessage.raw);
+            }
+        }
         isStreaming = true;  // Mark streaming as active
         streamEndedThisTurn = false;
         errorReportedThisTurn = false;
@@ -891,6 +917,38 @@ public class ClaudeMessageHandler implements MessageCallback {
         // EXECUTING so TransitionDispatcher / DeadlockGuard see correct state.
         notifyPlanStateMachineTurnStart();
         callbackHandler.notifyStreamStart();
+    }
+
+    /**
+     * Remove text/thinking blocks from the current assistant raw message.
+     * Called on a mid-turn stream restart: those blocks were built from the
+     * failed attempt's deltas and would otherwise render alongside the
+     * re-streamed copies. tool_use / tool_result blocks are preserved.
+     */
+    private void clearStreamingTextAndThinkingBlocks(JsonObject raw) {
+        if (raw == null || !raw.has("message") || !raw.get("message").isJsonObject()) {
+            return;
+        }
+        JsonObject message = raw.getAsJsonObject("message");
+        if (!message.has("content") || !message.get("content").isJsonArray()) {
+            return;
+        }
+        JsonArray content = message.getAsJsonArray("content");
+        JsonArray kept = new JsonArray();
+        for (int i = 0; i < content.size(); i++) {
+            JsonElement element = content.get(i);
+            if (element.isJsonObject()) {
+                JsonObject block = element.getAsJsonObject();
+                if (block.has("type") && !block.get("type").isJsonNull()) {
+                    String type = block.get("type").getAsString();
+                    if ("text".equals(type) || "thinking".equals(type)) {
+                        continue;
+                    }
+                }
+            }
+            kept.add(element);
+        }
+        message.add("content", kept);
     }
 
     /**

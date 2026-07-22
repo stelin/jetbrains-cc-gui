@@ -864,11 +864,11 @@
         "proxyEndpointWarning": "请求将通过该端点转发，而不是直接发送到 Anthropic 官方 API。",
         "modelMapping": "模型映射（会注入到 JSON 的 env 里）",
         "mainModel": "主模型",
-        "mainModelPlaceholder": "例如：claude-sonnet-4-6",
+        "mainModelPlaceholder": "例如：claude-sonnet-5",
         "haikuModel": "Haiku 默认模型",
         "haikuModelPlaceholder": "例如：claude-haiku-4-5",
         "sonnetModel": "Sonnet 默认模型",
-        "sonnetModelPlaceholder": "例如：claude-sonnet-4-6",
+        "sonnetModelPlaceholder": "例如：claude-sonnet-5",
         "opusModel": "Opus 默认模型",
         "opusModelPlaceholder": "例如：claude-opus-4-6",
         "modelMappingHint": "可选：指定默认使用的 Claude 模型，留空则使用系统默认。",
@@ -1569,6 +1569,7 @@
     "todoTab": "计划",
     "tasksTab": "任务",
     "subagentTab": "子代理",
+    "workflowBadge": "工作流",
     "filesTab": "文件改动",
     "editsTab": "编辑",
     "noTodos": "暂无任务运行",
@@ -1744,13 +1745,17 @@
       "notEntitledToast": "当前 Claude 套餐不支持 1M 上下文,已自动关闭。请重新发送。"
     },
     "claude": {
-      "sonnet46": {
-        "label": "Sonnet 4.6",
-        "description": "Sonnet 4.6 · 默认推荐模型"
+      "sonnet5": {
+        "label": "Sonnet 5",
+        "description": "Sonnet 5 · 默认推荐模型"
       },
       "opus48": {
         "label": "Opus 4.8",
         "description": "Opus 4.8 · 最新最强大的模型"
+      },
+      "fable5": {
+        "label": "Fable 5",
+        "description": "Fable 5 · 能力最强，适合复杂任务"
       },
       "opus46": {
         "label": "Opus 4.7",

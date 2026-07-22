@@ -122,7 +122,7 @@ export const DESCRIPTION_TEMPLATES: DescriptionTemplate[] = [
  */
 export const SUPERVISOR_MODELS = [
   { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5 · 速度最快' },
-  { id: 'claude-sonnet-4-6',         label: 'Claude Sonnet 4.6 · 默认推荐' },
+  { id: 'claude-sonnet-5',           label: 'Claude Sonnet 5 · 默认推荐' },
   { id: 'claude-opus-4-8',           label: 'Claude Opus 4.8 · 最新最强' },
   { id: 'gpt-5.5',                   label: 'GPT-5.5' },
 ];

@@ -295,17 +295,18 @@ export function strip1MContextSuffix(modelId: string | undefined | null): string
   return modelId.replace(/\[1m\]$/i, '');
 }
 
-// Opus 4.7 / 4.6 were retired from the picker; migrate any persisted selection
-// to the surviving Opus 4.8. The [1m] suffix is stripped before this lookup, so
-// only base ids are keyed here.
+// Retired picker models migrate to their surviving successor: Opus 4.7 / 4.6 →
+// Opus 4.8, Sonnet 4.6 → Sonnet 5. The [1m] suffix is stripped before this
+// lookup, so only base ids are keyed here.
 const LEGACY_CLAUDE_MODEL_ID_ALIASES: Record<string, string> = {
   'claude-opus-4-7': 'claude-opus-4-8',
   'claude-opus-4-6': 'claude-opus-4-8',
+  'claude-sonnet-4-6': 'claude-sonnet-5',
 };
 
 export function normalizeClaudeModelId(modelId: string | undefined | null): string {
   if (!modelId) {
-    return 'claude-sonnet-4-6';
+    return 'claude-sonnet-5';
   }
   // First strip any [1m] suffix
   const stripped = strip1MContextSuffix(modelId);
@@ -318,14 +319,19 @@ export function normalizeClaudeModelId(modelId: string | undefined | null): stri
  */
 export const CLAUDE_MODELS: ModelInfo[] = [
   {
-    id: 'claude-sonnet-4-6',
-    label: 'Sonnet 4.6',
-    description: 'Sonnet 4.6 · Use the default model',
+    id: 'claude-sonnet-5',
+    label: 'Sonnet 5',
+    description: 'Sonnet 5 · Use the default model',
   },
   {
     id: 'claude-opus-4-8',
     label: 'Opus 4.8',
     description: 'Opus 4.8 · Latest and most capable',
+  },
+  {
+    id: 'claude-fable-5',
+    label: 'Fable 5',
+    description: 'Fable 5 · Most capable for complex tasks',
   },
   {
     id: 'claude-haiku-4-5',
@@ -417,7 +423,8 @@ export const AVAILABLE_PROVIDERS: ProviderInfo[] = [
  */
 export const EFFORT_SUPPORTED_CLAUDE_MODELS = new Set([
   'claude-opus-4-8',
-  'claude-sonnet-4-6',
+  'claude-fable-5',
+  'claude-sonnet-5',
 ]);
 
 /**
@@ -426,6 +433,8 @@ export const EFFORT_SUPPORTED_CLAUDE_MODELS = new Set([
  */
 export const XHIGH_EFFORT_CLAUDE_MODELS = new Set([
   'claude-opus-4-8',
+  'claude-fable-5',
+  'claude-sonnet-5',
 ]);
 
 /**
@@ -433,7 +442,8 @@ export const XHIGH_EFFORT_CLAUDE_MODELS = new Set([
  */
 export const MAX_EFFORT_CLAUDE_MODELS = new Set([
   'claude-opus-4-8',
-  'claude-sonnet-4-6',
+  'claude-fable-5',
+  'claude-sonnet-5',
 ]);
 
 /**
@@ -448,7 +458,7 @@ export const ULTRA_EFFORT_CLAUDE_MODELS = new Set([
 /**
  * Reasoning Effort (thinking depth)
  * Claude Opus 4.8: low/medium/high/xhigh/max/ultra
- * Claude Sonnet 4.6: low/medium/high/max
+ * Claude Sonnet 5: low/medium/high/xhigh/max
  * Codex: low/medium/high/xhigh
  *
  * 'ultra' is Claude Code's "ultracode" session setting (not an SDK effort

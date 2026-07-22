@@ -102,6 +102,15 @@ public class ClaudeSession {
 
         void onSummaryReceived(String summary);
 
+        /**
+         * A raw SDK {@code task_*} system event (task_started / task_progress /
+         * task_updated / task_notification), forwarded verbatim to the webview so
+         * the status panel can surface Workflow runs + progress. Default no-op so
+         * other SessionCallback implementations stay source-compatible.
+         */
+        default void onTaskEvent(String taskEventJson) {
+        }
+
         // Streaming callback methods (with default implementations for backward compatibility)
         default void onStreamStart() {
         }

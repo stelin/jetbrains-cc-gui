@@ -207,6 +207,21 @@ public class SessionCallbackAdapter implements ClaudeSession.SessionCallback {
         LOG.debug("Node log: " + (log != null ? log.substring(0, Math.min(100, log.length())) : "null"));
     }
 
+    @Override
+    public void onTaskEvent(String taskEventJson) {
+        // Forward SDK task_* lifecycle events (Workflow runs / background tasks)
+        // to the webview so the status panel can show progress + breakdown.
+        if (isInactive() || taskEventJson == null || taskEventJson.isEmpty()) {
+            return;
+        }
+        ApplicationManager.getApplication().invokeLater(() -> {
+            if (isInactive()) {
+                return;
+            }
+            jsTarget.callJavaScript("onTaskEvent", JsUtils.escapeJs(taskEventJson));
+        });
+    }
+
     // ===== Streaming callback methods =====
 
     @Override

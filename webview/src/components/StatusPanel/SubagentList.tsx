@@ -28,7 +28,9 @@ const SubagentList = memo(({ subagents }: SubagentListProps) => {
             </span>
 
             {/* Type badge */}
-            <span className="subagent-type">{t('statusPanel.subagentTab')}</span>
+            <span className="subagent-type">
+              {subagent.type === 'workflow' ? t('statusPanel.workflowBadge') : t('statusPanel.subagentTab')}
+            </span>
 
             {/* Description */}
             <span className="subagent-description" title={subagent.prompt}>

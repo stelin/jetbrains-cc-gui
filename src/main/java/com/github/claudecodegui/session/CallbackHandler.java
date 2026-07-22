@@ -93,6 +93,16 @@ public class CallbackHandler {
             callback.onSummaryReceived(summary);
         }
     }
+
+    /**
+     * Notify of a raw SDK {@code task_*} system event (Workflow / background
+     * task lifecycle), forwarded verbatim to the webview status panel.
+     */
+    public void notifyTaskEvent(String taskEventJson) {
+        if (callback != null) {
+            callback.onTaskEvent(taskEventJson);
+        }
+    }
     // ===== Streaming notification methods =====
 
     /**

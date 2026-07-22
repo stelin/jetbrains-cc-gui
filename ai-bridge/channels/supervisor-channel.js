@@ -24,11 +24,12 @@
  */
 
 import { loadClaudeSdk, loadZod, isClaudeSdkAvailable } from '../utils/sdk-loader.js';
-import { setupSupervisorAuth, buildCliEnv, loadClaudeSettings } from '../config/api-config.js';
+import { setupSupervisorAuth, buildCliEnv, loadClaudeSettings, isCustomBaseUrl } from '../config/api-config.js';
 import { mapModelIdToSdkName, resolveModelFromSettings, setModelEnvironmentVariables } from '../utils/model-utils.js';
 import { AsyncStream } from '../utils/async-stream.js';
 import { estimateTokensFromChars } from '../utils/usage-utils.js';
 import { summarizeEvent } from '../services/supervisor/event-summarizer.js';
+import { sanitizeSessionFileForResume } from '../services/claude/session-service.js';
 import {
     buildSupervisorMcpServer,
     QUALIFIED_EMIT_ACTION,
@@ -614,6 +615,16 @@ export async function startSupervisorSession(params) {
     // SDK options. Supervisor judgment-only: no project-scoped settings, no
     // file checkpointing. We do still pass a cwd because the SDK requires one.
     const cwd = process.env.IDEA_PROJECT_PATH || process.env.PROJECT_PATH || process.cwd();
+    // Same guard as the main-AI channel: custom gateways (GPT-5.x) can fail to
+    // verify replayed encrypted thinking/reasoning blocks with
+    //   400 "The encrypted content gAAA... could not be verified"
+    // — strip them from the persisted session before the CLI resumes it.
+    if (runtime.requestedResumeId) {
+        const supBaseUrl = process.env.ANTHROPIC_BASE_URL || process.env.ANTHROPIC_API_URL || '';
+        if (isCustomBaseUrl(supBaseUrl)) {
+            sanitizeSessionFileForResume(runtime.requestedResumeId, cwd);
+        }
+    }
     runtime.query = queryFn({
         prompt: runtime.inputStream,
         options: {

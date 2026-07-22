@@ -1015,6 +1015,7 @@
     "todoTab": "計畫",
     "tasksTab": "任務",
     "subagentTab": "子代理",
+    "workflowBadge": "工作流",
     "filesTab": "檔案改動",
     "editsTab": "編輯",
     "noTodos": "暫無任務運行",

@@ -367,6 +367,38 @@ public class PlanStateMachine {
         notifyListeners(oldState, oldSub, current);
     }
 
+    /**
+     * H7 fix (2026-06-26): reopen a plan that already reached terminal {@code DONE}
+     * when a NEW step is appended — i.e. the supervisor is dispatching more work
+     * than the registered plan had steps (a step-count desync between the
+     * supervisor's working plan and the PlanStateMachine's {@code steps}). Without
+     * this the plan stays terminal forever: {@code SupervisorMonitor
+     * .computeNextStepToDispatch} returns null on {@code isTerminal()} and
+     * {@code onTurnStarted}/{@code onContractIssued}/{@code onStepCompleted} all
+     * early-return, so the just-added step can never progress and the supervisor
+     * wedges waiting for a {@code [DISPATCH_NEXT_STEP]} the terminal plan will
+     * never emit. Transitions DONE → ACTIVE/PENDING_DECISION and fires listeners
+     * (re-arms the TransitionDispatcher wake + refreshes the coordinator strip).
+     *
+     * <p>Only the auto-{@code DONE} case is reopened. An {@code ABORTED} plan
+     * (user cancel) stays cancelled, and any non-terminal state is a no-op.
+     */
+    public synchronized void reopenForNewStep() {
+        if (current == null) return;
+        if (current.state != Plan.PlanState.DONE) return;
+
+        Plan.PlanState oldState = current.state;
+        Plan.ActiveSubState oldSub = current.subState;
+        current.state = Plan.PlanState.ACTIVE;
+        current.subState = Plan.ActiveSubState.PENDING_DECISION;
+        current.lastTransitionAt = System.currentTimeMillis();
+        current.metadata.remove("completionSummary");
+
+        LOG.info("[PlanSM] " + pairId + " REOPEN_FOR_STEP old=" + oldState + "/" + oldSub
+                + " new=" + current.state + "/" + current.subState);
+        notifyListeners(oldState, oldSub, current);
+    }
+
     // ─── Listeners ──────────────────────────────────────────────────────
 
     public void addListener(PlanStateListener l) {

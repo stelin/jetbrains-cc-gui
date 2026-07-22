@@ -13,9 +13,9 @@ vi.mock('react-i18next', () => ({
 
 describe('ModelSelect', () => {
   const sonnetModel: ModelInfo = {
-    id: 'claude-sonnet-4-6',
-    label: 'Sonnet 4.6',
-    description: 'Sonnet 4.6 · Use the default model',
+    id: 'claude-sonnet-5',
+    label: 'Sonnet 5',
+    description: 'Sonnet 5 · Use the default model',
   };
 
   beforeEach(() => {
@@ -74,9 +74,9 @@ describe('ModelSelect', () => {
     expect(screen.getByRole('button').textContent).toContain('glm-4.7');
   });
 
-  it('Claude 内置模型列表应默认使用不带 [1m] 的 Opus 4.6 ID', () => {
-    expect(CLAUDE_MODELS.map((model) => model.id)).toContain('claude-opus-4-6');
-    expect(CLAUDE_MODELS.map((model) => model.id)).not.toContain('claude-opus-4-6[1m]');
+  it('Claude 内置模型列表应使用不带 [1m] 后缀的基础模型 ID', () => {
+    expect(CLAUDE_MODELS.map((model) => model.id)).toContain('claude-opus-4-8');
+    expect(CLAUDE_MODELS.map((model) => model.id)).not.toContain('claude-opus-4-8[1m]');
   });
 
   it('Codex 内置模型列表应与目标设计一致', () => {

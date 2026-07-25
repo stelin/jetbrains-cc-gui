@@ -12,6 +12,7 @@
 
 import { loadClaudeSdk, isClaudeSdkAvailable } from '../utils/sdk-loader.js';
 import { setupApiKey, loadClaudeSettings, buildCliEnv } from '../config/api-config.js';
+import { releaseSanitizingProxy } from './claude/sanitizing-proxy.js';
 import { mapModelIdToSdkName } from '../utils/model-utils.js';
 import { getRealHomeDir } from '../utils/path-utils.js';
 
@@ -267,7 +268,7 @@ async function enhancePrompt(originalPrompt, systemPrompt, model, context) {
       permissionMode: 'bypassPermissions',  // Prompt enhancement doesn't need tool permissions
       model: sdkModelName,
       maxTurns: 1,  // Prompt enhancement only needs a single turn, no tool calls
-      env: buildCliEnv(),
+      env: await buildCliEnv(),
       // Use custom system prompt (passed as a string directly, not as an object)
       systemPrompt: systemPrompt,
       settingSources: ['user', 'project', 'local'],
@@ -316,6 +317,10 @@ async function enhancePrompt(originalPrompt, systemPrompt, model, context) {
   } catch (error) {
     console.error('[PromptEnhancer] Enhancement failed:', error.message);
     throw error;
+  } finally {
+    // Balance the sanitizing-proxy ref taken by buildCliEnv() above (no-op
+    // when the base URL is the official API).
+    releaseSanitizingProxy();
   }
 }
 

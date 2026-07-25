@@ -30,6 +30,7 @@ import { AsyncStream } from '../utils/async-stream.js';
 import { estimateTokensFromChars } from '../utils/usage-utils.js';
 import { summarizeEvent } from '../services/supervisor/event-summarizer.js';
 import { sanitizeSessionFileForResume } from '../services/claude/session-service.js';
+import { releaseSanitizingProxy } from '../services/claude/sanitizing-proxy.js';
 import {
     buildSupervisorMcpServer,
     QUALIFIED_EMIT_ACTION,
@@ -632,7 +633,7 @@ export async function startSupervisorSession(params) {
             // Snapshot the provider creds (setupSupervisorAuth) + the model-alias
             // env (setModelEnvironmentVariables) + CLI identity into the SDK child —
             // same as the main-AI channel.
-            env: buildCliEnv(),
+            env: await buildCliEnv(),
             // SDK tier selector ('opus'/'sonnet'/'haiku'); the concrete model is
             // resolved from ANTHROPIC_DEFAULT_*_MODEL staged above.
             model: sdkModelName,
@@ -890,6 +891,9 @@ export async function stopSupervisorSession(params) {
         }
     } catch { /* ignore */ }
     runtimes.delete(k);
+    // Balance the sanitizing-proxy ref this supervisor's CLI took in
+    // buildCliEnv() when its runtime was created (no-op for the official API).
+    releaseSanitizingProxy();
     process.stdout.write(`[supervisor] stopped: ${k}\n`);
     return { stopped: true };
 }
@@ -988,6 +992,9 @@ export async function interruptSupervisor(params) {
             error = error || (e?.message || String(e));
         }
         runtimes.delete(k);
+        // Balance the sanitizing-proxy ref this supervisor's CLI took in
+        // buildCliEnv() when its runtime was created (no-op for the official API).
+        releaseSanitizingProxy();
     }
 
     process.stdout.write('[SUPERVISOR_INTERRUPT_RESULT] ' + JSON.stringify({

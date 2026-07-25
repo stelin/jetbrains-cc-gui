@@ -42,6 +42,7 @@ import {
   abortCurrentTurn,
   resetRuntimePersistent
 } from './services/claude/persistent-query-service.js';
+import { releaseSanitizingProxy } from './services/claude/sanitizing-proxy.js';
 import { injectNetworkEnvVars } from './config/api-config.js';
 
 // =============================================================================
@@ -407,6 +408,12 @@ async function processRequest(request) {
         code: error.code,
       });
     }
+    // If the request died before its runtime could dispose, drop the proxy ref
+    // it took at buildCliEnv() so the ref-count cannot leak. Under the normal
+    // persistent path the runtime's dispose already released its own ref — but
+    // only on success; a throw mid-send (e.g. the encrypted-content 400) skips
+    // that path, so this is the balancing release. No-op when no proxy is up.
+    releaseSanitizingProxy();
   } finally {
     activeRequestId = null;
     // Restore original environment variables to prevent cross-request pollution

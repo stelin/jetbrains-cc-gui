@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { __testing } from './persistent-query-service.js';
+import { __testing, sendMessagePersistent } from './persistent-query-service.js';
 
 /**
  * Create a Promise that can be manually resolved.
@@ -325,4 +325,86 @@ test('abortCurrentTurn still disposes an active runtime explicitly', async () =>
 
   await assert.rejects(turnPromise, /runtime terminated/);
   assert.equal(runtime.closed, true);
+});
+
+// ---------------------------------------------------------------------------
+// Encrypted-content 400 self-repair (poisoned thinking blocks)
+// ---------------------------------------------------------------------------
+
+const ENCRYPTED_CONTENT_400 = 'API Error: 400 The encrypted content gAAA...qZM= could not be verified. '
+  + 'Reason: Encrypted content could not be decrypted or parsed.';
+
+function encryptedContentErrorResult() {
+  return { done: false, value: { type: 'result', is_error: true, errors: [ENCRYPTED_CONTENT_400] } };
+}
+
+test('encrypted-content 400 disposes the poisoned runtime and retries once on a fresh one', async () => {
+  let call = 0;
+  const factories = [
+    createSequencedQueryFactory([
+      { done: false, value: { type: 'system', subtype: 'init', session_id: 'sess-enc-1' } },
+      encryptedContentErrorResult()
+    ]),
+    createSequencedQueryFactory([
+      { done: false, value: { type: 'system', subtype: 'init', session_id: 'sess-enc-1' } },
+      { done: false, value: { type: 'result', is_error: false } }
+    ])
+  ];
+  __testing.setQueryFn((args) => factories[call++].queryFn(args));
+
+  await sendMessagePersistent({
+    message: 'hi',
+    sessionId: '',
+    cwd: process.cwd(),
+    runtimeSessionEpoch: 'epoch-enc-1'
+  });
+
+  assert.equal(call, 2, 'a fresh runtime must be created for the retry');
+  const [firstFactory, secondFactory] = factories;
+  assert.equal(firstFactory.runtimes[0].closed, true, 'poisoned runtime must be disposed');
+  assert.equal(secondFactory.runtimes[0].closed, false, 'retry runtime survives after success');
+  assert.equal(
+    secondFactory.runtimes[0].options.resume,
+    'sess-enc-1',
+    'retry resumes the repaired session in place'
+  );
+});
+
+test('encrypted-content 400 is retried at most once; a repeated failure disposes the runtime', async () => {
+  let call = 0;
+  const makeFailingFactory = () => createSequencedQueryFactory([
+    { done: false, value: { type: 'system', subtype: 'init', session_id: 'sess-enc-2' } },
+    encryptedContentErrorResult()
+  ]);
+  const factories = [makeFailingFactory(), makeFailingFactory(), makeFailingFactory()];
+  __testing.setQueryFn((args) => factories[call++].queryFn(args));
+
+  await sendMessagePersistent({
+    message: 'hi',
+    sessionId: '',
+    cwd: process.cwd(),
+    runtimeSessionEpoch: 'epoch-enc-2'
+  });
+
+  assert.equal(call, 2, 'no third runtime — the retry guard stops the loop');
+  assert.equal(factories[0].runtimes[0].closed, true);
+  assert.equal(factories[1].runtimes[0].closed, true, 'still-poisoned retry runtime is disposed too');
+});
+
+test('non-encrypted error results are not retried and keep the runtime alive', async () => {
+  const factory = createSequencedQueryFactory([
+    { done: false, value: { type: 'system', subtype: 'init', session_id: 'sess-other' } },
+    { done: false, value: { type: 'result', is_error: true, errors: ['API Error: 429 rate limit exceeded'] } }
+  ]);
+  __testing.setQueryFn(factory.queryFn);
+
+  await sendMessagePersistent({
+    message: 'hi',
+    sessionId: '',
+    cwd: process.cwd(),
+    runtimeSessionEpoch: 'epoch-other'
+  });
+
+  assert.equal(factory.runtimes.length, 1, 'no retry runtime for unrelated API errors');
+  assert.equal(factory.runtimes[0].closed, false, 'runtime survives a non-poisoning error');
 });

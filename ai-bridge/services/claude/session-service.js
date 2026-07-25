@@ -6,7 +6,7 @@
 import { existsSync, createReadStream, mkdirSync, readFileSync, writeFileSync, renameSync, appendFileSync, statSync } from 'fs';
 import { readFile } from 'fs/promises';
 import { join } from 'path';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
 import { createInterface } from 'readline';
 import { getClaudeDir } from '../../utils/path-utils.js';
 
@@ -71,6 +71,113 @@ function stripThinkingBlocks(content) {
   );
 }
 
+// Matches the API rejection produced when a gateway/provider cannot verify the
+// encrypted payload of a replayed thinking/reasoning block, e.g.:
+//   API Error: 400 The encrypted content gAAA...qZM= could not be verified.
+//   Reason: Encrypted content could not be decrypted or parsed.
+// The signature is only decryptable by the key/instance that produced it, so
+// this fires after provider key rotation, routing to a different backend
+// instance, or replaying blocks across providers/models.
+const ENCRYPTED_CONTENT_VERIFICATION_RE =
+  /encrypted content[\s\S]{0,600}?(?:could not be verified|could not be decrypted|could not be parsed)/i;
+
+/**
+ * True when an error text carries the "encrypted content could not be verified"
+ * API rejection. Checked against the result error text AND the CLI stderr tail.
+ */
+export function isEncryptedContentVerificationError(text) {
+  return typeof text === 'string' && ENCRYPTED_CONTENT_VERIFICATION_RE.test(text);
+}
+
+function hashSessionLine(line) {
+  return createHash('sha1').update(line, 'utf8').digest('hex');
+}
+
+/**
+ * Split raw JSONL file content into logical lines, dropping the artifact
+ * element produced by a trailing newline.
+ */
+function splitLogicalLines(raw) {
+  const lines = raw.split('\n');
+  if (lines.length > 0 && lines[lines.length - 1] === '') {
+    lines.pop();
+  }
+  return lines;
+}
+
+/**
+ * Capture a lightweight snapshot of a persisted session file BEFORE a turn
+ * appends to it, so a failed turn can later be dropped exactly (see
+ * sanitizeSessionFileForResume's `repair` option).
+ *
+ * @returns {{ lineCount: number, lastLineHash: string } | null}
+ *   null when the session/file does not exist yet (nothing to truncate to).
+ */
+export function captureSessionFileSnapshot(sessionId, cwd) {
+  try {
+    if (!sessionId) return null;
+    const sessionFile = resolveSessionFile(sessionId, cwd);
+    if (!existsSync(sessionFile)) return null;
+    const lines = splitLogicalLines(readFileSync(sessionFile, 'utf8'));
+    if (lines.length === 0) return null;
+    return { lineCount: lines.length, lastLineHash: hashSessionLine(lines[lines.length - 1]) };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pure line-level repair used by sanitizeSessionFileForResume (exported for tests).
+ *
+ * 1. When `repair.truncateToLineCount` is given, drop every line appended after
+ *    that count — but ONLY when line N-1 still hashes to
+ *    `repair.expectedLastLineHash`. The hash guard proves the file grew by
+ *    appends only; on mismatch (e.g. an external rewrite/compaction) truncation
+ *    is skipped so we never delete content we cannot attribute to the failed turn.
+ * 2. Strip thinking/redacted_thinking/reasoning blocks from assistant lines
+ *    (substituting a placeholder text block for thinking-only turns).
+ *
+ * @param {string[]} lines logical JSONL lines (no trailing-empty artifact)
+ * @param {{ truncateToLineCount?: number, expectedLastLineHash?: string } | null} repair
+ * @returns {{ lines: string[], changed: boolean, truncated: boolean }}
+ */
+export function sanitizeSessionLines(lines, repair = null) {
+  let working = lines;
+  let changed = false;
+  let truncated = false;
+
+  const truncateTo = repair?.truncateToLineCount;
+  if (Number.isInteger(truncateTo) && truncateTo >= 0 && working.length > truncateTo) {
+    const boundaryOk = truncateTo === 0
+      || hashSessionLine(working[truncateTo - 1]) === repair.expectedLastLineHash;
+    if (boundaryOk) {
+      working = working.slice(0, truncateTo);
+      changed = true;
+      truncated = true;
+    } else {
+      console.log('[RESUME_SANITIZE] Snapshot boundary mismatch — skipping truncation (session file changed externally)');
+    }
+  }
+
+  const rewritten = working.map((line) => {
+    if (!line.trim()) return line;
+    let msg;
+    try { msg = JSON.parse(line); } catch { return line; }
+    const content = msg?.message?.content;
+    if (msg?.type !== 'assistant' || !Array.isArray(content)) return line;
+    const cleaned = stripThinkingBlocks(content);
+    if (cleaned.length === content.length) return line;
+    changed = true;
+    // An empty assistant content array is itself an API error — substitute a
+    // placeholder text block for thinking-only turns (keeps role parity and
+    // the uuid/parentUuid chain intact).
+    msg.message.content = cleaned.length > 0 ? cleaned : [{ type: 'text', text: ' ' }];
+    return JSON.stringify(msg);
+  });
+
+  return { lines: rewritten, changed, truncated };
+}
+
 /**
  * Strip thinking / redacted_thinking / reasoning blocks from a persisted session
  * JSONL **in place**, so an Agent-SDK resume (`options.resume`) does not replay
@@ -93,42 +200,38 @@ function stripThinkingBlocks(content) {
  * a running CLI appends to the file and an in-place rewrite could race it).
  * Best-effort: any failure is logged and swallowed so resume proceeds unchanged.
  *
+ * @param {string} sessionId
+ * @param {string} cwd
+ * @param {{ truncateToLineCount?: number, expectedLastLineHash?: string } | null} [repair]
+ *   Optional failed-turn repair: drop all lines appended after
+ *   `truncateToLineCount` (hash-verified against `expectedLastLineHash`, see
+ *   sanitizeSessionLines) in addition to stripping thinking blocks. Used by the
+ *   encrypted-content retry path to remove the partial failed turn before
+ *   resuming. Unlike the pre-resume call site, this usage is NOT gated on a
+ *   custom base URL: once the API has already rejected the replayed content,
+ *   stripping it is strictly better than a permanently failing session.
  * @returns {boolean} true if the file was rewritten
  */
-export function sanitizeSessionFileForResume(sessionId, cwd) {
+export function sanitizeSessionFileForResume(sessionId, cwd, repair = null) {
   try {
     const sessionFile = resolveSessionFile(sessionId, cwd);
     if (!existsSync(sessionFile)) {
       return false;
     }
 
-    const lines = readFileSync(sessionFile, 'utf8').split('\n');
-    let changed = false;
-    const rewritten = lines.map((line) => {
-      if (!line.trim()) return line;
-      let msg;
-      try { msg = JSON.parse(line); } catch { return line; }
-      const content = msg?.message?.content;
-      if (msg?.type !== 'assistant' || !Array.isArray(content)) return line;
-      const cleaned = stripThinkingBlocks(content);
-      if (cleaned.length === content.length) return line;
-      changed = true;
-      // An empty assistant content array is itself an API error — substitute a
-      // placeholder text block for thinking-only turns (keeps role parity and
-      // the uuid/parentUuid chain intact).
-      msg.message.content = cleaned.length > 0 ? cleaned : [{ type: 'text', text: ' ' }];
-      return JSON.stringify(msg);
-    });
+    const lines = splitLogicalLines(readFileSync(sessionFile, 'utf8'));
+    const { lines: rewritten, changed, truncated } = sanitizeSessionLines(lines, repair);
 
     if (!changed) {
       return false;
     }
     // Atomic rewrite (tmp + rename) so a concurrent reader never sees a
-    // half-written file.
+    // half-written file. Always terminate with a single trailing newline.
     const tmpFile = `${sessionFile}.sanitize-${randomUUID()}.tmp`;
-    writeFileSync(tmpFile, rewritten.join('\n'), 'utf8');
+    writeFileSync(tmpFile, rewritten.length > 0 ? rewritten.join('\n') + '\n' : '', 'utf8');
     renameSync(tmpFile, sessionFile);
-    console.log('[RESUME_SANITIZE] Stripped encrypted thinking/reasoning blocks from', sessionFile);
+    console.log('[RESUME_SANITIZE] Stripped encrypted thinking/reasoning blocks from', sessionFile,
+      truncated ? `(also truncated failed-turn lines to ${repair.truncateToLineCount})` : '');
     return true;
   } catch (e) {
     console.error('[RESUME_SANITIZE_ERROR]', e.message);

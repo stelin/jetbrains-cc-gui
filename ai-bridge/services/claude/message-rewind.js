@@ -53,7 +53,7 @@ export async function rewindFiles(sessionId, userMessageId, cwd = null) {
           permissionMode: 'default',
           enableFileCheckpointing: true,
           maxTurns: 1,
-          env: buildCliEnv(),
+          env: await buildCliEnv(),
           tools: { type: 'preset', preset: 'claude_code' },
           settingSources: ['user', 'project', 'local'],
           additionalDirectories: Array.from(

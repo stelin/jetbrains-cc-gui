@@ -8,6 +8,7 @@ import { loadClaudeSettings, getCliUserAgent } from '../../config/api-config.js'
 import { selectWorkingDirectory } from '../../utils/path-utils.js';
 import { resolveModelFromSettings } from '../../utils/model-utils.js';
 import { loadSessionHistory, persistJsonlMessage } from './session-service.js';
+import { sanitizeMessagesBody } from './sanitizing-proxy.js';
 import { ensureAnthropicSdk, ensureBedrockSdk, truncateErrorContent } from './message-utils.js';
 
 export async function sendMessageWithAnthropicSDK(message, resumeSessionId, cwd, permissionMode, model, apiKey, baseUrl, authType) {
@@ -111,11 +112,17 @@ export async function sendMessageWithAnthropicSDK(message, resumeSessionId, cwd,
 
     console.log('[DEBUG] Calling messages.create() with non-streaming API...');
 
-    const response = await client.messages.create({
-      model: modelId,
-      max_tokens: 8192,
-      messages: messagesForApi
-    });
+    // Defence in depth: this direct-Anthropic path bypasses the CLI child and
+    // therefore the loopback sanitizing proxy. Strip any thinking/reasoning
+    // blocks from the replayed history right before the request so a gateway
+    // that cannot verify their signatures never receives them (loadSessionHistory
+    // already strips them; this guards against future regressions there).
+    const requestBody = { model: modelId, max_tokens: 8192, messages: messagesForApi };
+    if (sanitizeMessagesBody(requestBody)) {
+      console.log('[DEBUG] (AnthropicSDK) stripped thinking blocks from outgoing history');
+    }
+
+    const response = await client.messages.create(requestBody);
 
     console.log('[DEBUG] API response received');
 

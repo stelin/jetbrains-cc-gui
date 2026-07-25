@@ -16,7 +16,7 @@ import { buildIDEContextPrompt } from '../system-prompts.js';
 import { buildQuickFixPrompt } from '../quickfix-prompts.js';
 import { registerActiveQueryResult, removeSession } from './message-service.js';
 import { normalizePermissionMode } from './permission-mode.js';
-import { sanitizeSessionFileForResume } from './session-service.js';
+import { sanitizeSessionFileForResume, captureSessionFileSnapshot, isEncryptedContentVerificationError } from './session-service.js';
 import { truncateString } from './message-output-filter.js';
 import {
   beginRuntimeTurn,
@@ -209,7 +209,7 @@ function buildSystemPromptAppend(params) {
   return buildIDEContextPrompt(openedFiles, agentPrompt);
 }
 
-function buildQueryOptions(workingDirectory, sdkModelName, permissionMode, maxThinkingTokens, streamingEnabled, systemPromptAppend, requestedSessionId, reasoningEffort, windowId, extraSettings) {
+function buildQueryOptions(workingDirectory, sdkModelName, permissionMode, maxThinkingTokens, streamingEnabled, systemPromptAppend, requestedSessionId, reasoningEffort, windowId, extraSettings, cliEnv) {
   // Close over windowId so AskUserQuestion's file-IPC request can be tagged
   // with the originating tab. The Java-side PermissionService uses this to
   // decide whether the tab is currently in supervisor pair mode (no popup)
@@ -223,7 +223,7 @@ function buildQueryOptions(workingDirectory, sdkModelName, permissionMode, maxTh
     model: sdkModelName,
     maxTurns: 100,
     enableFileCheckpointing: true,
-    env: buildCliEnv(),
+    env: cliEnv,
     ...(maxThinkingTokens !== undefined && { maxThinkingTokens }),
     ...(reasoningEffort && { effort: reasoningEffort }),
     ...(extraSettings && { settings: extraSettings }),
@@ -331,7 +331,8 @@ async function buildRequestContext(params, withAttachments) {
   const options = buildQueryOptions(
     workingDirectory, sdkModelName, permissionMode,
     maxThinkingTokens, streamingEnabled, systemPromptAppend, requestedSessionId,
-    normalizedReasoningEffort, windowId, ultracodeSettings
+    normalizedReasoningEffort, windowId, ultracodeSettings,
+    await buildCliEnv()
   );
 
   // Third-party Claude-protocol gateways (GPT-5.x) can only verify the encrypted
@@ -400,6 +401,16 @@ async function executeTurn(runtime, requestContext, turnMeta) {
   if (turnMeta) {
     turnMeta.state = turnState;
   }
+
+  // Snapshot the persisted session file BEFORE this turn appends to it. If the
+  // turn dies on a poisoned-context 400 (unverifiable encrypted thinking), the
+  // repair path in sendInternal drops exactly this turn's appended lines and
+  // retries against the pre-turn history. Null for brand-new sessions (no file
+  // yet) and silently absent on any read failure — repair degrades gracefully.
+  turnState.sessionFileSnapshot = captureSessionFileSnapshot(
+    requestContext.requestedSessionId || runtime.sessionId || null,
+    requestContext.options?.cwd || null
+  );
 
   // Background-task "keep the turn open" state (see helpers above). While any
   // background task (ultracode Workflow / run_in_background) is in flight, an
@@ -474,6 +485,29 @@ async function executeTurn(runtime, requestContext, turnMeta) {
         continue;
       }
 
+      // Error results end the turn with an exception. Classify the poisoned-context
+      // 400 (encrypted thinking replayed to a gateway that can no longer verify it)
+      // BEFORE any forwarding: sendInternal auto-repairs + retries that failure
+      // transparently, so its raw upstream text must NOT be rendered into the chat.
+      // Other error results keep the legacy behaviour (forward, then throw).
+      if (msg?.type === 'result' && msg.is_error) {
+        const errText = [msg.result, msg.message, ...(Array.isArray(msg.errors) ? msg.errors : [])]
+          .filter((part) => typeof part === 'string' && part.length > 0)
+          .join('; ') || 'API request failed';
+        const stderrTail = Array.isArray(runtime.stderrLines)
+          ? runtime.stderrLines.slice(-10).join('\n')
+          : '';
+        const resultError = new Error(errText);
+        if (isEncryptedContentVerificationError(`${errText}\n${stderrTail}`)) {
+          resultError.encryptedContentError = true;
+          throw resultError;
+        }
+        if (shouldOutputMessage(msg, turnState)) {
+          console.log('[MESSAGE]', JSON.stringify(msg));
+        }
+        throw resultError;
+      }
+
       if (shouldOutputMessage(msg, turnState)) {
         console.log('[MESSAGE]', JSON.stringify(msg));
       }
@@ -494,9 +528,7 @@ async function executeTurn(runtime, requestContext, turnMeta) {
       }
 
       if (msg?.type === 'result') {
-        if (msg.is_error) {
-          throw new Error(msg.result || msg.message || 'API request failed');
-        }
+        // Error results were already thrown above; reaching here means success.
         break;
       }
     }
@@ -583,6 +615,40 @@ async function sendInternal(params, withAttachments) {
   } catch (error) {
     // Only clear if this runtime still owns the pointer (not cleared by abort)
     clearActiveTurnRuntimeIf(runtime);
+
+    // Safety-net classification: the 400 can also surface as a thrown iterator
+    // error (query.next()) or a runtime-creation failure rather than a result
+    // message — check the stderr tail as well before deciding repair is moot.
+    if (error && !error.encryptedContentError) {
+      const stderrTail = Array.isArray(runtime?.stderrLines)
+        ? runtime.stderrLines.slice(-10).join('\n')
+        : '';
+      if (isEncryptedContentVerificationError(`${error?.message || error}\n${stderrTail}`)) {
+        error.encryptedContentError = true;
+      }
+    }
+
+    // Poisoned-context self-repair. The API rejected replayed encrypted
+    // thinking (400 "The encrypted content ... could not be verified") — the
+    // live runtime keeps that block in its in-memory context and the persisted
+    // session file carries it too, so an unrepaired session fails EVERY later
+    // send the same way (the runtime was previously kept alive on result
+    // errors, permanently bricking the session). Repair: dispose the poisoned
+    // runtime, strip the unverifiable blocks from the session file (dropping
+    // this turn's partial lines when a pre-turn snapshot exists), then retry
+    // the send once on a fresh runtime.
+    if (error?.encryptedContentError && !safeParams.__encryptedContentRetried) {
+      const resumeSessionId = await repairEncryptedContentFailure({ runtime, requestContext, turnMeta });
+      const retryParams = { ...safeParams, __encryptedContentRetried: true };
+      if (resumeSessionId) {
+        retryParams.sessionId = resumeSessionId;
+      }
+      console.log('[ENCRYPTED_CONTENT_RETRY] retrying send once after session repair (resume='
+        + (resumeSessionId || '(unchanged)') + ')');
+      await sendInternal(retryParams, withAttachments);
+      return;
+    }
+
     if (turnMeta.state?.streamingEnabled && turnMeta.state?.streamStarted && !turnMeta.state?.streamEnded) {
       // NOTE: Do NOT emit accumulatedUsage at stream end, even on error.
       // If an assistant message was received, emitUsageTag already sent the correct usage.
@@ -591,10 +657,55 @@ async function sendInternal(params, withAttachments) {
       turnMeta.state.streamEnded = true;
     }
     emitSendError(runtime, error, requestContext);
-    // Only dispose if not already disposed by abort
-    if (runtime && !runtime.closed && error?.runtimeTerminated) {
+    // Dispose runtimes that can no longer serve future turns: process death
+    // (runtimeTerminated) or a poisoned in-memory context that failed even
+    // after the repair retry above (encryptedContentError). Disposal lets the
+    // next send rebuild from the (repaired) session file.
+    if (runtime && !runtime.closed && (error?.runtimeTerminated || error?.encryptedContentError)) {
       await disposeRuntime(runtime, { removeSession });
     }
+  }
+}
+
+/**
+ * Dispose the runtime whose in-memory context holds the unverifiable encrypted
+ * block and repair the persisted session file so a follow-up send can resume.
+ *
+ * @returns {Promise<string|null>} sessionId to resume on the retry, or null to
+ *   keep the retry's original routing (e.g. when the failure predates any
+ *   persisted session, or the repair itself failed).
+ */
+async function repairEncryptedContentFailure({ runtime, requestContext, turnMeta }) {
+  try {
+    const sessionId = turnMeta?.state?.finalSessionId
+      || runtime?.sessionId
+      || requestContext?.requestedSessionId
+      || null;
+    const cwd = requestContext?.options?.cwd || null;
+
+    // The live runtime replays the unverifiable block from memory on every
+    // later request — it must not serve another send.
+    if (runtime && !runtime.closed) {
+      await disposeRuntime(runtime, { removeSession });
+    }
+    if (!sessionId) {
+      return null;
+    }
+
+    const snapshot = turnMeta?.state?.sessionFileSnapshot || null;
+    // With a pre-turn snapshot, drop exactly this turn's appended lines
+    // (hash-verified against external rewrites) in addition to stripping the
+    // thinking blocks, so the retry replays clean pre-turn history. Without a
+    // snapshot (file did not exist at turn start), sanitize whatever the file
+    // holds now. Deliberately NOT gated on a custom base URL: the API already
+    // rejected this content, so replaying it can only fail again.
+    sanitizeSessionFileForResume(sessionId, cwd, snapshot
+      ? { truncateToLineCount: snapshot.lineCount, expectedLastLineHash: snapshot.lastLineHash }
+      : null);
+    return sessionId;
+  } catch (repairError) {
+    console.error('[ENCRYPTED_CONTENT_REPAIR_ERROR]', repairError?.message || repairError);
+    return null;
   }
 }
 

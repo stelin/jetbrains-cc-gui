@@ -2,6 +2,7 @@ import { AsyncStream } from '../../utils/async-stream.js';
 import { loadClaudeSdk } from '../../utils/sdk-loader.js';
 import { createPreToolUseHook, normalizePermissionMode } from './permission-mode.js';
 import { buildMainAiMcpServer, MAIN_MCP_NAME } from './main-ai-tools.js';
+import { releaseSanitizingProxy } from './sanitizing-proxy.js';
 import {
   beginRuntimeTurn,
   cleanupStaleAnonymousRuntimes as cleanupAnonymousFromRegistry,
@@ -81,6 +82,10 @@ export async function disposeRuntime(runtime, callbacks) {
   } catch (err) {
     console.error('[LIFECYCLE] query.close() failed:', err?.message || err);
   }
+
+  // Release this runtime's ref on the loopback sanitizing proxy (a no-op when
+  // the runtime's CLI was pointed at the gateway directly).
+  releaseSanitizingProxy();
 
   removeRuntime(runtime, callbacks?.removeSession);
   clearActiveTurnRuntimeIf(runtime);

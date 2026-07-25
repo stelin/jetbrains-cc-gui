@@ -100,15 +100,39 @@ export function getCliUserAgent() {
  * (which includes CLAUDE_AGENT_SDK_VERSION set by the SDK itself).
  * By passing our own env, we control exactly what the child process sees.
  *
- * @returns {Object} Environment variables object for options.env
+ * When the configured base URL is a CUSTOM (non-Anthropic) gateway, the CLI is
+ * pointed at a loopback sanitizing proxy instead (see
+ * services/claude/sanitizing-proxy.js): the proxy strips thinking /
+ * redacted_thinking / reasoning blocks from every outgoing /v1/messages
+ * request before forwarding, so a gateway that can no longer verify a replayed
+ * encrypted block (key/instance rotation) never sees it. This covers the
+ * tool-use loop's in-memory context, which no session-file sanitize can reach.
+ * Callers MUST call {@link releaseSanitizingProxy} when the CLI process is
+ * done (the proxy ref-counts clients).
+ *
+ * @returns {Promise<Object>} Environment variables object for options.env
  */
-export function buildCliEnv() {
+export async function buildCliEnv() {
   const env = {
     ...process.env,
     CLAUDE_CODE_ENTRYPOINT: 'cli',
     USER_TYPE: 'external',
   };
   delete env.CLAUDE_AGENT_SDK_VERSION;
+
+  const baseUrl = env.ANTHROPIC_BASE_URL || env.ANTHROPIC_API_URL || '';
+  if (isCustomBaseUrl(baseUrl)) {
+    try {
+      const { ensureSanitizingProxy } = await import('../services/claude/sanitizing-proxy.js');
+      const proxyUrl = await ensureSanitizingProxy(baseUrl);
+      env.ANTHROPIC_BASE_URL = proxyUrl;
+      delete env.ANTHROPIC_API_URL;
+    } catch (proxyError) {
+      // Fail open: proxy unavailable must never block a send — fall back to
+      // the direct gateway URL (behaves exactly as before the proxy existed).
+      console.error('[SANITIZE_PROXY] failed to start, using direct gateway URL:', proxyError?.message || proxyError);
+    }
+  }
   return env;
 }
 

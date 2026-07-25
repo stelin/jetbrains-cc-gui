@@ -29,7 +29,7 @@ import {
 } from './message-utils.js';
 import { createPreToolUseHook } from './permission-mode.js';
 import { setActiveQueryResult } from './message-session-registry.js';
-import { sanitizeSessionFileForResume } from './session-service.js';
+import { sanitizeSessionFileForResume, isEncryptedContentVerificationError } from './session-service.js';
 import { createStreamDeltaTracker } from './stream-delta-normalizer.js';
 
 // ========== Internal helpers for deduplication ==========
@@ -79,7 +79,7 @@ function resolveThinkingConfig(settings) {
 /**
  * Build query options object shared by both send functions.
  */
-function buildQueryOptions({ workingDirectory, permissionMode, sdkModelName, maxThinkingTokens, streamingEnabled, systemPromptAppend, preToolUseHook, sdkStderrLines, windowId }) {
+function buildQueryOptions({ workingDirectory, permissionMode, sdkModelName, maxThinkingTokens, streamingEnabled, systemPromptAppend, preToolUseHook, sdkStderrLines, windowId, cliEnv }) {
   // Mirror persistent-query-service: close over windowId so the AskUserQuestion
   // file-IPC request carries the originating tab id, letting Java decide
   // pair-mode interception per-tab. Null falls back to project-wide check.
@@ -91,7 +91,7 @@ function buildQueryOptions({ workingDirectory, permissionMode, sdkModelName, max
     model: sdkModelName,
     maxTurns: 100,
     enableFileCheckpointing: true,
-    env: buildCliEnv(),
+    env: cliEnv,
     ...(maxThinkingTokens !== undefined && { maxThinkingTokens }),
     ...(streamingEnabled && { includePartialMessages: true }),
     additionalDirectories: Array.from(
@@ -299,7 +299,10 @@ function processStreamMessage(msg, state, logPrefix) {
   // Error result detection
   if (msg.type === 'result' && msg.is_error) {
     console.error(`[DEBUG]${logPrefix ? ` ${logPrefix}` : ''} Received error result:`, JSON.stringify(msg));
-    throw new Error(msg.result || msg.message || 'API request failed');
+    const errText = [msg.result, msg.message, ...(Array.isArray(msg.errors) ? msg.errors : [])]
+      .filter((part) => typeof part === 'string' && part.length > 0)
+      .join('; ') || 'API request failed';
+    throw new Error(errText);
   }
 }
 
@@ -360,7 +363,7 @@ async function executeWithRetry({ createQueryResult, streamingEnabled, resumeSes
       try {
         result = createQueryResult();
       } catch (queryError) {
-        if (shouldRetry(queryError, retryAttempt, state.messageCount)) {
+        if (await shouldRetryOrRepair(queryError, retryAttempt, state, resumeSessionId, workingDirectory)) {
           ({ retryAttempt, lastRetryError } = await performRetry(queryError, retryAttempt, state, resumeSessionId, workingDirectory, streamingEnabled, outerStreamState, lp));
           continue;
         }
@@ -376,7 +379,7 @@ async function executeWithRetry({ createQueryResult, streamingEnabled, resumeSes
         }
       } catch (loopError) {
         logLoopError(loopError, lp);
-        if (shouldRetry(loopError, retryAttempt, state.messageCount)) {
+        if (await shouldRetryOrRepair(loopError, retryAttempt, state, resumeSessionId, workingDirectory)) {
           ({ retryAttempt, lastRetryError } = await performRetry(loopError, retryAttempt, state, resumeSessionId, workingDirectory, streamingEnabled, outerStreamState, lp));
           continue;
         }
@@ -410,6 +413,25 @@ function shouldRetry(error, retryAttempt, messageCount) {
   return isRetryableError(error) &&
     retryAttempt < AUTO_RETRY_CONFIG.maxRetries &&
     messageCount <= AUTO_RETRY_CONFIG.maxMessagesForRetry;
+}
+
+/**
+ * Retry gate with poisoned-context repair. On the "encrypted content could not
+ * be verified" 400, the persisted session file carries thinking blocks the
+ * gateway can no longer decrypt — strip them so the retry's resume does not
+ * replay them (unlike the pre-resume sanitize, this repair is NOT gated on a
+ * custom base URL: the API already rejected the content). Repaired once per
+ * send; subsequent attempts fall back to the plain retry gate.
+ */
+async function shouldRetryOrRepair(error, retryAttempt, state, resumeSessionId, workingDirectory) {
+  if (retryAttempt === 0 && isEncryptedContentVerificationError(error?.message || String(error))) {
+    if (resumeSessionId && resumeSessionId !== '') {
+      console.log('[ENCRYPTED_CONTENT_RETRY] Stripping unverifiable thinking blocks before retry (session=' + resumeSessionId + ')');
+      sanitizeSessionFileForResume(resumeSessionId, workingDirectory);
+    }
+    return true;
+  }
+  return shouldRetry(error, retryAttempt, state.messageCount);
 }
 
 /** Execute the retry delay + state reset and return updated counters. */
@@ -513,7 +535,7 @@ export async function sendMessage(message, resumeSessionId = null, cwd = null, p
     console.log('[DEBUG] Config:', { effectivePermissionMode, alwaysThinkingEnabled, maxThinkingTokens, streamingEnabled, reasoningEffort: normalizedReasoningEffort, ultracode: !!ultracodeSettings, disableThinking });
 
     const preToolUseHook = createPreToolUseHook(effectivePermissionMode, workingDirectory, null, windowId);
-    const options = buildQueryOptions({ workingDirectory, permissionMode: effectivePermissionMode, sdkModelName, maxThinkingTokens, streamingEnabled, systemPromptAppend, preToolUseHook, sdkStderrLines, windowId });
+    const options = buildQueryOptions({ workingDirectory, permissionMode: effectivePermissionMode, sdkModelName, maxThinkingTokens, streamingEnabled, systemPromptAppend, preToolUseHook, sdkStderrLines, windowId, cliEnv: await buildCliEnv() });
 
     if (normalizedReasoningEffort) {
       options.effort = normalizedReasoningEffort;
@@ -593,7 +615,7 @@ export async function sendMessageWithAttachments(message, resumeSessionId = null
     streamingEnabled = streamingParam != null ? streamingParam : (settings?.streamingEnabled ?? false);
     console.log('[DEBUG] (withAttachments) Config:', { normalizedPermissionMode, alwaysThinkingEnabled, maxThinkingTokens, streamingEnabled, reasoningEffort: normalizedReasoningEffort, ultracode: !!ultracodeSettings });
 
-    const options = buildQueryOptions({ workingDirectory, permissionMode: normalizedPermissionMode, sdkModelName, maxThinkingTokens, streamingEnabled, systemPromptAppend, preToolUseHook, sdkStderrLines, windowId: stdinData?.windowId || null });
+    const options = buildQueryOptions({ workingDirectory, permissionMode: normalizedPermissionMode, sdkModelName, maxThinkingTokens, streamingEnabled, systemPromptAppend, preToolUseHook, sdkStderrLines, windowId: stdinData?.windowId || null, cliEnv: await buildCliEnv() });
 
     if (normalizedReasoningEffort) {
       options.effort = normalizedReasoningEffort;

@@ -9,6 +9,7 @@ import {
   getMcpServerStatus as claudeGetMcpServerStatus,
   getMcpServerTools as claudeGetMcpServerTools
 } from '../services/claude/message-service.js';
+import { releaseSanitizingProxy } from '../services/claude/sanitizing-proxy.js';
 import {
   resetRuntimePersistent as claudeResetRuntimePersistent
 } from '../services/claude/persistent-query-service.js';
@@ -24,6 +25,19 @@ import {
  * @param {object|null} stdinData
  */
 export async function handleClaudeCommand(command, args, stdinData) {
+  // One-shot commands (send/rewind via this channel) spawn a CLI that lives
+  // and dies within this handler; release the sanitizing-proxy ref it took in
+  // buildCliEnv() once done. The persistent path manages its own ref via
+  // runtime dispose and must NOT pass through here.
+  const oneShot = command === 'send' || command === 'sendWithAttachments' || command === 'rewindFiles';
+  try {
+    await dispatchClaudeCommand(command, args, stdinData);
+  } finally {
+    if (oneShot) releaseSanitizingProxy();
+  }
+}
+
+async function dispatchClaudeCommand(command, args, stdinData) {
   switch (command) {
     case 'send': {
       if (stdinData && stdinData.message !== undefined) {
